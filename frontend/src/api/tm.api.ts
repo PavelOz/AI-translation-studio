@@ -122,8 +122,9 @@ export const tmApi = {
     return response.data;
   },
 
-  getEmbeddingStats: async () => {
-    const response = await apiClient.get('/tm/embedding-stats');
+  getEmbeddingStats: async (projectId?: string) => {
+    const params = projectId ? { projectId } : {};
+    const response = await apiClient.get('/tm/embedding-stats', { params });
     return response.data;
   },
 };

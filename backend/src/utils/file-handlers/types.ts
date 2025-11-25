@@ -1,6 +1,9 @@
+export type SegmentType = 'paragraph' | 'table-cell' | 'header' | 'footer' | 'cell' | 'sheet' | 'unit';
+
 export type ParsedSegment = {
   index: number;
   sourceText: string;
+  type: SegmentType; // Type of segment: paragraph, table cell, etc.
   targetMt?: string;
   targetFinal?: string;
   tags?: string[]; // For XLIFF: preserved tags like <g>, <x>, <ph>

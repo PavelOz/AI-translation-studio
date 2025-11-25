@@ -203,8 +203,15 @@ const SegmentEditor = memo(function SegmentEditor({
       }`}
     >
       <div className="flex justify-between items-center mb-3 segment-header">
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-2 flex-wrap gap-1">
           <span className="text-sm font-medium text-gray-500">Segment #{segment.segmentIndex}</span>
+          <span className="px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-700 border border-gray-200">
+            {segment.segmentType === 'table-cell' ? '📊 Table Cell' : 
+             segment.segmentType === 'cell' ? '📋 Cell' :
+             segment.segmentType === 'unit' ? '📄 Unit' :
+             segment.segmentType === 'paragraph' ? '📝 Paragraph' :
+             segment.segmentType || '📝 Paragraph'}
+          </span>
           <span className={`px-2 py-1 rounded text-xs font-medium border ${getStatusColor()}`}>
             {displayStatus}
           </span>

@@ -5,6 +5,7 @@ import type { DocumentFileType } from '@prisma/client';
 import { resolveHandler } from '../utils/file-handlers';
 import { ApiError } from '../utils/apiError';
 import { env } from '../utils/env';
+import { logger } from '../utils/logger';
 import { createDocument, getDocument } from './document.service';
 import { bulkUpsertSegments, getDocumentSegments } from './segment.service';
 
@@ -27,7 +28,14 @@ export const importDocumentFile = async (
     throw ApiError.badRequest('Unsupported file format');
   }
 
-  const parsed = await handler.parse(file.buffer);
+  let parsed;
+  try {
+    parsed = await handler.parse(file.buffer);
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    logger.error({ error: errorMessage, filename: file.originalname }, 'Failed to parse document file');
+    throw ApiError.badRequest(`Failed to parse document: ${errorMessage}`);
+  }
   
   if (!parsed.segments || parsed.segments.length === 0) {
     throw ApiError.badRequest('File does not contain any segments to translate');
@@ -76,6 +84,7 @@ export const importDocumentFile = async (
         segmentIndex: segment.index,
         sourceText: segment.sourceText,
         targetMt: segment.targetMt ?? null,
+        segmentType: segment.type || 'paragraph', // Save segment type
       })),
     );
   } catch (error) {

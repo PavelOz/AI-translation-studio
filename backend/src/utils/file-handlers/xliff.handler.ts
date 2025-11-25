@@ -168,6 +168,7 @@ export class XliffHandler implements FileHandler {
     const segments = units.map((unit, index) => ({
       index,
       sourceText: unit.source,
+      type: 'unit' as const,
       targetMt: unit.target,
       tags: unit.sourceTags?.map((tag) => JSON.stringify(tag)),
       metadata: {

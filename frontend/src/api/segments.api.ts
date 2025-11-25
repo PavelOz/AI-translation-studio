@@ -11,6 +11,7 @@ export type Segment = {
   targetMt?: string;
   targetFinal?: string;
   status: SegmentStatus;
+  segmentType?: string; // Type: paragraph, table-cell, cell, unit, etc.
   fuzzyScore?: number;
   bestTmEntryId?: string;
   confirmedById?: string;

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import Layout from '../components/Layout';
 import { tmApi } from '../api/tm.api';
@@ -7,6 +7,7 @@ import TMEntryModal from '../components/TMEntryModal';
 import { projectsApi } from '../api/projects.api';
 import type { TranslationMemoryEntry, TmSearchResult } from '../api/tm.api';
 import toast from 'react-hot-toast';
+import apiClient from '../api/client';
 
 export default function TranslationMemoryPage() {
   const queryClient = useQueryClient();
@@ -26,6 +27,11 @@ export default function TranslationMemoryPage() {
   const [replaceMode, setReplaceMode] = useState<'source' | 'target' | 'both'>('target');
   const [matchingEntries, setMatchingEntries] = useState<TranslationMemoryEntry[]>([]);
   const [isReplacing, setIsReplacing] = useState(false);
+  
+  // Embedding generation state
+  const [showEmbeddingGenerator, setShowEmbeddingGenerator] = useState(false);
+  const [embeddingProgressId, setEmbeddingProgressId] = useState<string | null>(null);
+  const [batchSize, setBatchSize] = useState(50);
 
   // Fetch projects for dropdown
   const { data: projects } = useQuery({
@@ -50,6 +56,27 @@ export default function TranslationMemoryPage() {
   const total = (tmData as any)?.total || 0;
   const totalPages = (tmData as any)?.totalPages || 1;
 
+  // Fetch embedding statistics
+  const { data: embeddingStats, refetch: refetchEmbeddingStats } = useQuery({
+    queryKey: ['embedding-stats', projectFilter],
+    queryFn: () => tmApi.getEmbeddingStats(projectFilter || undefined),
+    refetchInterval: embeddingProgressId ? 2000 : false, // Poll every 2 seconds when generating
+  });
+
+  // Fetch embedding generation progress
+  const { data: embeddingProgress } = useQuery({
+    queryKey: ['embedding-progress', embeddingProgressId],
+    queryFn: () => embeddingProgressId ? tmApi.getEmbeddingProgress(embeddingProgressId) : null,
+    enabled: !!embeddingProgressId,
+    refetchInterval: (data) => {
+      // Stop polling if completed, cancelled, or error
+      if (data?.status === 'completed' || data?.status === 'cancelled' || data?.status === 'error') {
+        return false;
+      }
+      return 1000; // Poll every second while running
+    },
+  });
+
   // Delete mutation
   const deleteMutation = useMutation({
     mutationFn: tmApi.delete,
@@ -59,6 +86,33 @@ export default function TranslationMemoryPage() {
     },
     onError: (error: any) => {
       toast.error(error.response?.data?.message || 'Failed to delete translation memory entry');
+    },
+  });
+
+  // Embedding generation mutations
+  const generateEmbeddingsMutation = useMutation({
+    mutationFn: (params: { projectId?: string; batchSize?: number; limit?: number }) =>
+      tmApi.generateEmbeddings(params.projectId, params.batchSize, params.limit),
+    onSuccess: (data) => {
+      setEmbeddingProgressId(data.progressId);
+      toast.success('Embedding generation started');
+      refetchEmbeddingStats();
+    },
+    onError: (error: any) => {
+      toast.error(error.response?.data?.message || 'Failed to start embedding generation');
+    },
+  });
+
+  const cancelEmbeddingMutation = useMutation({
+    mutationFn: (progressId: string) =>
+      apiClient.post(`/tm/embedding-progress/${progressId}/cancel`),
+    onSuccess: () => {
+      toast.success('Embedding generation cancelled');
+      setEmbeddingProgressId(null);
+      refetchEmbeddingStats();
+    },
+    onError: (error: any) => {
+      toast.error(error.response?.data?.message || 'Failed to cancel embedding generation');
     },
   });
 
@@ -221,12 +275,31 @@ export default function TranslationMemoryPage() {
     ? searchResults
     : filteredEntries;
 
+  // Update embedding progress when it completes
+  useEffect(() => {
+    if (embeddingProgress?.status === 'completed' || embeddingProgress?.status === 'error' || embeddingProgress?.status === 'cancelled') {
+      // Refresh stats and TM entries when generation completes
+      refetchEmbeddingStats();
+      queryClient.invalidateQueries({ queryKey: ['tm'] });
+      
+      if (embeddingProgress.status === 'completed') {
+        toast.success(`Embedding generation completed: ${embeddingProgress.succeeded} succeeded, ${embeddingProgress.failed} failed`);
+      }
+    }
+  }, [embeddingProgress?.status, refetchEmbeddingStats, queryClient]);
+
   return (
     <Layout>
       <div className="space-y-6">
         <div className="flex justify-between items-center">
           <h1 className="text-3xl font-bold text-gray-900">Translation Memory</h1>
           <div className="flex gap-2">
+            <button
+              onClick={() => setShowEmbeddingGenerator(!showEmbeddingGenerator)}
+              className="btn btn-secondary"
+            >
+              {showEmbeddingGenerator ? 'Hide' : 'Show'} Embedding Generator
+            </button>
             <button
               onClick={() => setShowFindReplace(!showFindReplace)}
               className="btn btn-secondary"
@@ -241,6 +314,172 @@ export default function TranslationMemoryPage() {
             </button>
           </div>
         </div>
+
+        {/* Embedding Generator Section */}
+        {showEmbeddingGenerator && (
+          <div className="card bg-blue-50 border-blue-200">
+            <h2 className="text-lg font-semibold mb-4 text-gray-900">Vector Embeddings Generator</h2>
+            <p className="text-sm text-gray-600 mb-4">
+              Generate vector embeddings for Translation Memory entries to enable semantic search (RAG).
+              Embeddings are required for vector-based similarity search.
+            </p>
+
+            {/* Statistics */}
+            {embeddingStats && (
+              <div className="grid grid-cols-4 gap-4 mb-4">
+                <div className="bg-white p-3 rounded border">
+                  <div className="text-sm text-gray-600">Total Entries</div>
+                  <div className="text-2xl font-bold text-gray-900">{embeddingStats.total}</div>
+                </div>
+                <div className="bg-white p-3 rounded border">
+                  <div className="text-sm text-gray-600">With Embeddings</div>
+                  <div className="text-2xl font-bold text-green-600">{embeddingStats.withEmbedding}</div>
+                </div>
+                <div className="bg-white p-3 rounded border">
+                  <div className="text-sm text-gray-600">Without Embeddings</div>
+                  <div className="text-2xl font-bold text-orange-600">{embeddingStats.withoutEmbedding}</div>
+                </div>
+                <div className="bg-white p-3 rounded border">
+                  <div className="text-sm text-gray-600">Coverage</div>
+                  <div className="text-2xl font-bold text-blue-600">{embeddingStats.coverage.toFixed(1)}%</div>
+                </div>
+              </div>
+            )}
+
+            {/* Progress Display */}
+            {embeddingProgress && embeddingProgress.status === 'running' && (
+              <div className="mb-4 bg-white p-4 rounded border">
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-sm font-medium text-gray-700">Generation Progress</span>
+                  <span className="text-sm text-gray-600">
+                    {embeddingProgress.processed} / {embeddingProgress.total} entries
+                  </span>
+                </div>
+                <div className="w-full bg-gray-200 rounded-full h-3 mb-2">
+                  <div
+                    className="bg-blue-600 h-3 rounded-full transition-all duration-500"
+                    style={{
+                      width: `${embeddingProgress.total > 0 ? (embeddingProgress.processed / embeddingProgress.total) * 100 : 0}%`,
+                      minWidth: embeddingProgress.total > 0 ? '2px' : '0',
+                    }}
+                  />
+                </div>
+                <div className="flex justify-between text-xs text-gray-600">
+                  <span>✓ Succeeded: {embeddingProgress.succeeded}</span>
+                  <span>✗ Failed: {embeddingProgress.failed}</span>
+                  {embeddingProgress.currentEntry && (
+                    <span className="text-gray-500">
+                      Processing: {embeddingProgress.currentEntry.sourceText}
+                    </span>
+                  )}
+                </div>
+                <button
+                  onClick={() => {
+                    if (embeddingProgressId) {
+                      cancelEmbeddingMutation.mutate(embeddingProgressId);
+                    }
+                  }}
+                  className="mt-2 btn btn-secondary btn-sm"
+                  disabled={cancelEmbeddingMutation.isLoading}
+                >
+                  {cancelEmbeddingMutation.isLoading ? 'Cancelling...' : 'Cancel Generation'}
+                </button>
+              </div>
+            )}
+
+            {/* Completed/Error Status */}
+            {embeddingProgress && (embeddingProgress.status === 'completed' || embeddingProgress.status === 'error' || embeddingProgress.status === 'cancelled') && (
+              <div className={`mb-4 p-4 rounded border ${
+                embeddingProgress.status === 'completed' ? 'bg-green-50 border-green-200' :
+                embeddingProgress.status === 'error' ? 'bg-red-50 border-red-200' :
+                'bg-yellow-50 border-yellow-200'
+              }`}>
+                <div className="font-medium mb-2">
+                  {embeddingProgress.status === 'completed' && '✓ Generation Completed'}
+                  {embeddingProgress.status === 'error' && '✗ Generation Failed'}
+                  {embeddingProgress.status === 'cancelled' && '⚠ Generation Cancelled'}
+                </div>
+                <div className="text-sm text-gray-600">
+                  Processed: {embeddingProgress.processed} | 
+                  Succeeded: {embeddingProgress.succeeded} | 
+                  Failed: {embeddingProgress.failed}
+                </div>
+                {embeddingProgress.error && (
+                  <div className="text-sm text-red-600 mt-2">Error: {embeddingProgress.error}</div>
+                )}
+                <button
+                  onClick={() => {
+                    setEmbeddingProgressId(null);
+                    refetchEmbeddingStats();
+                  }}
+                  className="mt-2 btn btn-secondary btn-sm"
+                >
+                  Clear Status
+                </button>
+              </div>
+            )}
+
+            {/* Generation Controls */}
+            {(!embeddingProgress || embeddingProgress.status !== 'running') && (
+              <div className="space-y-4">
+                <div className="flex gap-4 items-end">
+                  <div className="flex-1">
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Batch Size (entries per batch)
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="200"
+                      value={batchSize}
+                      onChange={(e) => setBatchSize(parseInt(e.target.value) || 50)}
+                      className="input w-full"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Recommended: 50-100. Larger batches are faster but may hit API rate limits.
+                    </p>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Project Filter
+                    </label>
+                    <select
+                      value={projectFilter}
+                      onChange={(e) => setProjectFilter(e.target.value)}
+                      className="input"
+                    >
+                      <option value="">All Projects</option>
+                      {projects?.map((project) => (
+                        <option key={project.id} value={project.id}>
+                          {project.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <button
+                  onClick={() => {
+                    generateEmbeddingsMutation.mutate({
+                      projectId: projectFilter || undefined,
+                      batchSize,
+                    });
+                  }}
+                  disabled={generateEmbeddingsMutation.isLoading || (embeddingStats?.withoutEmbedding ?? 0) === 0}
+                  className="btn btn-primary"
+                >
+                  {generateEmbeddingsMutation.isLoading
+                    ? 'Starting...'
+                    : `Generate Embeddings for ${embeddingStats?.withoutEmbedding ?? 0} Entries`}
+                </button>
+                {(embeddingStats?.withoutEmbedding ?? 0) === 0 && (
+                  <p className="text-sm text-green-600 mt-2">
+                    ✓ All entries already have embeddings!
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="card">
           <h2 className="text-lg font-semibold mb-4">Filters & Search</h2>
