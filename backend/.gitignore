@@ -1,0 +1,23 @@
+# Environment variables - CRITICAL: Never commit secrets!
+.env
+.env.local
+.env.*.local
+
+# Build
+dist/
+build/
+
+# Logs
+*.log
+logs/
+
+# Storage
+storage/
+uploads/
+
+# Node
+node_modules/
+npm-debug.log*
+
+
+

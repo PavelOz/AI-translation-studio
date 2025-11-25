@@ -1,0 +1,306 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  PROJECT_MANAGER
+  LINGUIST
+}
+
+enum ProjectStatus {
+  PLANNING
+  IN_PROGRESS
+  ON_HOLD
+  COMPLETED
+}
+
+enum DocumentStatus {
+  NEW
+  IN_PROGRESS
+  COMPLETED
+}
+
+enum SegmentStatus {
+  NEW
+  MT
+  EDITED
+  CONFIRMED
+}
+
+enum GlossaryStatus {
+  PREFERRED
+  DEPRECATED
+}
+
+enum ReportType {
+  PROGRESS
+  QUALITY
+}
+
+enum AIRequestType {
+  TRANSLATION
+  QA
+  SUMMARY
+}
+
+enum AIRequestStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+model User {
+  id           String           @id @default(uuid())
+  email        String           @unique
+  passwordHash String
+  name         String
+  role         UserRole
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  tmEntries    TranslationMemoryEntry[]
+  tmFiles      TranslationMemoryFile[]
+  projectRoles ProjectMember[]
+}
+
+model Project {
+  id           String          @id @default(uuid())
+  name         String
+  description  String?
+  clientName   String?
+  domain       String?
+  sourceLocale String
+  sourceLang   String?
+  targetLocales String[]
+  targetLang   String?
+  status       ProjectStatus   @default(PLANNING)
+  dueDate      DateTime?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+  documents    Document[]
+  members      ProjectMember[]
+  glossary     GlossaryEntry[]
+  reports      Report[]
+  tmEntries    TranslationMemoryEntry[]
+  tmFiles      TranslationMemoryFile[]
+  aiSettings   ProjectAISetting?
+  guidelines   ProjectGuideline?
+  chatMessages ChatMessage[]
+}
+
+model ProjectMember {
+  id        String  @id @default(uuid())
+  project   Project @relation(fields: [projectId], references: [id])
+  projectId String
+  user      User    @relation(fields: [userId], references: [id])
+  userId    String
+  role      UserRole
+
+  @@unique([projectId, userId])
+}
+
+enum DocumentFileType {
+  DOCX
+  XLIFF
+  XLSX
+}
+
+model Document {
+  id            String          @id @default(uuid())
+  name          String
+  filename      String?
+  project       Project         @relation(fields: [projectId], references: [id])
+  projectId     String
+  status        DocumentStatus  @default(NEW)
+  fileType      DocumentFileType?
+  sourceLocale  String
+  targetLocale  String
+  storagePath   String
+  wordCount     Int             @default(0)
+  totalSegments Int             @default(0)
+  totalWords    Int             @default(0)
+  version       Int             @default(1)
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+  segments      Segment[]
+  aiRequests    AIRequest[]
+  chatMessages  ChatMessage[]
+}
+
+model Segment {
+  id            String         @id @default(uuid())
+  document      Document       @relation(fields: [documentId], references: [id])
+  documentId    String
+  segmentIndex  Int
+  sourceText    String
+  targetMt      String?
+  targetFinal   String?
+  status        SegmentStatus @default(NEW)
+  fuzzyScore    Int?
+  bestTmEntryId String?
+  confirmedById String?
+  confirmedAt   DateTime?
+  timeSpentSeconds Int?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  qualityMetric QualityMetric?
+  chatMessages   ChatMessage[]
+  
+  // Optional vector embedding for document-level semantic search (RAG)
+  sourceEmbedding    Unsupported("vector(1536)")?  // pgvector type
+  embeddingModel     String?                        // Track which model was used
+  embeddingUpdatedAt DateTime?                      // When embedding was generated
+
+  @@unique([documentId, segmentIndex], name: "documentId_segmentIndex")
+}
+
+model TranslationMemoryFile {
+  id           String   @id @default(uuid())
+  name         String
+  filename     String
+  storagePath  String?
+  externalUrl  String?
+  project      Project? @relation(fields: [projectId], references: [id])
+  projectId    String?
+  clientName   String?
+  domain       String?
+  entryCount   Int      @default(0)
+  createdBy    User     @relation(fields: [createdById], references: [id])
+  createdById  String
+  lastImportedAt DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  entries      TranslationMemoryEntry[]
+}
+
+model TranslationMemoryEntry {
+  id               String    @id @default(uuid())
+  project          Project?  @relation(fields: [projectId], references: [id])
+  projectId        String?
+  tmxFile          TranslationMemoryFile? @relation(fields: [tmxFileId], references: [id])
+  tmxFileId        String?
+  createdBy        User      @relation(fields: [createdById], references: [id])
+  createdById      String
+  sourceLocale     String
+  targetLocale     String
+  sourceText       String
+  targetText       String
+  clientName       String?
+  domain           String?
+  matchRate        Float?
+  usageCount       Int       @default(0)
+  createdAt        DateTime  @default(now())
+  
+  // Vector embedding fields for semantic search (RAG)
+  sourceEmbedding  Unsupported("vector(1536)")?  // pgvector type - 1536 dimensions for text-embedding-3-small
+  embeddingModel   String?                        // Track which model was used (e.g., "text-embedding-3-small")
+  embeddingVersion String?                        // Track model version
+  embeddingUpdatedAt DateTime?                    // When embedding was generated/updated
+
+  @@index([projectId, sourceLocale, targetLocale])
+  @@index([sourceLocale, targetLocale, usageCount])
+  @@index([projectId, usageCount])
+  // Note: Vector index will be created via raw SQL migration (Prisma doesn't support pgvector indexes directly)
+}
+
+model GlossaryEntry {
+  id           String   @id @default(cuid())
+  sourceTerm   String
+  targetTerm   String
+  sourceLocale String
+  targetLocale String
+  direction    String
+  client       String?
+  domain       String?
+  isForbidden  Boolean  @default(false)
+  notes        String?
+
+  projectId String?
+  project   Project? @relation(fields: [projectId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model AIRequest {
+  id          String          @id @default(uuid())
+  document    Document        @relation(fields: [documentId], references: [id])
+  documentId  String
+  type        AIRequestType
+  status      AIRequestStatus @default(QUEUED)
+  payload     Json
+  result      Json?
+  createdAt   DateTime        @default(now())
+  completedAt DateTime?
+}
+
+model Report {
+  id        String     @id @default(uuid())
+  project   Project    @relation(fields: [projectId], references: [id])
+  projectId String
+  type      ReportType
+  payload   Json
+  createdAt DateTime   @default(now())
+}
+
+model QualityMetric {
+  id                 String   @id @default(uuid())
+  segment            Segment  @relation(fields: [segmentId], references: [id])
+  segmentId          String   @unique
+  mtWordCount        Int      @default(0)
+  finalWordCount     Int      @default(0)
+  editDistanceChars  Int      @default(0)
+  termErrors         Int      @default(0)
+  formatErrors       Int      @default(0)
+  consistencyErrors  Int      @default(0)
+  timeSpentSeconds   Int      @default(0)
+  createdAt          DateTime @default(now())
+}
+
+model ProjectAISetting {
+  id         String   @id @default(uuid())
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId  String   @unique
+  provider   String
+  model      String
+  temperature Float?
+  maxTokens  Int?
+  config     Json?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model ProjectGuideline {
+  id        String   @id @default(uuid())
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId String   @unique
+  rules     Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ChatMessage {
+  id          String    @id @default(uuid())
+  project     Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId   String
+  document    Document? @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  documentId  String?
+  segment     Segment?  @relation(fields: [segmentId], references: [id], onDelete: Cascade)
+  segmentId   String?
+  role        String    // 'user' or 'assistant'
+  content     String
+  metadata    Json?     // Store context like extracted rules, translation preferences, etc.
+  createdAt   DateTime  @default(now())
+  
+  @@index([projectId])
+  @@index([documentId])
+  @@index([segmentId])
+  @@index([createdAt])
+}
+
