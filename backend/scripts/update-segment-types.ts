@@ -23,3 +23,5 @@ async function updateSegmentTypes() {
 
 updateSegmentTypes().catch(console.error);
 
+
+

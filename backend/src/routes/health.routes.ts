@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { asyncHandler } from '../utils/asyncHandler';
 import { prisma } from '../db/prisma';
 import { logger } from '../utils/logger';
+import { DocxHandler } from '../utils/file-handlers/docx.handler';
 
 export const healthRoutes = Router();
 
@@ -27,6 +28,37 @@ healthRoutes.get(
         status: 'error',
         database: 'disconnected',
         error: error.message || 'Database connection failed',
+        timestamp: new Date().toISOString(),
+      });
+    }
+  }),
+);
+
+/**
+ * System status endpoint that includes LibreOffice status
+ */
+healthRoutes.get(
+  '/status',
+  asyncHandler(async (_req, res) => {
+    try {
+      // Check database connection
+      await prisma.$queryRaw`SELECT 1`;
+      
+      // Check LibreOffice status
+      const docxHandler = new DocxHandler();
+      const libreOfficeStatus = await docxHandler.getLibreOfficeStatus();
+      
+      res.json({
+        status: 'ok',
+        database: 'connected',
+        libreOffice: libreOfficeStatus,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error: any) {
+      logger.error(error, 'Status check failed');
+      res.status(503).json({
+        status: 'error',
+        error: error.message || 'Status check failed',
         timestamp: new Date().toISOString(),
       });
     }

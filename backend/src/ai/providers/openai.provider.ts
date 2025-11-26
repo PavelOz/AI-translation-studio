@@ -32,7 +32,7 @@ export class OpenAIProvider extends BaseProvider {
           messages: [
             { 
               role: 'system', 
-              content: 'You are a professional technical/legal translator. Follow ALL instructions in the user prompt carefully, including translation direction, glossary terms, and formatting requirements. Always translate to the target language specified in the prompt.' 
+              content: 'You are a professional technical/legal translator specializing in natural, native-sounding translations. Follow ALL instructions in the user prompt carefully, including translation direction, glossary terms, formatting requirements, and natural language quality guidelines. Always translate to the target language specified in the prompt, ensuring the translation reads as if originally written by a native speaker, not translated.' 
             },
             { role: 'user', content: request.prompt },
           ],

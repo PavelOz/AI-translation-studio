@@ -3,6 +3,7 @@ import { logger } from '../utils/logger';
 import { getProvider } from './providers/registry';
 import { env } from '../utils/env';
 import { getLanguageName } from '../utils/languages';
+import { getAddressFormattingRule, hasAddressFormattingRule } from './translationRules';
 import type { 
   TranslateSegmentsOptions, 
   OrchestratorGlossaryEntry, 
@@ -106,6 +107,25 @@ export class AIOrchestrator {
     const targetLangCode = options.targetLocale ?? project.targetLang ?? 'en';
     const sourceLang = getLanguageName(sourceLangCode);
     const targetLang = getLanguageName(targetLangCode);
+    
+    // Detect if target is UK English for natural language instructions
+    const isUKEnglish = targetLangCode.toLowerCase() === 'en-gb' || targetLangCode.toLowerCase() === 'en_gb';
+    const isUSEnglish = targetLangCode.toLowerCase() === 'en-us' || targetLangCode.toLowerCase() === 'en_us';
+    const isEnglish = targetLangCode.toLowerCase().startsWith('en');
+
+    // Check if address formatting rules exist for this language pair
+    const hasAddressRules = hasAddressFormattingRule(sourceLangCode, targetLangCode);
+    
+    // Build natural language quality instructions
+    const naturalLanguageInstructions = this.buildNaturalLanguageInstructions(
+      isUKEnglish,
+      isUSEnglish,
+      isEnglish,
+      targetLangCode,
+      hasAddressRules,
+      sourceLangCode,
+      targetLangCode
+    );
 
     return [
       'You are a professional technical/legal translator.',
@@ -122,6 +142,8 @@ export class AIOrchestrator {
       `  - ALL output translations MUST be in ${targetLang}`,
       '',
       `TRANSLATION DIRECTION: ${sourceLang} → ${targetLang}`,
+      '',
+      naturalLanguageInstructions,
       '',
       `CRITICAL RULES (MUST FOLLOW):`,
       `1. Input text is written in ${sourceLang} (SOURCE language)`,
@@ -154,6 +176,256 @@ export class AIOrchestrator {
       '',
       '=== SEGMENTS TO TRANSLATE ===',
       JSON.stringify(segmentsPayload, null, 2),
+    ].join('\n');
+  }
+
+  /**
+   * Build address standardization rules dynamically based on language pair
+   */
+  private buildAddressStandardizationRules(
+    sourceLocale: string,
+    targetLocale: string
+  ): string {
+    const rule = getAddressFormattingRule(sourceLocale, targetLocale);
+    
+    if (!rule) {
+      return ''; // No rule for this language pair
+    }
+
+    // Build examples from transformations
+    const examples = rule.transformations
+      .filter(t => t.example)
+      .map(t => `- "${t.example!.source}" → "${t.example!.target}"`)
+      .join('\n');
+
+    // Build detection keywords section if available
+    const detectionKeywordsSection = rule.detectionKeywords && rule.detectionKeywords.length > 0
+      ? `ADDRESS DETECTION KEYWORDS:\nLook for these keywords that indicate an address is present:\n${rule.detectionKeywords.map(kw => `- "${kw}"`).join('\n')}\n`
+      : '';
+
+    return [
+      `=== ADDRESS STANDARDIZATION (${rule.description}) ===`,
+      detectionKeywordsSection,
+      rule.instructions,
+      '',
+      examples ? `TRANSFORMATION EXAMPLES:\n${examples}` : '',
+    ].filter(Boolean).join('\n');
+  }
+
+  /**
+   * Build address compliance check instructions for critic
+   */
+  private buildAddressComplianceCheck(
+    sourceLocale: string,
+    targetLocale: string
+  ): string {
+    const rule = getAddressFormattingRule(sourceLocale, targetLocale);
+    
+    if (!rule) {
+      return ''; // No rule for this language pair
+    }
+
+    const examples = rule.transformations
+      .filter(t => t.example)
+      .map(t => `- Source: "${t.example!.source}" → Expected: "${t.example!.target}"`)
+      .join('\n');
+
+    const terminologyList = Object.entries(rule.terminology)
+      .map(([key, value]) => `- "${key}" → "${value}"`)
+      .join('\n');
+
+    return [
+      '=== ADDRESS FORMATTING COMPLIANCE ===',
+      `Check that addresses follow ${rule.description}:`,
+      '',
+      `REQUIRED FORMAT: ${rule.format}`,
+      '',
+      'CHECK FOR COMPLIANCE:',
+      '1. Address order: Verify addresses follow the target language format, not source language order',
+      '2. House/building number: Must be at the beginning of the address line',
+      '3. Terminology: Verify address terms are translated correctly',
+      '4. Formatting: Check proper use of abbreviations (St., Ave., Blvd., etc.)',
+      '',
+      examples ? `TRANSFORMATION EXAMPLES:\n${examples}` : '',
+      '',
+      terminologyList ? `TERMINOLOGY MAPPINGS:\n${terminologyList}` : '',
+      '',
+      'FLAG AS ERROR if:',
+      '- Address follows source language order instead of target format',
+      '- House/building number is not at the beginning',
+      '- Address terminology is not translated correctly',
+      '- Address format does not match the required format',
+      '',
+      'FLAG AS WARNING if:',
+      '- Address format is mostly correct but has minor formatting issues',
+      '- Terminology is correct but formatting could be improved',
+      '',
+      'Remember: Address formatting compliance is critical for professional translations.',
+    ].filter(Boolean).join('\n');
+  }
+
+  /**
+   * Build naturalness instructions for critique/QA stage
+   */
+  private buildCritiqueNaturalnessInstructions(
+    isUKEnglish: boolean,
+    targetLang: string,
+    targetLocale?: string,
+    hasAddressRules: boolean = false,
+    sourceLocale: string = '',
+    targetLocaleForAddress: string = ''
+  ): string {
+    // Build address compliance check section
+    const addressComplianceSection = hasAddressRules && sourceLocale && targetLocaleForAddress
+      ? this.buildAddressComplianceCheck(sourceLocale, targetLocaleForAddress)
+      : '';
+
+    if (isUKEnglish) {
+      return [
+        '=== NATURALNESS CHECK: UK ENGLISH ===',
+        'In addition to glossary checks, verify the translation sounds natural and native-like:',
+        '',
+        'CHECK FOR:',
+        '1. UK spelling: "colour", "organise", "centre", "realise" (not US "color", "organize", "center", "realize")',
+        '2. UK vocabulary: "lift", "boot", "pavement", "flat" (not US "elevator", "trunk", "sidewalk", "apartment")',
+        '3. Natural phrasing: Avoid literal translations that sound awkward',
+        '4. Idiomatic expressions: Use natural UK English idioms where appropriate',
+        '',
+        addressComplianceSection,
+        '',
+        'FLAG AS WARNING (not error) if translation:',
+        '- Uses US spelling or vocabulary when UK is required',
+        '- Sounds overly literal or unnatural',
+        '- Contains awkward phrasing that reveals translation origin',
+        '',
+        'Remember: Naturalness is important but secondary to glossary accuracy.',
+      ].filter(Boolean).join('\n');
+    }
+    
+    return [
+      '=== NATURALNESS CHECK ===',
+      'Verify the translation sounds natural and native-like:',
+      '',
+      addressComplianceSection,
+      '',
+      'FLAG AS WARNING (not error) if translation:',
+      '- Sounds overly literal or unnatural',
+      '- Contains awkward phrasing that reveals translation origin',
+      '- Uses inappropriate register for technical/legal content',
+      '',
+      'Remember: Naturalness is important but secondary to glossary accuracy.',
+    ].filter(Boolean).join('\n');
+  }
+
+  /**
+   * Build natural language quality instructions based on target locale
+   * This ensures translations sound natural and native-like
+   */
+  private buildNaturalLanguageInstructions(
+    isUKEnglish: boolean,
+    isUSEnglish: boolean,
+    isEnglish: boolean,
+    targetLangCode: string,
+    hasAddressRules: boolean = false,
+    sourceLocale: string = '',
+    targetLocale: string = ''
+  ): string {
+    // Build address standardization section dynamically based on language pair
+    const addressStandardizationSection = hasAddressRules 
+      ? this.buildAddressStandardizationRules(sourceLocale, targetLocale) 
+      : '';
+    
+    if (isUKEnglish) {
+      return [
+        '=== TRANSLATION QUALITY: NATURAL UK ENGLISH ===',
+        'CRITICAL: Your translations must sound natural and fluent, as if written by a native UK English speaker.',
+        '',
+        'QUALITY REQUIREMENTS:',
+        '1. Natural phrasing: Use idiomatic UK English expressions and sentence structures',
+        '2. UK spelling: Use British spelling (e.g., "colour", "organise", "centre", "realise")',
+        '3. UK vocabulary: Prefer UK English terms (e.g., "lift" not "elevator", "boot" not "trunk", "pavement" not "sidewalk")',
+        '4. Natural flow: Avoid literal/word-for-word translations - rewrite for naturalness',
+        '5. Professional tone: Maintain formal, professional register appropriate for technical/legal content',
+        '6. Native-like: The translation should read as if originally written in UK English, not translated',
+        '',
+        addressStandardizationSection,
+        '',
+        'AVOID:',
+        '- Literal translations that sound unnatural',
+        '- US English spelling or vocabulary',
+        '- Awkward phrasing that reveals the source language structure',
+        '- Overly formal or stilted language',
+        '',
+        'EXAMPLE OF GOOD NATURAL TRANSLATION:',
+        'Source (Russian): "Необходимо провести анализ данных"',
+        'Bad (literal): "It is necessary to conduct an analysis of data"',
+        'Good (natural UK): "The data needs to be analysed" or "An analysis of the data is required"',
+        '',
+        'Remember: Accuracy is essential, but naturalness is equally important. A native UK English speaker should not be able to tell this was translated.',
+      ].filter(Boolean).join('\n');
+    } else if (isUSEnglish) {
+      return [
+        '=== TRANSLATION QUALITY: NATURAL US ENGLISH ===',
+        'CRITICAL: Your translations must sound natural and fluent, as if written by a native US English speaker.',
+        '',
+        'QUALITY REQUIREMENTS:',
+        '1. Natural phrasing: Use idiomatic US English expressions and sentence structures',
+        '2. US spelling: Use American spelling (e.g., "color", "organize", "center", "realize")',
+        '3. US vocabulary: Prefer US English terms (e.g., "elevator" not "lift", "trunk" not "boot", "sidewalk" not "pavement")',
+        '4. Natural flow: Avoid literal/word-for-word translations - rewrite for naturalness',
+        '5. Professional tone: Maintain formal, professional register appropriate for technical/legal content',
+        '6. Native-like: The translation should read as if originally written in US English, not translated',
+        '',
+        addressStandardizationSection,
+        '',
+        'AVOID:',
+        '- Literal translations that sound unnatural',
+        '- UK English spelling or vocabulary',
+        '- Awkward phrasing that reveals the source language structure',
+        '- Overly formal or stilted language',
+        '',
+        'Remember: Accuracy is essential, but naturalness is equally important. A native US English speaker should not be able to tell this was translated.',
+      ].filter(Boolean).join('\n');
+    } else if (isEnglish) {
+      // Generic English (en without locale)
+      return [
+        '=== TRANSLATION QUALITY: NATURAL ENGLISH ===',
+        'CRITICAL: Your translations must sound natural and fluent, as if written by a native English speaker.',
+        '',
+        'QUALITY REQUIREMENTS:',
+        '1. Natural phrasing: Use idiomatic English expressions and sentence structures',
+        '2. Natural flow: Avoid literal/word-for-word translations - rewrite for naturalness',
+        '3. Professional tone: Maintain formal, professional register appropriate for technical/legal content',
+        '4. Native-like: The translation should read as if originally written in English, not translated',
+        '',
+        addressStandardizationSection,
+        '',
+        'AVOID:',
+        '- Literal translations that sound unnatural',
+        '- Awkward phrasing that reveals the source language structure',
+        '- Overly formal or stilted language',
+        '',
+        'Remember: Accuracy is essential, but naturalness is equally important. A native English speaker should not be able to tell this was translated.',
+      ].filter(Boolean).join('\n');
+    }
+    
+    // For non-English languages, still emphasize naturalness
+    return [
+      '=== TRANSLATION QUALITY: NATURAL LANGUAGE ===',
+      'CRITICAL: Your translations must sound natural and fluent, as if written by a native speaker.',
+      '',
+      'QUALITY REQUIREMENTS:',
+      '1. Natural phrasing: Use idiomatic expressions and natural sentence structures',
+      '2. Natural flow: Avoid literal/word-for-word translations - rewrite for naturalness',
+      '3. Professional tone: Maintain appropriate register for technical/legal content',
+      '4. Native-like: The translation should read as if originally written in the target language, not translated',
+      '',
+      'AVOID:',
+      '- Literal translations that sound unnatural',
+      '- Awkward phrasing that reveals the source language structure',
+      '- Overly formal or stilted language',
+      '',
+      'Remember: Accuracy is essential, but naturalness is equally important.',
     ].join('\n');
   }
 
@@ -401,8 +673,25 @@ export class AIOrchestrator {
     const sourceLang = sourceLocale ? getLanguageName(sourceLocale) : 'Source';
     const targetLang = targetLocale ? getLanguageName(targetLocale) : 'Target';
     
+    // Detect if target is UK English for naturalness checks
+    const isUKEnglish = targetLocale?.toLowerCase() === 'en-gb' || targetLocale?.toLowerCase() === 'en_gb';
+    
+    // Check if address formatting rules exist for compliance checking
+    const hasAddressRules = sourceLocale && targetLocale 
+      ? hasAddressFormattingRule(sourceLocale, targetLocale) 
+      : false;
+    
+    const naturalnessCheck = this.buildCritiqueNaturalnessInstructions(
+      isUKEnglish, 
+      targetLang, 
+      targetLocale,
+      hasAddressRules,
+      sourceLocale || '',
+      targetLocale || ''
+    );
+    
     const prompt = [
-      'You are a Senior QA Linguist. Your job is to catch CRITICAL glossary errors, but ignore minor grammatical variations.',
+      'You are a Senior QA Linguist. Your job is to catch CRITICAL glossary errors and ensure natural, native-sounding translations, but ignore minor grammatical variations.',
       '',
       '=== TRANSLATION DIRECTION (CRITICAL - READ CAREFULLY) ===',
       `Translation direction: ${sourceLang} → ${targetLang}`,
@@ -413,6 +702,8 @@ export class AIOrchestrator {
       `- The "Source" text is written in ${sourceLang} (the ORIGINAL language)`,
       `- The "Draft" text is a TRANSLATION into ${targetLang} (the TARGET language)`,
       `- You must check if the Draft (${targetLang}) correctly uses the TARGET language terms from the glossary`,
+      '',
+      naturalnessCheck,
       '',
       '=== GLOSSARY FORMAT (Source => Target) ===',
       `The glossary shows: ${sourceLang} term => ${targetLang} term`,

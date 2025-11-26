@@ -26,6 +26,8 @@ export const env = {
   aiMaxRetries: numberFromEnv(process.env.AI_MAX_RETRIES, 3),
   azureTranslationEndpoint: process.env.AZURE_TRANSLATION_ENDPOINT ?? '',
   azureTranslationKey: process.env.AZURE_TRANSLATION_KEY ?? '',
+  useLibreOffice: process.env.USE_LIBRE_OFFICE === 'true',
+  libreOfficePath: process.env.LIBRE_OFFICE_PATH ?? 'libreoffice',
 };
 
 if (!env.databaseUrl) {

@@ -84,6 +84,10 @@ YANDEX_FOLDER_ID="your-yandex-folder-id"  # Required for YandexGPT (get from Yan
 DEFAULT_AI_PROVIDER="gemini"
 AI_BATCH_SIZE=20
 AI_MAX_RETRIES=3
+
+# LibreOffice (Optional - for enhanced DOCX parsing with perfect order preservation)
+USE_LIBRE_OFFICE=false
+LIBRE_OFFICE_PATH="libreoffice"  # Windows: "C:\Program Files\LibreOffice\program\soffice.exe"
 ```
 
 ### 4. Run Database Migrations
@@ -292,6 +296,59 @@ npm install
 # Clear Vite cache
 rm -rf node_modules/.vite
 ```
+
+### LibreOffice Setup (Optional)
+
+Для улучшенного парсинга DOCX файлов с идеальным сохранением порядка элементов можно установить LibreOffice.
+
+**Установка:**
+
+- **Windows:** Скачайте с [официального сайта](https://www.libreoffice.org/download/) и установите
+- **Linux (Ubuntu/Debian):** `sudo apt-get install -y libreoffice`
+- **Linux (Fedora):** `sudo dnf install -y libreoffice`
+- **macOS:** `brew install --cask libreoffice`
+
+**Проверка установки:**
+```bash
+# Windows (PowerShell)
+& "C:\Program Files\LibreOffice\program\soffice.exe" --version
+
+# Linux/Mac
+libreoffice --version
+```
+
+**Настройка в .env:**
+```env
+USE_LIBRE_OFFICE=true
+LIBRE_OFFICE_PATH=libreoffice  # Windows: "C:\Program Files\LibreOffice\program\soffice.exe"
+```
+
+**Как проверить, что сервер подключил LibreOffice:**
+
+1. **При запуске сервера:** В логах вы увидите сообщение о статусе LibreOffice:
+   - ✅ `LibreOffice is available and will be used for DOCX parsing` - LibreOffice найден и будет использоваться
+   - ⚠️ `LibreOffice is enabled but not found` - LibreOffice включен, но не найден (будет использован fallback)
+
+2. **Через API endpoint:** Запрос к `/api/health/status` вернет информацию о статусе:
+   ```bash
+   curl http://localhost:4000/api/health/status
+   ```
+   
+   Ответ будет содержать:
+   ```json
+   {
+     "status": "ok",
+     "database": "connected",
+     "libreOffice": {
+       "enabled": true,
+       "available": true,
+       "command": "libreoffice",
+       "configuredPath": "libreoffice"
+     }
+   }
+   ```
+
+**Примечание:** Если LibreOffice недоступен, система автоматически использует XML-парсинг как fallback.
 
 ## Production Deployment
 
@@ -420,6 +477,10 @@ YANDEX_FOLDER_ID="your-yandex-folder-id"  # Required for YandexGPT (get from Yan
 DEFAULT_AI_PROVIDER="gemini"
 AI_BATCH_SIZE=20
 AI_MAX_RETRIES=3
+
+# LibreOffice (Optional - for enhanced DOCX parsing with perfect order preservation)
+USE_LIBRE_OFFICE=false
+LIBRE_OFFICE_PATH="libreoffice"  # Windows: "C:\Program Files\LibreOffice\program\soffice.exe"
 ```
 
 ### 4. Run Database Migrations
@@ -628,6 +689,59 @@ npm install
 # Clear Vite cache
 rm -rf node_modules/.vite
 ```
+
+### LibreOffice Setup (Optional)
+
+Для улучшенного парсинга DOCX файлов с идеальным сохранением порядка элементов можно установить LibreOffice.
+
+**Установка:**
+
+- **Windows:** Скачайте с [официального сайта](https://www.libreoffice.org/download/) и установите
+- **Linux (Ubuntu/Debian):** `sudo apt-get install -y libreoffice`
+- **Linux (Fedora):** `sudo dnf install -y libreoffice`
+- **macOS:** `brew install --cask libreoffice`
+
+**Проверка установки:**
+```bash
+# Windows (PowerShell)
+& "C:\Program Files\LibreOffice\program\soffice.exe" --version
+
+# Linux/Mac
+libreoffice --version
+```
+
+**Настройка в .env:**
+```env
+USE_LIBRE_OFFICE=true
+LIBRE_OFFICE_PATH=libreoffice  # Windows: "C:\Program Files\LibreOffice\program\soffice.exe"
+```
+
+**Как проверить, что сервер подключил LibreOffice:**
+
+1. **При запуске сервера:** В логах вы увидите сообщение о статусе LibreOffice:
+   - ✅ `LibreOffice is available and will be used for DOCX parsing` - LibreOffice найден и будет использоваться
+   - ⚠️ `LibreOffice is enabled but not found` - LibreOffice включен, но не найден (будет использован fallback)
+
+2. **Через API endpoint:** Запрос к `/api/health/status` вернет информацию о статусе:
+   ```bash
+   curl http://localhost:4000/api/health/status
+   ```
+   
+   Ответ будет содержать:
+   ```json
+   {
+     "status": "ok",
+     "database": "connected",
+     "libreOffice": {
+       "enabled": true,
+       "available": true,
+       "command": "libreoffice",
+       "configuredPath": "libreoffice"
+     }
+   }
+   ```
+
+**Примечание:** Если LibreOffice недоступен, система автоматически использует XML-парсинг как fallback.
 
 ## Production Deployment
 
