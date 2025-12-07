@@ -7,6 +7,10 @@ import { ApiError } from '../utils/apiError';
 import { getSegmentWithDocument } from './segment.service';
 import { listProviders as listAvailableProviders, getProvider } from '../ai/providers/registry';
 import { logger } from '../utils/logger';
+import { matchesWithVariations } from '../utils/stemming';
+import { generateEmbedding } from './embedding.service';
+import { searchGlossaryByVector } from './vector-search.service';
+import { env } from '../utils/env';
 import type { GlossaryMode } from '../types/glossary';
 import type { ContextRules } from './glossary.service';
 
@@ -98,16 +102,75 @@ const normalizeGuidelines = (rules: Prisma.JsonValue | null | undefined): string
   return [];
 };
 
+/**
+ * Map glossary entries and ensure correct translation direction
+ * If entry direction matches document direction, use as-is
+ * If entry direction is reversed (bidirectional), swap terms
+ * If entry direction doesn't match, discard it
+ */
 const mapGlossaryEntries = (
-  entries: Array<{ sourceTerm: string; targetTerm: string; isForbidden: boolean; notes: string | null; contextRules: any }>,
-): OrchestratorGlossaryEntry[] =>
-  entries.map((entry) => ({
-    term: entry.sourceTerm,
-    translation: entry.targetTerm,
-    forbidden: entry.isForbidden,
-    notes: entry.notes,
-    contextRules: entry.contextRules as ContextRules | undefined,
-  }));
+  entries: Array<{ 
+    sourceTerm: string; 
+    targetTerm: string; 
+    sourceLocale: string;
+    targetLocale: string;
+    isForbidden: boolean; 
+    notes: string | null; 
+    contextRules: any 
+  }>,
+  documentSourceLocale: string,
+  documentTargetLocale: string,
+): OrchestratorGlossaryEntry[] => {
+  const normalizedDocSource = documentSourceLocale.toLowerCase().trim();
+  const normalizedDocTarget = documentTargetLocale.toLowerCase().trim();
+  
+  return entries
+    .filter((entry) => {
+      const normalizedEntrySource = entry.sourceLocale.toLowerCase().trim();
+      const normalizedEntryTarget = entry.targetLocale.toLowerCase().trim();
+      
+      // Check if entry direction matches document direction
+      const directionMatches = normalizedEntrySource === normalizedDocSource && 
+                               normalizedEntryTarget === normalizedDocTarget;
+      
+      // Check if entry direction is reversed (bidirectional match)
+      const directionReversed = normalizedEntrySource === normalizedDocTarget && 
+                                normalizedEntryTarget === normalizedDocSource;
+      
+      // Only include entries that match either direction
+      return directionMatches || directionReversed;
+    })
+    .map((entry) => {
+      const normalizedEntrySource = entry.sourceLocale.toLowerCase().trim();
+      const normalizedEntryTarget = entry.targetLocale.toLowerCase().trim();
+      
+      // Check if entry direction matches document direction
+      const directionMatches = normalizedEntrySource === normalizedDocSource && 
+                               normalizedEntryTarget === normalizedDocTarget;
+      
+      // If direction matches, use as-is
+      if (directionMatches) {
+        return {
+          term: entry.sourceTerm,
+          translation: entry.targetTerm,
+          forbidden: entry.isForbidden,
+          notes: entry.notes,
+          contextRules: entry.contextRules as ContextRules | undefined,
+        };
+      }
+      
+      // If direction is reversed, swap the terms
+      // Entry: ru -> en, Document: en -> ru
+      // So we swap: use entry.targetTerm as term, entry.sourceTerm as translation
+      return {
+        term: entry.targetTerm, // Swap: use target as source
+        translation: entry.sourceTerm, // Swap: use source as target
+        forbidden: entry.isForbidden,
+        notes: entry.notes,
+        contextRules: entry.contextRules as ContextRules | undefined,
+      };
+    });
+};
 
 type DocumentContext = {
   projectDomain?: string | null;
@@ -212,8 +275,159 @@ const filterGlossaryByContext = (glossary: OrchestratorGlossaryEntry[], context:
   return glossary.filter(entry => matchesContext(entry, context));
 };
 
-const buildAiContext = async (projectId: string): Promise<AiContext> => {
-  const [project, settings, guidelineRecord, glossaryEntries] = await Promise.all([
+/**
+ * Get relevant glossary entries using vector search + strict filtering
+ * Hybrid approach: Vector search finds top candidates, then strict filtering ensures only matching terms
+ */
+const getRelevantGlossaryEntries = async (
+  sourceText: string,
+  sourceLocale: string,
+  targetLocale: string,
+  projectId: string,
+  documentContext: DocumentContext,
+): Promise<OrchestratorGlossaryEntry[]> => {
+  if (!sourceText || !sourceText.trim()) {
+    return [];
+  }
+
+  let vectorCandidates: Array<{
+    id: string;
+    sourceTerm: string;
+    targetTerm: string;
+    sourceLocale: string;
+    targetLocale: string;
+    isForbidden: boolean;
+    notes: string | null;
+    contextRules: any;
+  }> = [];
+
+  // Step 1: Vector Retrieval - Find top 50 most relevant terms
+  try {
+    if (env.openAiApiKey) {
+      const queryEmbedding = await generateEmbedding(sourceText, true);
+      
+      const vectorResults = await searchGlossaryByVector(queryEmbedding, {
+        projectId,
+        sourceLocale,
+        targetLocale,
+        limit: 50, // Top 50 candidates
+        minSimilarity: 0.6, // Lower threshold to get more candidates for filtering
+      });
+
+      // Fetch full entry data including notes and contextRules
+      // Preserve order from vector search (most relevant first)
+      if (vectorResults.length > 0) {
+        const vectorIds = vectorResults.map(r => r.id);
+        const fullEntries = await prisma.glossaryEntry.findMany({
+          where: { id: { in: vectorIds } },
+          select: {
+            id: true,
+            sourceTerm: true,
+            targetTerm: true,
+            sourceLocale: true,
+            targetLocale: true,
+            isForbidden: true,
+            notes: true,
+            contextRules: true,
+          },
+        });
+        
+        // Preserve order from vector search results (most relevant first)
+        const entriesMap = new Map(fullEntries.map(e => [e.id, e]));
+        vectorCandidates = vectorIds
+          .map(id => entriesMap.get(id))
+          .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined);
+      }
+
+      logger.debug({
+        sourceText: sourceText.substring(0, 50),
+        vectorResultsCount: vectorResults.length,
+        candidatesCount: vectorCandidates.length,
+      }, 'Vector search found glossary candidates');
+    }
+  } catch (error: any) {
+    logger.warn(
+      {
+        error: error.message,
+        sourceText: sourceText.substring(0, 50),
+      },
+      'Vector search failed for glossary, falling back to traditional search',
+    );
+    // Fallback handled below
+  }
+
+  // Fallback: If vector search returned no results or failed, use traditional search
+  if (vectorCandidates.length === 0) {
+    logger.debug('No vector candidates found, using fallback: traditional search with take: 200');
+    const fallbackEntries = await prisma.glossaryEntry.findMany({
+      where: { OR: [{ projectId }, { projectId: null }] },
+      orderBy: { createdAt: 'desc' },
+      take: 200,
+      select: {
+        id: true,
+        sourceTerm: true,
+        targetTerm: true,
+        sourceLocale: true,
+        targetLocale: true,
+        isForbidden: true,
+        notes: true,
+        contextRules: true,
+      },
+    });
+    vectorCandidates = fallbackEntries;
+  }
+
+  // Step 2: Apply direction filtering and context filtering
+  const directionFiltered = mapGlossaryEntries(
+    vectorCandidates,
+    sourceLocale,
+    targetLocale,
+  );
+
+  const contextFiltered = filterGlossaryByContext(directionFiltered, documentContext);
+
+  // Step 3: Strict filtering by source text (with stemming)
+  const finalFiltered = filterGlossaryBySourceText(
+    contextFiltered,
+    sourceText,
+    sourceLocale,
+  );
+
+  logger.debug({
+    sourceText: sourceText.substring(0, 50),
+    vectorCandidatesCount: vectorCandidates.length,
+    directionFilteredCount: directionFiltered.length,
+    contextFilteredCount: contextFiltered.length,
+    finalFilteredCount: finalFiltered.length,
+  }, 'Glossary filtering pipeline results');
+
+  return finalFiltered;
+};
+
+/**
+ * Filter glossary entries based on whether the source term appears in the source text
+ * Uses stemming to handle word variations (plurals, case endings) for English and Russian
+ */
+const filterGlossaryBySourceText = (
+  glossary: OrchestratorGlossaryEntry[], 
+  sourceText: string,
+  sourceLocale: string
+): OrchestratorGlossaryEntry[] => {
+  if (!sourceText) return [];
+  
+  return glossary.filter(entry => {
+    return matchesWithVariations(entry.term, sourceText, sourceLocale);
+  });
+};
+
+const buildAiContext = async (
+  projectId: string,
+  documentSourceLocale?: string,
+  documentTargetLocale?: string,
+  sourceText?: string, // Optional: when provided, use vector search for relevant terms
+): Promise<AiContext> => {
+  // Fetch project, settings, and guidelines in parallel
+  const [project, settings, guidelineRecord] = await Promise.all([
     prisma.project.findUnique({
       where: { id: projectId },
       select: {
@@ -229,13 +443,87 @@ const buildAiContext = async (projectId: string): Promise<AiContext> => {
     }),
     getProjectAISettings(projectId),
     prisma.projectGuideline.findUnique({ where: { projectId } }),
-    prisma.glossaryEntry.findMany({
+  ]);
+
+  // Fetch glossary entries: use vector search if sourceText provided, otherwise fallback to newest 200
+  let glossaryEntries: Array<{
+    sourceTerm: string;
+    targetTerm: string;
+    sourceLocale: string;
+    targetLocale: string;
+    isForbidden: boolean;
+    notes: string | null;
+    contextRules: any;
+  }> = [];
+
+  if (sourceText && sourceText.trim() && documentSourceLocale && documentTargetLocale) {
+    // RAG Architecture: Use vector search to find most relevant terms
+    try {
+      if (env.openAiApiKey) {
+        const queryEmbedding = await generateEmbedding(sourceText, true);
+        
+        const vectorResults = await searchGlossaryByVector(queryEmbedding, {
+          projectId,
+          sourceLocale: documentSourceLocale,
+          targetLocale: documentTargetLocale,
+          limit: 50, // Top 50 candidates
+          minSimilarity: 0.6, // Lower threshold to get more candidates for filtering
+        });
+
+        // Fetch full entry data including notes and contextRules
+        // Preserve order from vector search (most relevant first)
+        if (vectorResults.length > 0) {
+          const vectorIds = vectorResults.map(r => r.id);
+          const fullEntries = await prisma.glossaryEntry.findMany({
+            where: { id: { in: vectorIds } },
+            select: {
+              id: true,
+              sourceTerm: true,
+              targetTerm: true,
+              sourceLocale: true,
+              targetLocale: true,
+              isForbidden: true,
+              notes: true,
+              contextRules: true,
+            },
+          });
+          
+          // Preserve order from vector search results (most relevant first)
+          const entriesMap = new Map(fullEntries.map(e => [e.id, e]));
+          glossaryEntries = vectorIds
+            .map(id => entriesMap.get(id))
+            .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined)
+            .map(({ id, ...rest }) => rest); // Remove id field to match expected type
+
+          logger.debug({
+            sourceText: sourceText.substring(0, 50),
+            vectorResultsCount: vectorResults.length,
+            candidatesCount: glossaryEntries.length,
+          }, 'Vector search found glossary candidates for context');
+        }
+      }
+    } catch (error: any) {
+      logger.warn(
+        {
+          error: error.message,
+          sourceText: sourceText.substring(0, 50),
+        },
+        'Vector search failed for glossary in buildAiContext, falling back to traditional search',
+      );
+      // Fallback handled below
+    }
+  }
+
+  // Fallback: If vector search returned no results or sourceText not provided, use traditional search
+  if (glossaryEntries.length === 0) {
+    logger.debug('Using fallback: traditional search with take: 200');
+    glossaryEntries = await prisma.glossaryEntry.findMany({
       where: { OR: [{ projectId }, { projectId: null }] },
       orderBy: { createdAt: 'desc' },
       take: 200,
-      select: { sourceTerm: true, targetTerm: true, isForbidden: true, notes: true, contextRules: true },
-    }),
-  ]);
+      select: { sourceTerm: true, targetTerm: true, sourceLocale: true, targetLocale: true, isForbidden: true, notes: true, contextRules: true },
+    });
+  }
 
   if (!project) {
     throw ApiError.notFound('Project not found for AI context');
@@ -318,6 +606,31 @@ const buildAiContext = async (projectId: string): Promise<AiContext> => {
     }, 'Project settings config is not available or not an object');
   }
 
+  // Map glossary entries to OrchestratorGlossaryEntry format
+  const mappedGlossary = mapGlossaryEntries(
+    glossaryEntries,
+    documentSourceLocale ?? project.sourceLocale ?? project.sourceLang ?? '',
+    documentTargetLocale ?? project.targetLocales?.[0] ?? project.targetLang ?? '',
+  );
+
+  // Apply strict filtering with stemming if sourceText is provided (RAG Architecture)
+  // Vector search found the candidates, now filterGlossaryBySourceText confirms the matches
+  const finalGlossary = sourceText && sourceText.trim() && documentSourceLocale
+    ? filterGlossaryBySourceText(
+        mappedGlossary,
+        sourceText,
+        documentSourceLocale,
+      )
+    : mappedGlossary;
+
+  logger.debug({
+    sourceText: sourceText ? sourceText.substring(0, 50) : 'none',
+    rawEntriesCount: glossaryEntries.length,
+    mappedCount: mappedGlossary.length,
+    finalCount: finalGlossary.length,
+    filteringApplied: !!(sourceText && sourceText.trim() && documentSourceLocale),
+  }, 'Glossary processing in buildAiContext');
+
   return {
     projectMeta: {
       name: project.name,
@@ -329,7 +642,7 @@ const buildAiContext = async (projectId: string): Promise<AiContext> => {
     },
     settings,
     guidelines: normalizeGuidelines(guidelineRecord?.rules ?? null),
-    glossary: mapGlossaryEntries(glossaryEntries),
+    glossary: finalGlossary,
     apiKey,
     yandexFolderId,
   };
@@ -452,14 +765,22 @@ export const generateSegmentSuggestions = async (documentId: string): Promise<Se
   }
 
   if (segmentsNeedingAI.length > 0) {
-    // Filter glossary by document context
+    // Get relevant glossary entries using vector search + strict filtering (Hybrid Approach)
+    // For batch processing, use combined source text for vector search
     const documentContext: DocumentContext = {
       projectDomain: context.projectMeta.domain,
       projectClient: context.projectMeta.client,
       documentName: document.name,
       documentType: undefined,
     };
-    const filteredGlossary = filterGlossaryByContext(context.glossary, documentContext);
+    const combinedSourceText = segmentsNeedingAI.map(s => s.sourceText).join(' ');
+    const filteredGlossary = await getRelevantGlossaryEntries(
+      combinedSourceText,
+      document.sourceLocale,
+      document.targetLocale,
+      document.projectId,
+      documentContext,
+    );
 
     // Fetch document with summary fields
     const documentWithSummary = await prisma.document.findUnique({
@@ -535,7 +856,11 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
     throw ApiError.notFound('Segment not found');
   }
 
-  const context = await buildAiContext(segment.document.projectId);
+  const context = await buildAiContext(
+    segment.document.projectId,
+    segment.document.sourceLocale,
+    segment.document.targetLocale,
+  );
   const minScore = options?.minScore ?? 70;
   const tmAllowed = options?.applyTm ?? true;
   const glossaryMode = options?.glossaryMode ?? 'strict_source'; // Default to strict_source if not provided
@@ -669,29 +994,29 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
     }
 
     // Priority 2: Glossary entries - find which terms are actually in the source text
-    if (context.glossary && context.glossary.length > 0) {
-      // Build document context for filtering
-      const documentContext: DocumentContext = {
-        projectDomain: context.projectMeta.domain,
-        projectClient: context.projectMeta.client,
-        documentName: segment.document.name,
-        documentType: undefined, // Could be extracted from document metadata in the future
-      };
-      
-      // Filter glossary by context first, then by source text match
-      const sourceTextLower = segment.sourceText.toLowerCase();
-      const relevantGlossaryEntries = filterGlossaryByContext(context.glossary, documentContext)
-        .filter(entry => {
-          const termLower = entry.term.toLowerCase();
-          // Check if the term appears in the source text (case-insensitive)
-          return sourceTextLower.includes(termLower);
-        })
-        .map(entry => ({
-          sourceTerm: entry.term,
-          targetTerm: entry.translation,
-          mode: glossaryMode,
-          isForbidden: entry.forbidden || false,
-        }));
+    // Use vector search + strict filtering (RAG architecture)
+    const glossaryDocumentContext: DocumentContext = {
+      projectDomain: context.projectMeta.domain,
+      projectClient: context.projectMeta.client,
+      documentName: segment.document.name,
+      documentType: undefined, // Could be extracted from document metadata in the future
+    };
+    
+    const relevantGlossaryEntriesFromRAG = await getRelevantGlossaryEntries(
+      segment.sourceText,
+      segment.document.sourceLocale,
+      segment.document.targetLocale,
+      segment.document.projectId,
+      glossaryDocumentContext,
+    );
+    
+    if (relevantGlossaryEntriesFromRAG.length > 0) {
+      const relevantGlossaryEntries = relevantGlossaryEntriesFromRAG.map(entry => ({
+        sourceTerm: entry.term,
+        targetTerm: entry.translation,
+        mode: glossaryMode,
+        isForbidden: entry.forbidden || false,
+      }));
 
       if (relevantGlossaryEntries.length > 0) {
         metadata.push({
@@ -724,14 +1049,20 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
       message: `Generating AI translation using ${context.settings?.provider || 'default'} (${context.settings?.model || 'default model'})`,
     });
 
-    // Filter glossary by document context
+    // Get relevant glossary entries using vector search + strict filtering (Hybrid Approach)
     const documentContext: DocumentContext = {
       projectDomain: context.projectMeta.domain,
       projectClient: context.projectMeta.client,
       documentName: segment.document.name,
       documentType: undefined,
     };
-    const filteredGlossary = filterGlossaryByContext(context.glossary, documentContext);
+    const filteredGlossary = await getRelevantGlossaryEntries(
+      segment.sourceText,
+      segment.document.sourceLocale,
+      segment.document.targetLocale,
+      segment.document.projectId,
+      documentContext,
+    );
 
     // Fetch document with summary fields
     const document = await prisma.document.findUnique({
@@ -802,7 +1133,11 @@ export const runSegmentMachineTranslationWithCritic = async (
     throw ApiError.notFound('Segment not found');
   }
 
-  const context = await buildAiContext(segment.document.projectId);
+  const context = await buildAiContext(
+    segment.document.projectId,
+    segment.document.sourceLocale,
+    segment.document.targetLocale,
+  );
   const minScore = options?.minScore ?? 70;
   const tmAllowed = options?.applyTm ?? true;
   const glossaryMode = options?.glossaryMode ?? 'strict_source';
@@ -881,14 +1216,21 @@ export const runSegmentMachineTranslationWithCritic = async (
     }, 'YandexGPT: Starting translation with critic workflow');
   }
   
-  // Filter glossary by document context
+  // Filter glossary by document context first
   const documentContext: DocumentContext = {
     projectDomain: context.projectMeta.domain,
     projectClient: context.projectMeta.client,
     documentName: segment.document.name,
     documentType: undefined,
   };
-  const filteredGlossary = filterGlossaryByContext(context.glossary, documentContext);
+  // Get relevant glossary entries using vector search + strict filtering (Hybrid Approach)
+  const filteredGlossary = await getRelevantGlossaryEntries(
+    segment.sourceText,
+    segment.document.sourceLocale,
+    segment.document.targetLocale,
+    segment.document.projectId,
+    documentContext,
+  );
 
   logger.info({
     provider: context.settings?.provider,
@@ -970,7 +1312,11 @@ export const runDocumentMachineTranslation = async (
     return { documentId, processed: 0, results: [] };
   }
 
-  const context = await buildAiContext(document.projectId);
+  const context = await buildAiContext(
+    document.projectId,
+    document.sourceLocale,
+    document.targetLocale,
+  );
   const tmAllowed = options?.applyTm ?? true;
   const minScore = options?.minScore ?? 70;
   const glossaryMode = options?.glossaryMode ?? 'strict_source'; // Default to strict_source if not provided
@@ -1067,6 +1413,24 @@ export const runDocumentMachineTranslation = async (
     // Since batch translation processes segments together, we'll use the first segment's examples
     const batchExamples = examplesMap.get(queuedForAI[0]?.segment.id) ?? [];
 
+    // Filter glossary by document context first
+    const documentContext: DocumentContext = {
+      projectDomain: context.projectMeta.domain,
+      projectClient: context.projectMeta.client,
+      documentName: document.name,
+      documentType: undefined,
+    };
+    // Get relevant glossary entries using vector search + strict filtering (Hybrid Approach)
+    // For batch processing, use combined source text for vector search
+    const combinedSourceText = orchestratorSegments.map(s => s.sourceText).join(' ');
+    const filteredGlossary = await getRelevantGlossaryEntries(
+      combinedSourceText,
+      document.sourceLocale,
+      document.targetLocale,
+      document.projectId,
+      documentContext,
+    );
+
     // Fetch document with summary fields
     const documentWithSummary = await prisma.document.findUnique({
       where: { id: document.id },
@@ -1088,7 +1452,7 @@ export const runDocumentMachineTranslation = async (
         summary: documentWithSummary.summary,
         clusterSummary: documentWithSummary.clusterSummary,
       } : undefined,
-      glossary: context.glossary,
+      glossary: filteredGlossary,
       guidelines: context.guidelines,
       tmExamples: batchExamples, // Pass examples for RAG (using first segment's examples for batch)
       project: context.projectMeta,
@@ -1227,7 +1591,11 @@ export const pretranslateDocument = async (
   }
 
   try {
-    const context = await buildAiContext(document.projectId);
+    const context = await buildAiContext(
+      document.projectId,
+      document.sourceLocale,
+      document.targetLocale,
+    );
     const queuedForAI: {
       segment: typeof eligibleSegments[number];
       previous?: typeof eligibleSegments[number];
@@ -1384,14 +1752,21 @@ export const pretranslateDocument = async (
 
           try {
             // eslint-disable-next-line no-await-in-loop
-            // Filter glossary by document context
+            // Filter glossary by document context first
             const documentContext: DocumentContext = {
               projectDomain: context.projectMeta.domain,
               projectClient: context.projectMeta.client,
               documentName: document.name,
               documentType: undefined,
             };
-            const filteredGlossary = filterGlossaryByContext(context.glossary, documentContext);
+            // Get relevant glossary entries using vector search + strict filtering (Hybrid Approach)
+            const filteredGlossary = await getRelevantGlossaryEntries(
+              entry.segment.sourceText,
+              document.sourceLocale,
+              document.targetLocale,
+              document.projectId,
+              documentContext,
+            );
 
             // Fetch document with summary fields
             const documentWithSummary = await prisma.document.findUnique({
@@ -1493,14 +1868,23 @@ export const pretranslateDocument = async (
             });
           }
 
-          // Filter glossary by document context
+          // Filter glossary by document context first
           const documentContext: DocumentContext = {
             projectDomain: context.projectMeta.domain,
             projectClient: context.projectMeta.client,
             documentName: document.name,
             documentType: undefined,
           };
-          const filteredGlossary = filterGlossaryByContext(context.glossary, documentContext);
+          // Get relevant glossary entries using vector search + strict filtering (Hybrid Approach)
+          // For batch processing, use combined source text for vector search
+          const combinedSourceText = orchestratorSegments.map(s => s.sourceText).join(' ');
+          const filteredGlossary = await getRelevantGlossaryEntries(
+            combinedSourceText,
+            document.sourceLocale,
+            document.targetLocale,
+            document.projectId,
+            documentContext,
+          );
 
           // Fetch document with summary fields
           const documentWithSummary = await prisma.document.findUnique({
@@ -1717,7 +2101,11 @@ type DirectTranslationRequest = {
 };
 
 export const translateTextDirectly = async (request: DirectTranslationRequest) => {
-  const context = request.projectId ? await buildAiContext(request.projectId) : null;
+  const context = request.projectId && request.sourceLocale && request.targetLocale
+    ? await buildAiContext(request.projectId, request.sourceLocale, request.targetLocale)
+    : request.projectId
+    ? await buildAiContext(request.projectId)
+    : null;
   
   const provider = request.provider ?? context?.settings?.provider;
   const model = request.model ?? context?.settings?.model;
@@ -1771,7 +2159,7 @@ export const translateTextDirectly = async (request: DirectTranslationRequest) =
     }
   }
 
-  // Filter glossary by project context (if available)
+  // Get relevant glossary entries using vector search + strict filtering (Hybrid Approach)
   // For direct translation without document, we can only filter by project domain/client
   const projectContext: DocumentContext = {
     projectDomain: projectMeta.domain,
@@ -1779,7 +2167,22 @@ export const translateTextDirectly = async (request: DirectTranslationRequest) =
     documentName: undefined,
     documentType: undefined,
   };
-  const filteredGlossary = filterGlossaryByContext(glossary, projectContext);
+  
+  // Use vector search if projectId is available, otherwise fallback to traditional filtering
+  let filteredGlossary: OrchestratorGlossaryEntry[];
+  if (request.projectId && request.sourceLocale && request.targetLocale) {
+    filteredGlossary = await getRelevantGlossaryEntries(
+      request.sourceText,
+      request.sourceLocale,
+      request.targetLocale,
+      request.projectId,
+      projectContext,
+    );
+  } else {
+    // Fallback: use traditional filtering if no projectId or locales
+    const contextFilteredGlossary = filterGlossaryByContext(glossary, projectContext);
+    filteredGlossary = filterGlossaryBySourceText(contextFilteredGlossary, request.sourceText, request.sourceLocale || 'en');
+  }
 
   const segment: OrchestratorSegment = {
     segmentId: 'direct-translation',
@@ -1826,7 +2229,11 @@ export const generateDraftTranslation = async (request: {
   temperature?: number;
   maxTokens?: number;
 }) => {
-  const context = request.projectId ? await buildAiContext(request.projectId) : null;
+  const context = request.projectId && request.sourceLocale && request.targetLocale
+    ? await buildAiContext(request.projectId, request.sourceLocale, request.targetLocale)
+    : request.projectId
+    ? await buildAiContext(request.projectId)
+    : null;
   
   const provider = request.provider ?? context?.settings?.provider;
   const model = request.model ?? context?.settings?.model;
@@ -1893,8 +2300,13 @@ export const runCritiqueCheck = async (request: {
   provider?: string;
   model?: string;
   apiKey?: string;
+  maxTokens?: number;
 }) => {
-  const context = request.projectId ? await buildAiContext(request.projectId) : null;
+  const context = request.projectId && request.sourceLocale && request.targetLocale
+    ? await buildAiContext(request.projectId, request.sourceLocale, request.targetLocale)
+    : request.projectId
+    ? await buildAiContext(request.projectId)
+    : null;
   
   const provider = request.provider ?? context?.settings?.provider;
   const model = request.model ?? context?.settings?.model;
@@ -1925,12 +2337,15 @@ export const runCritiqueCheck = async (request: {
       select: {
         sourceTerm: true,
         targetTerm: true,
+        sourceLocale: true,
+        targetLocale: true,
         isForbidden: true,
         notes: true,
+        contextRules: true,
       },
     });
     
-    glossary = mapGlossaryEntries(filteredEntries);
+    glossary = mapGlossaryEntries(filteredEntries, request.sourceLocale, request.targetLocale);
     
     logger.debug({
       originalGlossaryCount: context?.glossary?.length || 0,
@@ -2018,7 +2433,11 @@ export const fixTranslationWithErrors = async (request: {
   temperature?: number;
   maxTokens?: number;
 }) => {
-  const context = request.projectId ? await buildAiContext(request.projectId) : null;
+  const context = request.projectId && request.sourceLocale && request.targetLocale
+    ? await buildAiContext(request.projectId, request.sourceLocale, request.targetLocale)
+    : request.projectId
+    ? await buildAiContext(request.projectId)
+    : null;
   
   const provider = request.provider ?? context?.settings?.provider;
   const model = request.model ?? context?.settings?.model;
@@ -2076,7 +2495,11 @@ type PostEditQARequest = {
 };
 
 export const runPostEditQA = async (request: PostEditQARequest): Promise<PostEditQAResult> => {
-  const context = request.projectId ? await buildAiContext(request.projectId) : null;
+  const context = request.projectId && request.sourceLocale && request.targetLocale
+    ? await buildAiContext(request.projectId, request.sourceLocale, request.targetLocale)
+    : request.projectId
+    ? await buildAiContext(request.projectId)
+    : null;
   
   const provider = request.provider ?? context?.settings?.provider ?? 'gemini';
   const model = request.model ?? context?.settings?.model;
@@ -2398,5 +2821,142 @@ export const testAICredentials = async (provider: string, apiKey?: string, yande
       error: errorMessage,
     };
   }
+};
+
+/**
+ * Get debug information for a segment to help understand translation decisions
+ */
+export const getSegmentDebugInfo = async (segmentId: string) => {
+  const segment = await getSegmentWithDocument(segmentId);
+  if (!segment || !segment.document) {
+    throw ApiError.notFound('Segment not found');
+  }
+
+  const context = await buildAiContext(segment.document.projectId);
+  
+  // 1. Get TM matches (all matches, not just the best one)
+  const tmMatches = await searchTranslationMemory({
+    sourceText: segment.sourceText,
+    sourceLocale: segment.document.sourceLocale,
+    targetLocale: segment.document.targetLocale,
+    projectId: segment.document.projectId,
+    limit: 10, // Get top 10 matches for debugging
+    minScore: 0, // Get all matches, even low scores
+  });
+
+  // 2. Get neighbor segments for context
+  const neighborSegments = await prisma.segment.findMany({
+    where: {
+      documentId: segment.document.id,
+      segmentIndex: {
+        in: [segment.segmentIndex - 1, segment.segmentIndex + 1],
+      },
+    },
+    select: { segmentIndex: true, sourceText: true, targetFinal: true, targetMt: true },
+  });
+  const previous = neighborSegments.find((item) => item.segmentIndex === segment.segmentIndex - 1);
+  const next = neighborSegments.find((item) => item.segmentIndex === segment.segmentIndex + 1);
+
+  // 3. Get glossary entries relevant to this segment
+  const documentContext: DocumentContext = {
+    projectDomain: context.projectMeta.domain,
+    projectClient: context.projectMeta.client,
+    documentName: segment.document.name,
+    documentType: undefined,
+  };
+  // Get relevant glossary entries using vector search + strict filtering (Hybrid Approach)
+  const filteredGlossary = await getRelevantGlossaryEntries(
+    segment.sourceText,
+    segment.document.sourceLocale,
+    segment.document.targetLocale,
+    segment.document.projectId,
+    documentContext,
+  );
+  
+  // Map to API format for display
+  const relevantGlossaryEntries = filteredGlossary.map(entry => ({
+    sourceTerm: entry.term,
+    targetTerm: entry.translation,
+    isForbidden: entry.forbidden || false,
+    notes: entry.notes,
+  }));
+
+  // 4. Build the prompt that would be used for translation
+  const orchestratorSegment = buildOrchestratorSegment(segment, previous, next, segment.document.name ?? undefined);
+  
+  // Get TM examples for RAG (using default settings)
+  const tmExamples = tmMatches.slice(0, 5).map((match) => ({
+    sourceText: match.sourceText,
+    targetText: match.targetText,
+    fuzzyScore: match.fuzzyScore,
+    searchMethod: match.searchMethod || 'fuzzy',
+  }));
+
+  // Fetch document with summary fields
+  const documentWithSummary = await prisma.document.findUnique({
+    where: { id: segment.document.id },
+    select: {
+      name: true,
+      summary: true,
+      clusterSummary: true,
+    },
+  });
+
+  // Build the prompt using orchestrator's public method (with filtered glossary)
+  const prompt = orchestrator.buildPromptForSegment(orchestratorSegment, {
+    segments: [orchestratorSegment], // Required by TranslateSegmentsOptions, but buildPromptForSegment uses the first parameter
+    project: context.projectMeta,
+    guidelines: context.guidelines,
+    glossary: filteredGlossary,
+    tmExamples,
+    sourceLocale: segment.document.sourceLocale,
+    targetLocale: segment.document.targetLocale,
+    document: documentWithSummary ? {
+      name: documentWithSummary.name,
+      summary: documentWithSummary.summary,
+      clusterSummary: documentWithSummary.clusterSummary,
+    } : undefined,
+  });
+
+  return {
+    segment: {
+      id: segment.id,
+      segmentIndex: segment.segmentIndex,
+      sourceText: segment.sourceText,
+      targetMt: segment.targetMt,
+      targetFinal: segment.targetFinal,
+      fuzzyScore: segment.fuzzyScore,
+      bestTmEntryId: segment.bestTmEntryId,
+    },
+    tmMatches: tmMatches.map(match => ({
+      id: match.id,
+      sourceText: match.sourceText,
+      targetText: match.targetText,
+      fuzzyScore: match.fuzzyScore,
+      searchMethod: match.searchMethod || 'fuzzy',
+      scope: match.scope,
+    })),
+    glossaryTerms: relevantGlossaryEntries,
+    context: {
+      previous: previous ? {
+        segmentIndex: previous.segmentIndex,
+        sourceText: previous.sourceText,
+        targetText: previous.targetFinal || previous.targetMt,
+      } : null,
+      next: next ? {
+        segmentIndex: next.segmentIndex,
+        sourceText: next.sourceText,
+        targetText: next.targetFinal || next.targetMt,
+      } : null,
+    },
+    prompt,
+    document: {
+      name: segment.document.name,
+      sourceLocale: segment.document.sourceLocale,
+      targetLocale: segment.document.targetLocale,
+      summary: documentWithSummary?.summary,
+      clusterSummary: documentWithSummary?.clusterSummary,
+    },
+  };
 };
  
