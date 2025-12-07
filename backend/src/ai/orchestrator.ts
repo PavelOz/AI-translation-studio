@@ -664,15 +664,47 @@ export class AIOrchestrator {
     const provider = getProvider(options.provider, options.apiKey, options.yandexFolderId);
     let model = options.model ?? provider.defaultModel;
     
-    // For Gemini 2.5 Flash and newer models with thoughts, use gemini-1.5-pro for critic workflow
+    logger.debug({
+      providerName: provider.name,
+      originalModel: model,
+      optionsModel: options.model,
+      defaultModel: provider.defaultModel,
+    }, 'runCritique: Initial model selection');
+    
+    // For Gemini Flash models and gemini-pro, switch to gemini-2.5-pro for critic workflow
     // to avoid thoughtsTokenCount consuming all output tokens
-    if (provider.name === 'gemini' && (model.includes('2.5') || model.includes('2.0') || model.includes('3.0'))) {
-      logger.debug({
+    // Check for flash models (these use thoughts aggressively)
+    const modelLower = (model || '').toLowerCase();
+    const isFlashModel = modelLower.includes('flash');
+    const isGeminiPro = modelLower === 'gemini-pro' || (modelLower.includes('gemini-pro') && !modelLower.includes('2.5-pro'));
+    const isAlready25Pro = modelLower.includes('2.5-pro') && !isFlashModel;
+    const hasThoughts = provider.name === 'gemini' && (isFlashModel || isGeminiPro) && !isAlready25Pro;
+    
+    if (provider.name === 'gemini' && (isFlashModel || isGeminiPro) && !isAlready25Pro) {
+      // Use gemini-2.5-pro instead of gemini-1.5-pro because gemini-1.5-pro is not available
+      // gemini-2.5-pro may use thoughts but less aggressively than gemini-2.5-flash
+      const reason = isFlashModel 
+        ? 'Gemini Flash models use thoughts which can consume all output tokens'
+        : 'gemini-pro often falls back to gemini-2.5-flash which uses thoughts';
+      logger.warn({
         originalModel: model,
-        fallbackModel: 'gemini-1.5-pro',
-        reason: 'Gemini 2.5+ models use thoughts which can consume all output tokens',
-      }, 'Switching to gemini-1.5-pro for critic workflow to avoid thoughts token consumption');
-      model = 'gemini-1.5-pro';
+        fallbackModel: 'gemini-2.5-pro',
+        reason,
+        modelLower,
+        isFlashModel,
+        isGeminiPro,
+        isAlready25Pro,
+        note: 'Using gemini-2.5-pro (gemini-1.5-pro not available)',
+      }, 'Switching to gemini-2.5-pro for critic workflow (gemini-1.5-pro not available)');
+      model = 'gemini-2.5-pro';
+    } else {
+      logger.debug({
+        providerName: provider.name,
+        model,
+        modelLower,
+        hasThoughts,
+        reason: provider.name !== 'gemini' ? 'Not Gemini provider' : 'Model does not use thoughts',
+      }, 'runCritique: No model switch needed');
     }
 
         // Log glossary info for debugging (truncate to avoid encoding issues in logs)
@@ -1295,6 +1327,14 @@ export class AIOrchestrator {
   ): Promise<OrchestratorResult> {
     const provider = getProvider(options.provider, options.apiKey, options.yandexFolderId);
     
+    logger.debug({
+      providerName: provider.name,
+      optionsProvider: options.provider,
+      optionsModel: options.model,
+      providerDefaultModel: provider.defaultModel,
+      source: 'translateWithCritic:start',
+    }, 'translateWithCritic: Initial provider and model');
+    
     // 1. Draft
     onProgress?.('draft', 'Generating draft translation...');
     const draft = await this.generateDraft(segment.sourceText, options);
@@ -1304,13 +1344,101 @@ export class AIOrchestrator {
     // Use much higher maxTokens for critic (prompts are very long, responses can be long too)
     // Gemini API supports up to 8192 output tokens
     const criticMaxTokens = options.maxTokens ? Math.max(options.maxTokens, 8192) : 8192;
+    
+    // Auto-switch Gemini 2.5+ models to gemini-1.5-pro for critic workflow to avoid thoughts token consumption
+    let criticModel = options.model ?? provider.defaultModel;
+    
+    logger.debug({
+      providerName: provider.name,
+      originalModel: criticModel,
+      optionsModel: options.model,
+      providerDefaultModel: provider.defaultModel,
+      source: 'translateWithCritic:before-switch',
+    }, 'translateWithCritic: Before model switch check');
+    
+    if (provider.name === 'gemini') {
+      const modelLower = (criticModel || '').toLowerCase();
+      // Check if it's a flash model (these use thoughts aggressively)
+      const isFlashModel = modelLower.includes('flash');
+      // Check if it's gemini-pro (often falls back to gemini-2.5-flash)
+      const isGeminiPro = modelLower === 'gemini-pro' || (modelLower.includes('gemini-pro') && !modelLower.includes('2.5-pro'));
+      // Don't switch if already using gemini-2.5-pro (it's the best available option)
+      const isAlready25Pro = modelLower.includes('2.5-pro') && !isFlashModel;
+      
+      logger.debug({
+        providerName: provider.name,
+        originalModel: criticModel,
+        modelLower,
+        isFlashModel,
+        isGeminiPro,
+        isAlready25Pro,
+        checks: {
+          hasFlash: isFlashModel,
+          isPro: isGeminiPro,
+          is25Pro: isAlready25Pro,
+        },
+        source: 'translateWithCritic:switch-check',
+      }, 'translateWithCritic: Model switch check details');
+      
+      if ((isFlashModel || isGeminiPro) && !isAlready25Pro) {
+        // Use gemini-2.5-pro instead of gemini-1.5-pro because gemini-1.5-pro is not available
+        // gemini-2.5-pro may use thoughts but less aggressively than gemini-2.5-flash
+        const reason = isFlashModel 
+          ? 'Gemini Flash models use thoughts which can consume all output tokens'
+          : 'gemini-pro often falls back to gemini-2.5-flash which uses thoughts';
+        logger.warn({
+          originalModel: criticModel,
+          fallbackModel: 'gemini-2.5-pro',
+          reason,
+          source: 'translateWithCritic',
+          modelLower,
+          isFlashModel,
+          isGeminiPro,
+          isAlready25Pro,
+          note: 'Using gemini-2.5-pro (gemini-1.5-pro not available)',
+        }, 'Switching to gemini-2.5-pro for translateWithCritic (gemini-1.5-pro not available)');
+        criticModel = 'gemini-2.5-pro';
+      } else {
+        logger.debug({
+          providerName: provider.name,
+          model: criticModel,
+          modelLower,
+          isFlashModel,
+          isGeminiPro,
+          isAlready25Pro,
+          reason: isAlready25Pro ? 'Already using gemini-2.5-pro' : 'Model does not need switching',
+          source: 'translateWithCritic',
+        }, 'translateWithCritic: No model switch needed');
+      }
+    } else {
+      logger.debug({
+        providerName: provider.name,
+        model: criticModel,
+        reason: 'Not Gemini provider',
+        source: 'translateWithCritic',
+      }, 'translateWithCritic: No model switch needed (not Gemini)');
+    }
+    
+    logger.debug({
+      finalModel: criticModel,
+      originalModel: options.model,
+      source: 'translateWithCritic:after-switch',
+    }, 'translateWithCritic: Final model after switch');
+    
+    logger.info({
+      finalModel: criticModel,
+      originalModel: options.model,
+      provider: options.provider,
+      source: 'translateWithCritic:before-runCritique',
+    }, 'translateWithCritic: Calling runCritique with model');
+    
     const critique = await this.runCritique(
         segment.sourceText, 
         draft.draftText, 
         options.glossary, 
         { 
           provider: options.provider, 
-          model: options.model, 
+          model: criticModel, 
           apiKey: options.apiKey,
           yandexFolderId: options.yandexFolderId,
           sourceLocale: options.sourceLocale,

@@ -86,17 +86,29 @@ export class YandexProvider extends BaseProvider {
       if (!response.ok) {
         const errorBody = await response.text();
         let errorMessage = `YandexGPT error (${response.status}): ${errorBody}`;
+        let isPermissionError = false;
         
         // Try to parse error body as JSON for more details
         try {
           const errorJson = JSON.parse(errorBody);
           if (errorJson.message) {
             errorMessage = `YandexGPT API error (${response.status}): ${errorJson.message}`;
+            // Check if it's a permission error
+            if (response.status === 403 && errorJson.message.toLowerCase().includes('permission')) {
+              isPermissionError = true;
+            }
           } else if (errorJson.error?.message) {
             errorMessage = `YandexGPT API error (${response.status}): ${errorJson.error.message}`;
+            // Check if it's a permission error
+            if (response.status === 403 && errorJson.error.message.toLowerCase().includes('permission')) {
+              isPermissionError = true;
+            }
           }
         } catch {
           // If not JSON, use the text as-is
+          if (response.status === 403 && errorBody.toLowerCase().includes('permission')) {
+            isPermissionError = true;
+          }
         }
         
         logger.error({
@@ -107,8 +119,15 @@ export class YandexProvider extends BaseProvider {
           apiKeyPresent: !!this.apiKey,
           apiKeyLength: this.apiKey?.length ?? 0,
           hasFolderId: !!folderId,
+          isPermissionError,
         }, 'YandexGPT API request failed');
         
+        // For permission errors (403), don't fall back to mock - throw error so it can be properly handled
+        if (isPermissionError) {
+          throw new Error(errorMessage);
+        }
+        
+        // For other errors, throw as well (don't silently fall back to mock)
         throw new Error(errorMessage);
       }
 
@@ -158,13 +177,27 @@ export class YandexProvider extends BaseProvider {
         raw: payload,
       };
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const isPermissionError = errorMessage.toLowerCase().includes('permission') || 
+                                errorMessage.toLowerCase().includes('denied') ||
+                                errorMessage.includes('403');
+      
       logger.error({ 
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage,
         errorStack: error instanceof Error ? error.stack : undefined,
         model,
         hasApiKey: !!this.apiKey,
         hasFolderId: !!(this.folderId || env.yandexFolderId),
+        isPermissionError,
       }, 'YandexGPT provider failed');
+      
+      // For permission errors, don't fall back to mock - rethrow so caller can handle it properly
+      if (isPermissionError) {
+        throw error;
+      }
+      
+      // For other errors (network, etc.), fall back to mock
+      this.logFallback(`Error: ${errorMessage}`);
       return this.mockResponse(request);
     }
   }

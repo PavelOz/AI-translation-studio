@@ -75,6 +75,7 @@ export default function AgentStepTranslation({
   // Debug: Log when locales or glossary changes
   useEffect(() => {
     console.log('AgentStepTranslation props:', {
+      sourceText: sourceText?.substring(0, 50),
       sourceLocale,
       targetLocale,
       projectId,
@@ -82,8 +83,11 @@ export default function AgentStepTranslation({
       glossaryCount: glossaryEntries?.length || 0,
       isLoadingGlossary,
       glossaryError,
+      currentProvider,
+      aiSettingsProvider: aiSettings?.provider,
+      aiSettingsModel: aiSettings?.model,
     });
-  }, [sourceLocale, targetLocale, projectId, glossaryEntries, isLoadingGlossary, glossaryError]);
+  }, [sourceText, sourceLocale, targetLocale, projectId, glossaryEntries, isLoadingGlossary, glossaryError, currentProvider, aiSettings]);
 
   // Compute current provider from localStorage or project settings (reactive)
   const currentProvider = useMemo((): AIProvider => {
@@ -160,9 +164,46 @@ export default function AgentStepTranslation({
 
   // Step 1: Generate Draft
   const handleGenerateDraft = async () => {
+    console.log('handleGenerateDraft called', {
+      sourceText: sourceText?.substring(0, 50),
+      sourceLocale,
+      targetLocale,
+      projectId,
+      currentProvider,
+      model: aiSettings?.model,
+    });
+
+    // Validate required parameters
+    if (!sourceText || sourceText.trim().length === 0) {
+      console.error('Validation failed: sourceText is empty');
+      toast.error('Source text is required');
+      return;
+    }
+
+    if (!sourceLocale || !targetLocale) {
+      console.error('Validation failed: locales missing', { sourceLocale, targetLocale });
+      toast.error('Source and target locales are required');
+      return;
+    }
+
+    if (!currentProvider) {
+      console.error('Validation failed: provider not configured');
+      toast.error('AI provider is not configured. Please select a provider in settings.');
+      return;
+    }
+
     setIsLoading(true);
     setLoadingMessage('Generating draft translation...');
     try {
+      console.log('Calling aiApi.generateDraft with:', {
+        sourceText: sourceText.substring(0, 50) + '...',
+        projectId,
+        sourceLocale,
+        targetLocale,
+        provider: currentProvider,
+        model: aiSettings?.model,
+      });
+
       // Use the current provider (from localStorage or project settings)
       const result = await aiApi.generateDraft({
         sourceText,
@@ -172,12 +213,20 @@ export default function AgentStepTranslation({
         provider: currentProvider, // Pass current provider from localStorage/project settings
         model: aiSettings?.model, // Pass model from project settings
       });
+
+      console.log('Draft generated successfully', {
+        draftLength: result.draftText?.length,
+        modelUsed: result.modelUsed,
+      });
+
       setEditedDraftText(result.draftText);
       setModelUsed(result.modelUsed);
       setStep('review-draft');
       toast.success('Draft generated successfully');
     } catch (error: any) {
-      toast.error(error.response?.data?.message || 'Failed to generate draft');
+      console.error('Error generating draft:', error);
+      const errorMessage = error.response?.data?.message || error.message || 'Failed to generate draft';
+      toast.error(errorMessage);
     } finally {
       setIsLoading(false);
       setLoadingMessage('');
@@ -757,10 +806,16 @@ export default function AgentStepTranslation({
           <div className="flex justify-end">
             <button
               onClick={handleGenerateDraft}
-              disabled={isLoading}
+              disabled={isLoading || !sourceText?.trim() || !sourceLocale || !targetLocale || !currentProvider}
               className="btn btn-primary"
+              title={
+                !sourceText?.trim() ? 'Source text is required' :
+                !sourceLocale || !targetLocale ? 'Locales are required' :
+                !currentProvider ? 'AI provider is not configured' :
+                'Generate draft translation'
+              }
             >
-              Generate Draft
+              {isLoading ? 'Generating...' : 'Generate Draft'}
             </button>
           </div>
         </div>

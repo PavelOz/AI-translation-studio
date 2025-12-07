@@ -890,6 +890,12 @@ export const runSegmentMachineTranslationWithCritic = async (
   };
   const filteredGlossary = filterGlossaryByContext(context.glossary, documentContext);
 
+  logger.info({
+    provider: context.settings?.provider,
+    model: context.settings?.model,
+    source: 'translateSegment:before-translateWithCritic',
+  }, 'translateSegment: Calling translateWithCritic with provider and model');
+
   const aiResult = await orchestrator.translateWithCritic(
     buildOrchestratorSegment(segment, previous, next, segment.document.name),
     {
@@ -1894,6 +1900,15 @@ export const runCritiqueCheck = async (request: {
   const model = request.model ?? context?.settings?.model;
   const apiKey = request.apiKey ?? context?.apiKey;
   
+  logger.debug({
+    provider,
+    model,
+    requestProvider: request.provider,
+    requestModel: request.model,
+    contextProvider: context?.settings?.provider,
+    contextModel: context?.settings?.model,
+  }, 'runCritiqueCheck: Initial model selection');
+  
   // Filter glossary by locale if provided
   let glossary = context?.glossary ?? [];
   if (request.sourceLocale && request.targetLocale && glossary.length > 0) {
@@ -1938,13 +1953,46 @@ export const runCritiqueCheck = async (request: {
   // Gemini API supports up to 8192 output tokens
   const criticMaxTokens = request.maxTokens ? Math.max(request.maxTokens, 8192) : 8192;
   
+  // Auto-switch Gemini models to gemini-1.5-pro for critic workflow to avoid thoughts token consumption
+  // CRITICAL: Also switch gemini-pro because it often falls back to gemini-2.5-flash
+  // which uses thoughts and consumes all output tokens
+  // This is done here as well as in runCritique to ensure it works in all code paths
+  let criticModel = model;
+  if (provider === 'gemini') {
+    const modelLower = (model || '').toLowerCase();
+    // Check if it's a flash model (these use thoughts aggressively)
+    const isFlashModel = modelLower.includes('flash');
+    // Check if it's gemini-pro (often falls back to gemini-2.5-flash)
+    const isGeminiPro = modelLower === 'gemini-pro' || (modelLower.includes('gemini-pro') && !modelLower.includes('2.5-pro'));
+    // Don't switch if already using gemini-2.5-pro (it's the best available option)
+    const isAlready25Pro = modelLower.includes('2.5-pro') && !isFlashModel;
+    
+    if ((isFlashModel || isGeminiPro) && !isAlready25Pro) {
+      // Use gemini-2.5-pro instead of gemini-1.5-pro because gemini-1.5-pro is not available
+      // gemini-2.5-pro may use thoughts but less aggressively than gemini-2.5-flash
+      const reason = isFlashModel 
+        ? 'Gemini Flash models use thoughts which can consume all output tokens'
+        : 'gemini-pro often falls back to gemini-2.5-flash which uses thoughts';
+      logger.warn({
+        originalModel: model,
+        fallbackModel: 'gemini-2.5-pro',
+        reason,
+        isFlashModel,
+        isGeminiPro,
+        isAlready25Pro,
+        note: 'Using gemini-2.5-pro (gemini-1.5-pro not available)',
+      }, 'Switching to gemini-2.5-pro for critique check (gemini-1.5-pro not available)');
+      criticModel = 'gemini-2.5-pro';
+    }
+  }
+  
   const result = await orchestrator.runCritique(
     request.sourceText,
     request.draftText,
     glossary,
     { 
       provider, 
-      model, 
+      model: criticModel, 
       apiKey,
       yandexFolderId: context?.yandexFolderId,
       sourceLocale: request.sourceLocale,
@@ -2313,17 +2361,37 @@ export const testAICredentials = async (provider: string, apiKey?: string, yande
     const errorMessage = error instanceof Error ? error.message : String(error);
     const errorStack = error instanceof Error ? error.stack : undefined;
     
+    // Check if it's a permission error (403)
+    const isPermissionError = errorMessage.toLowerCase().includes('permission') || 
+                             errorMessage.toLowerCase().includes('denied') ||
+                             errorMessage.includes('403');
+    
+    // Check if it's an authentication error (401)
+    const isAuthError = errorMessage.includes('401') || 
+                       errorMessage.toLowerCase().includes('unauthorized') ||
+                       errorMessage.toLowerCase().includes('invalid api key') ||
+                       errorMessage.toLowerCase().includes('authentication');
+    
+    let userMessage = errorMessage;
+    if (isPermissionError) {
+      userMessage = `Permission denied: The API key and Folder ID are valid, but the service account doesn't have permission to access the Yandex Cloud resources (folder, cloud, or organization). Please check IAM roles and permissions in Yandex Cloud.`;
+    } else if (isAuthError) {
+      userMessage = `Authentication failed: The API key or Folder ID is invalid. Please check your credentials.`;
+    }
+    
     logger.error({
       error: errorMessage,
       errorStack,
       provider,
       hasApiKey: !!apiKey,
       hasYandexFolderId: !!yandexFolderId,
+      isPermissionError,
+      isAuthError,
     }, 'Failed to test AI credentials');
     
     return {
       success: false,
-      message: `Error testing credentials: ${errorMessage}`,
+      message: userMessage,
       provider,
       hasApiKey: !!apiKey,
       hasYandexFolderId: !!yandexFolderId,
