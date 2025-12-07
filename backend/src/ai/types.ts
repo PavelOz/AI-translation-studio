@@ -6,6 +6,12 @@ export type OrchestratorGlossaryEntry = {
   translation: string;
   forbidden?: boolean;
   notes?: string | null;
+  contextRules?: {
+    useOnlyIn?: string[];
+    excludeFrom?: string[];
+    documentTypes?: string[];
+    requires?: string[];
+  };
 };
 
 export type OrchestratorSegment = {
@@ -41,6 +47,11 @@ export type TranslateSegmentsOptions = {
     sourceLang?: string | null;
     targetLang?: string | null;
     summary?: string | null;
+  };
+  document?: {
+    name?: string | null;
+    summary?: string | null;
+    clusterSummary?: string | null;
   };
   guidelines?: string[];
   glossary?: OrchestratorGlossaryEntry[];

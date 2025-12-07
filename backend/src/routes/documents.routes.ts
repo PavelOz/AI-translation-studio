@@ -50,6 +50,7 @@ const pretranslateSchema = z.object({
   rewriteConfirmed: z.boolean().optional(), // Rewrite confirmed segments
   rewriteNonConfirmed: z.boolean().optional(), // Rewrite non-confirmed but not empty segments
   glossaryMode: z.enum(['off', 'strict_source', 'strict_semantic']).optional(),
+  useCritic: z.boolean().optional(), // Use critic AI workflow for higher quality (slower)
 });
 
 const uploadSchema = z.object({

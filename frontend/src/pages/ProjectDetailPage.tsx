@@ -176,6 +176,21 @@ export default function ProjectDetailPage() {
 
         <div className="card">
           <div className="flex justify-between items-center mb-4">
+            <h2 className="text-xl font-semibold">Document Clusters</h2>
+            <Link
+              to={`/projects/${projectId}/clusters`}
+              className="btn btn-primary"
+            >
+              View Clusters
+            </Link>
+          </div>
+          <p className="text-sm text-gray-600 mb-4">
+            Visualize how documents are automatically grouped by similarity. Documents with similar content are clustered together to improve translation consistency.
+          </p>
+        </div>
+
+        <div className="card">
+          <div className="flex justify-between items-center mb-4">
             <h2 className="text-xl font-semibold">Documents</h2>
             <label className="btn btn-primary cursor-pointer">
               {isUploading ? 'Uploading...' : '+ Upload Document'}

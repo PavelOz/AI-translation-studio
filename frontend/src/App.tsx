@@ -11,6 +11,7 @@ import UserReportPage from './pages/UserReportPage';
 import ReportsPage from './pages/ReportsPage';
 import TranslationMemoryPage from './pages/TranslationMemoryPage';
 import GlossaryPage from './pages/GlossaryPage';
+import ClusteringPage from './pages/ClusteringPage';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore();
@@ -42,6 +43,14 @@ function App() {
         element={
           <PrivateRoute>
             <ProjectDetailPage />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/projects/:projectId/clusters"
+        element={
+          <PrivateRoute>
+            <ClusteringPage />
           </PrivateRoute>
         }
       />

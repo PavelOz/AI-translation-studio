@@ -8,6 +8,7 @@ import { getSegmentWithDocument } from './segment.service';
 import { listProviders as listAvailableProviders, getProvider } from '../ai/providers/registry';
 import { logger } from '../utils/logger';
 import type { GlossaryMode } from '../types/glossary';
+import type { ContextRules } from './glossary.service';
 
 const orchestrator = new AIOrchestrator();
 const qaEngine = new QAEngine();
@@ -98,14 +99,22 @@ const normalizeGuidelines = (rules: Prisma.JsonValue | null | undefined): string
 };
 
 const mapGlossaryEntries = (
-  entries: Array<{ sourceTerm: string; targetTerm: string; isForbidden: boolean; notes: string | null }>,
+  entries: Array<{ sourceTerm: string; targetTerm: string; isForbidden: boolean; notes: string | null; contextRules: any }>,
 ): OrchestratorGlossaryEntry[] =>
   entries.map((entry) => ({
     term: entry.sourceTerm,
     translation: entry.targetTerm,
     forbidden: entry.isForbidden,
     notes: entry.notes,
+    contextRules: entry.contextRules as ContextRules | undefined,
   }));
+
+type DocumentContext = {
+  projectDomain?: string | null;
+  projectClient?: string | null;
+  documentName?: string | null;
+  documentType?: string | null; // Could be extracted from document metadata
+};
 
 type AiContext = {
   projectMeta: {
@@ -121,6 +130,86 @@ type AiContext = {
   glossary: OrchestratorGlossaryEntry[];
   apiKey?: string; // Project-specific API key from config
   yandexFolderId?: string; // Project-specific Yandex Folder ID from config
+};
+
+/**
+ * Check if a glossary entry matches the current context based on context rules
+ */
+const matchesContext = (entry: OrchestratorGlossaryEntry, context: DocumentContext): boolean => {
+  const rules = entry.contextRules;
+  if (!rules) {
+    // No context rules = always match
+    return true;
+  }
+
+  // Check excludeFrom first (if excluded, don't use)
+  if (rules.excludeFrom && rules.excludeFrom.length > 0) {
+    const currentContexts: string[] = [];
+    if (context.projectDomain) currentContexts.push(context.projectDomain.toLowerCase());
+    if (context.projectClient) currentContexts.push(context.projectClient.toLowerCase());
+    if (context.documentType) currentContexts.push(context.documentType.toLowerCase());
+    
+    const excluded = rules.excludeFrom.some(excluded => 
+      currentContexts.some(ctx => ctx.includes(excluded.toLowerCase()) || excluded.toLowerCase().includes(ctx))
+    );
+    if (excluded) {
+      return false;
+    }
+  }
+
+  // Check useOnlyIn (if specified, must match)
+  if (rules.useOnlyIn && rules.useOnlyIn.length > 0) {
+    const currentContexts: string[] = [];
+    if (context.projectDomain) currentContexts.push(context.projectDomain.toLowerCase());
+    if (context.projectClient) currentContexts.push(context.projectClient.toLowerCase());
+    if (context.documentType) currentContexts.push(context.documentType.toLowerCase());
+    
+    const matches = rules.useOnlyIn.some(allowed => 
+      currentContexts.some(ctx => ctx.includes(allowed.toLowerCase()) || allowed.toLowerCase().includes(ctx))
+    );
+    if (!matches) {
+      return false;
+    }
+  }
+
+  // Check documentTypes (if specified, must match)
+  if (rules.documentTypes && rules.documentTypes.length > 0) {
+    if (!context.documentType) {
+      return false; // No document type available, can't match
+    }
+    const matches = rules.documentTypes.some(type => 
+      context.documentType!.toLowerCase().includes(type.toLowerCase()) || 
+      type.toLowerCase().includes(context.documentType!.toLowerCase())
+    );
+    if (!matches) {
+      return false;
+    }
+  }
+
+  // Check requires (if specified, all must be met)
+  if (rules.requires && rules.requires.length > 0) {
+    // For now, we'll check if project domain/client matches
+    // This could be extended to check other conditions
+    const currentContexts: string[] = [];
+    if (context.projectDomain) currentContexts.push(context.projectDomain.toLowerCase());
+    if (context.projectClient) currentContexts.push(context.projectClient.toLowerCase());
+    
+    const allMet = rules.requires.every(req => 
+      currentContexts.some(ctx => ctx.includes(req.toLowerCase()) || req.toLowerCase().includes(ctx))
+    );
+    if (!allMet) {
+      return false;
+    }
+  }
+
+  return true;
+};
+
+/**
+ * Filter glossary entries based on document context
+ */
+const filterGlossaryByContext = (glossary: OrchestratorGlossaryEntry[], context: DocumentContext): OrchestratorGlossaryEntry[] => {
+  return glossary.filter(entry => matchesContext(entry, context));
 };
 
 const buildAiContext = async (projectId: string): Promise<AiContext> => {
@@ -144,7 +233,7 @@ const buildAiContext = async (projectId: string): Promise<AiContext> => {
       where: { OR: [{ projectId }, { projectId: null }] },
       orderBy: { createdAt: 'desc' },
       take: 200,
-      select: { sourceTerm: true, targetTerm: true, isForbidden: true, notes: true },
+      select: { sourceTerm: true, targetTerm: true, isForbidden: true, notes: true, contextRules: true },
     }),
   ]);
 
@@ -363,15 +452,39 @@ export const generateSegmentSuggestions = async (documentId: string): Promise<Se
   }
 
   if (segmentsNeedingAI.length > 0) {
+    // Filter glossary by document context
+    const documentContext: DocumentContext = {
+      projectDomain: context.projectMeta.domain,
+      projectClient: context.projectMeta.client,
+      documentName: document.name,
+      documentType: undefined,
+    };
+    const filteredGlossary = filterGlossaryByContext(context.glossary, documentContext);
+
+    // Fetch document with summary fields
+    const documentWithSummary = await prisma.document.findUnique({
+      where: { id: document.id },
+      select: {
+        name: true,
+        summary: true,
+        clusterSummary: true,
+      },
+    });
+
     const aiResults = await orchestrator.translateSegments({
       provider: context.settings?.provider,
       model: context.settings?.model,
       apiKey: context.apiKey,
       yandexFolderId: context.yandexFolderId,
       segments: segmentsNeedingAI,
-      glossary: context.glossary,
+      glossary: filteredGlossary,
       guidelines: context.guidelines,
       project: context.projectMeta,
+      document: documentWithSummary ? {
+        name: documentWithSummary.name,
+        summary: documentWithSummary.summary,
+        clusterSummary: documentWithSummary.clusterSummary,
+      } : undefined,
       sourceLocale: document.sourceLocale, // Pass explicit source locale from document
       targetLocale: document.targetLocale, // Pass explicit target locale from document
       temperature: context.settings?.temperature ?? 0.2,
@@ -557,8 +670,17 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
 
     // Priority 2: Glossary entries - find which terms are actually in the source text
     if (context.glossary && context.glossary.length > 0) {
+      // Build document context for filtering
+      const documentContext: DocumentContext = {
+        projectDomain: context.projectMeta.domain,
+        projectClient: context.projectMeta.client,
+        documentName: segment.document.name,
+        documentType: undefined, // Could be extracted from document metadata in the future
+      };
+      
+      // Filter glossary by context first, then by source text match
       const sourceTextLower = segment.sourceText.toLowerCase();
-      const relevantGlossaryEntries = context.glossary
+      const relevantGlossaryEntries = filterGlossaryByContext(context.glossary, documentContext)
         .filter(entry => {
           const termLower = entry.term.toLowerCase();
           // Check if the term appears in the source text (case-insensitive)
@@ -602,6 +724,25 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
       message: `Generating AI translation using ${context.settings?.provider || 'default'} (${context.settings?.model || 'default model'})`,
     });
 
+    // Filter glossary by document context
+    const documentContext: DocumentContext = {
+      projectDomain: context.projectMeta.domain,
+      projectClient: context.projectMeta.client,
+      documentName: segment.document.name,
+      documentType: undefined,
+    };
+    const filteredGlossary = filterGlossaryByContext(context.glossary, documentContext);
+
+    // Fetch document with summary fields
+    const document = await prisma.document.findUnique({
+      where: { id: segment.document.id },
+      select: {
+        name: true,
+        summary: true,
+        clusterSummary: true,
+      },
+    });
+
     const aiResult = await orchestrator.translateSingleSegment(
       buildOrchestratorSegment(segment, previous, next, segment.document.name),
       {
@@ -609,10 +750,15 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
         model: context.settings?.model,
         apiKey: context.apiKey,
         yandexFolderId: context.yandexFolderId,
-        glossary: context.glossary,
+        glossary: filteredGlossary,
         guidelines: context.guidelines,
         tmExamples, // Pass examples for RAG
         project: context.projectMeta,
+        document: document ? {
+          name: document.name,
+          summary: document.summary,
+          clusterSummary: document.clusterSummary,
+        } : undefined,
         sourceLocale: segment.document.sourceLocale, // Pass explicit source locale from document
         targetLocale: segment.document.targetLocale, // Pass explicit target locale from document
         temperature: context.settings?.temperature ?? 0.2,
@@ -735,6 +881,15 @@ export const runSegmentMachineTranslationWithCritic = async (
     }, 'YandexGPT: Starting translation with critic workflow');
   }
   
+  // Filter glossary by document context
+  const documentContext: DocumentContext = {
+    projectDomain: context.projectMeta.domain,
+    projectClient: context.projectMeta.client,
+    documentName: segment.document.name,
+    documentType: undefined,
+  };
+  const filteredGlossary = filterGlossaryByContext(context.glossary, documentContext);
+
   const aiResult = await orchestrator.translateWithCritic(
     buildOrchestratorSegment(segment, previous, next, segment.document.name),
     {
@@ -742,7 +897,7 @@ export const runSegmentMachineTranslationWithCritic = async (
       model: context.settings?.model,
       apiKey: context.apiKey,
       yandexFolderId: context.yandexFolderId,
-      glossary: context.glossary,
+      glossary: filteredGlossary,
       guidelines: context.guidelines,
       tmExamples, // TM examples used for RAG, but we always generate fresh translation
       project: context.projectMeta,
@@ -906,12 +1061,27 @@ export const runDocumentMachineTranslation = async (
     // Since batch translation processes segments together, we'll use the first segment's examples
     const batchExamples = examplesMap.get(queuedForAI[0]?.segment.id) ?? [];
 
+    // Fetch document with summary fields
+    const documentWithSummary = await prisma.document.findUnique({
+      where: { id: document.id },
+      select: {
+        name: true,
+        summary: true,
+        clusterSummary: true,
+      },
+    });
+
     const aiResults = await orchestrator.translateSegments({
       provider: context.settings?.provider,
       model: context.settings?.model,
       apiKey: context.apiKey,
       yandexFolderId: context.yandexFolderId,
       segments: orchestratorSegments,
+      document: documentWithSummary ? {
+        name: documentWithSummary.name,
+        summary: documentWithSummary.summary,
+        clusterSummary: documentWithSummary.clusterSummary,
+      } : undefined,
       glossary: context.glossary,
       guidelines: context.guidelines,
       tmExamples: batchExamples, // Pass examples for RAG (using first segment's examples for batch)
@@ -962,6 +1132,7 @@ export const pretranslateDocument = async (
     rewriteConfirmed?: boolean; // Rewrite confirmed segments
     rewriteNonConfirmed?: boolean; // Rewrite non-confirmed but not empty segments
     glossaryMode?: GlossaryMode; // Glossary enforcement mode
+    useCritic?: boolean; // Use critic AI workflow for higher quality (slower)
   },
 ) => {
   const glossaryMode = options?.glossaryMode ?? 'strict_source'; // Default to strict_source if not provided
@@ -1171,95 +1342,237 @@ export const pretranslateDocument = async (
 
     // Step 2: Apply AI translations if requested
     if (queuedForAI.length > 0 && context.settings) {
-      // Process AI translations in batches to allow progress updates
-      const batchSize = 10; // Process 10 segments at a time
-      for (let i = 0; i < queuedForAI.length; i += batchSize) {
-        // Check for cancellation before each batch
-        if (isCancelled(documentId)) {
-          // Save any pending updates before cancelling
+      const useCritic = options?.useCritic ?? false;
+      
+      if (useCritic) {
+        // Process segments one by one with critic AI (slower but higher quality)
+        for (let i = 0; i < queuedForAI.length; i += 1) {
+          // Check for cancellation before each segment
+          if (isCancelled(documentId)) {
+            // Save any pending updates before cancelling
+            if (pendingUpdates.length > 0) {
+              await prisma.$transaction(pendingUpdates);
+              pendingUpdates = [];
+            }
+            console.log('Pretranslation cancelled - stopping AI translation (critic mode)');
+            break; // Exit loop, updates already saved
+          }
+
+          const entry = queuedForAI[i];
+          const orchestratorSegment = buildOrchestratorSegment(
+            entry.segment,
+            entry.previous,
+            entry.next,
+            document.name ?? undefined,
+          );
+          
+          // Update progress for current segment
+          const aiStartIndex = eligibleSegments.findIndex((s) => s.id === entry.segment.id);
+          if (aiStartIndex >= 0) {
+            updateProgress(documentId, {
+              currentSegment: aiStartIndex + 1,
+              currentSegmentId: entry.segment.id,
+              currentSegmentText: entry.segment.sourceText.substring(0, 100) + (entry.segment.sourceText.length > 100 ? '...' : ''),
+            });
+          }
+
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            // Filter glossary by document context
+            const documentContext: DocumentContext = {
+              projectDomain: context.projectMeta.domain,
+              projectClient: context.projectMeta.client,
+              documentName: document.name,
+              documentType: undefined,
+            };
+            const filteredGlossary = filterGlossaryByContext(context.glossary, documentContext);
+
+            // Fetch document with summary fields
+            const documentWithSummary = await prisma.document.findUnique({
+              where: { id: document.id },
+              select: {
+                name: true,
+                summary: true,
+                clusterSummary: true,
+              },
+            });
+
+            // eslint-disable-next-line no-await-in-loop
+            const aiResult = await orchestrator.translateWithCritic(
+              orchestratorSegment,
+              {
+                provider: context.settings.provider,
+                model: context.settings.model,
+                apiKey: context.apiKey,
+                yandexFolderId: context.yandexFolderId,
+                glossary: filteredGlossary,
+                guidelines: context.guidelines,
+                document: documentWithSummary ? {
+                  name: documentWithSummary.name,
+                  summary: documentWithSummary.summary,
+                  clusterSummary: documentWithSummary.clusterSummary,
+                } : undefined,
+                project: context.projectMeta,
+                sourceLocale: document.sourceLocale,
+                targetLocale: document.targetLocale,
+                temperature: context.settings.temperature ?? 0.2,
+                maxTokens: context.settings.maxTokens ?? 1024,
+                glossaryMode,
+              },
+            );
+
+            const targetText = aiResult?.targetText ?? entry.segment.sourceText;
+            // Add to pending updates
+            pendingUpdates.push(
+              prisma.segment.update({
+                where: { id: entry.segment.id },
+                data: {
+                  targetMt: targetText,
+                  targetFinal: targetText,
+                  fuzzyScore: aiResult ? Math.round((aiResult.confidence ?? 0.95) * 100) : null,
+                  bestTmEntryId: null,
+                  status: 'MT',
+                },
+              }),
+            );
+            const result = {
+              segmentId: entry.segment.id,
+              method: 'ai' as const,
+              targetMt: targetText,
+              fuzzyScore: aiResult ? Math.round((aiResult.confidence ?? 0.95) * 100) : undefined,
+            };
+            responseLog.push(result);
+            addResult(documentId, result);
+
+            // Save after each segment in critic mode (more frequent saves)
+            if (pendingUpdates.length > 0) {
+              await prisma.$transaction(pendingUpdates);
+              pendingUpdates = [];
+            }
+
+            // Update progress after each segment
+            updateProgress(documentId, { aiApplied: responseLog.filter((r) => r.method === 'ai').length });
+          } catch (error) {
+            logger.error({ error, segmentId: entry.segment.id }, 'Critic AI translation failed for segment');
+            // Continue with next segment even if this one failed
+          }
+        }
+      } else {
+        // Process AI translations in batches (faster, standard mode)
+        const batchSize = 10; // Process 10 segments at a time
+        for (let i = 0; i < queuedForAI.length; i += batchSize) {
+          // Check for cancellation before each batch
+          if (isCancelled(documentId)) {
+            // Save any pending updates before cancelling
+            if (pendingUpdates.length > 0) {
+              await prisma.$transaction(pendingUpdates);
+              pendingUpdates = [];
+            }
+            console.log('Pretranslation cancelled - stopping AI translation batch processing');
+            break; // Exit loop, updates already saved
+          }
+
+          const batch = queuedForAI.slice(i, i + batchSize);
+          const orchestratorSegments = batch.map((entry) =>
+            buildOrchestratorSegment(entry.segment, entry.previous, entry.next, document.name ?? undefined),
+          );
+          
+          // Update progress for AI batch
+          const aiStartIndex = eligibleSegments.findIndex((s) => s.id === batch[0].segment.id);
+          if (aiStartIndex >= 0) {
+            updateProgress(documentId, {
+              currentSegment: aiStartIndex + 1,
+              currentSegmentId: batch[0].segment.id,
+              currentSegmentText: batch[0].segment.sourceText.substring(0, 100) + (batch[0].segment.sourceText.length > 100 ? '...' : ''),
+            });
+          }
+
+          // Filter glossary by document context
+          const documentContext: DocumentContext = {
+            projectDomain: context.projectMeta.domain,
+            projectClient: context.projectMeta.client,
+            documentName: document.name,
+            documentType: undefined,
+          };
+          const filteredGlossary = filterGlossaryByContext(context.glossary, documentContext);
+
+          // Fetch document with summary fields
+          const documentWithSummary = await prisma.document.findUnique({
+            where: { id: document.id },
+            select: {
+              name: true,
+              summary: true,
+              clusterSummary: true,
+            },
+          });
+
+          // eslint-disable-next-line no-await-in-loop
+          const aiResults = await orchestrator.translateSegments({
+            provider: context.settings.provider,
+            model: context.settings.model,
+            apiKey: context.apiKey,
+            yandexFolderId: context.yandexFolderId,
+            document: documentWithSummary ? {
+              name: documentWithSummary.name,
+              summary: documentWithSummary.summary,
+              clusterSummary: documentWithSummary.clusterSummary,
+            } : undefined,
+            segments: orchestratorSegments,
+            glossary: filteredGlossary,
+            guidelines: context.guidelines,
+            project: context.projectMeta,
+            sourceLocale: document.sourceLocale, // Pass explicit source locale from document
+            targetLocale: document.targetLocale, // Pass explicit target locale from document
+            temperature: context.settings.temperature ?? 0.2,
+            maxTokens: context.settings.maxTokens ?? 1024,
+            glossaryMode,
+          });
+
+          const resultMap = new Map(aiResults.map((result) => [result.segmentId, result]));
+
+          batch.forEach((entry) => {
+            const aiResult = resultMap.get(entry.segment.id);
+            const targetText = aiResult?.targetText ?? entry.segment.sourceText;
+            // Add to pending updates
+            pendingUpdates.push(
+              prisma.segment.update({
+                where: { id: entry.segment.id },
+                data: {
+                  targetMt: targetText,
+                  targetFinal: targetText,
+                  fuzzyScore: aiResult ? Math.round((aiResult.confidence ?? 0.85) * 100) : null,
+                  bestTmEntryId: null,
+                  status: 'MT',
+                },
+              }),
+            );
+            const result = {
+              segmentId: entry.segment.id,
+              method: 'ai' as const,
+              targetMt: targetText,
+              fuzzyScore: aiResult ? Math.round((aiResult.confidence ?? 0.85) * 100) : undefined,
+            };
+            responseLog.push(result);
+            addResult(documentId, result);
+          });
+
+          // Save AI updates immediately after each batch to preserve on cancellation
+          // This is critical - save before checking cancellation for next batch
           if (pendingUpdates.length > 0) {
             await prisma.$transaction(pendingUpdates);
             pendingUpdates = [];
           }
-          console.log('Pretranslation cancelled - stopping AI translation batch processing');
-          break; // Exit loop, updates already saved
-        }
+          
+          // Check for cancellation AFTER saving this batch's updates
+          if (isCancelled(documentId)) {
+            console.log('Pretranslation cancelled - stopping after saving current batch');
+            break; // Exit loop, updates already saved
+          }
 
-        const batch = queuedForAI.slice(i, i + batchSize);
-        const orchestratorSegments = batch.map((entry) =>
-          buildOrchestratorSegment(entry.segment, entry.previous, entry.next, document.name ?? undefined),
-        );
-        
-        // Update progress for AI batch
-        const aiStartIndex = eligibleSegments.findIndex((s) => s.id === batch[0].segment.id);
-        if (aiStartIndex >= 0) {
-          updateProgress(documentId, {
-            currentSegment: aiStartIndex + 1,
-            currentSegmentId: batch[0].segment.id,
-            currentSegmentText: batch[0].segment.sourceText.substring(0, 100) + (batch[0].segment.sourceText.length > 100 ? '...' : ''),
-          });
-        }
-
-        // eslint-disable-next-line no-await-in-loop
-        const aiResults = await orchestrator.translateSegments({
-          provider: context.settings.provider,
-          model: context.settings.model,
-          apiKey: context.apiKey,
-          yandexFolderId: context.yandexFolderId,
-          segments: orchestratorSegments,
-          glossary: context.glossary,
-          guidelines: context.guidelines,
-          project: context.projectMeta,
-          sourceLocale: document.sourceLocale, // Pass explicit source locale from document
-          targetLocale: document.targetLocale, // Pass explicit target locale from document
-          temperature: context.settings.temperature ?? 0.2,
-          maxTokens: context.settings.maxTokens ?? 1024,
-        });
-
-        const resultMap = new Map(aiResults.map((result) => [result.segmentId, result]));
-
-        batch.forEach((entry) => {
-          const aiResult = resultMap.get(entry.segment.id);
-          const targetText = aiResult?.targetText ?? entry.segment.sourceText;
-          // Add to pending updates
-          pendingUpdates.push(
-            prisma.segment.update({
-              where: { id: entry.segment.id },
-              data: {
-                targetMt: targetText,
-                targetFinal: targetText,
-                fuzzyScore: aiResult ? Math.round((aiResult.confidence ?? 0.85) * 100) : null,
-                bestTmEntryId: null,
-                status: 'MT',
-              },
-            }),
-          );
-          const result = {
-            segmentId: entry.segment.id,
-            method: 'ai' as const,
-            targetMt: targetText,
-            fuzzyScore: aiResult ? Math.round((aiResult.confidence ?? 0.85) * 100) : undefined,
-          };
-          responseLog.push(result);
-          addResult(documentId, result);
-        });
-
-        // Save AI updates immediately after each batch to preserve on cancellation
-        // This is critical - save before checking cancellation for next batch
-        if (pendingUpdates.length > 0) {
-          await prisma.$transaction(pendingUpdates);
-          pendingUpdates = [];
-        }
-        
-        // Check for cancellation AFTER saving this batch's updates
-        if (isCancelled(documentId)) {
-          console.log('Pretranslation cancelled - stopping after saving current batch');
-          break; // Exit loop, updates already saved
-        }
-
-        // Update AI progress less frequently
-        if (responseLog.filter((r) => r.method === 'ai').length % 10 === 0 || i + batchSize >= queuedForAI.length) {
-          updateProgress(documentId, { aiApplied: responseLog.filter((r) => r.method === 'ai').length });
+          // Update AI progress less frequently
+          if (responseLog.filter((r) => r.method === 'ai').length % 10 === 0 || i + batchSize >= queuedForAI.length) {
+            updateProgress(documentId, { aiApplied: responseLog.filter((r) => r.method === 'ai').length });
+          }
         }
       }
     }
@@ -1452,6 +1765,16 @@ export const translateTextDirectly = async (request: DirectTranslationRequest) =
     }
   }
 
+  // Filter glossary by project context (if available)
+  // For direct translation without document, we can only filter by project domain/client
+  const projectContext: DocumentContext = {
+    projectDomain: projectMeta.domain,
+    projectClient: projectMeta.client,
+    documentName: undefined,
+    documentType: undefined,
+  };
+  const filteredGlossary = filterGlossaryByContext(glossary, projectContext);
+
   const segment: OrchestratorSegment = {
     segmentId: 'direct-translation',
     sourceText: request.sourceText,
@@ -1465,7 +1788,7 @@ export const translateTextDirectly = async (request: DirectTranslationRequest) =
     model,
     apiKey,
     yandexFolderId: context?.yandexFolderId,
-    glossary,
+    glossary: filteredGlossary,
     guidelines,
     tmExamples, // Pass examples for RAG
     project: projectMeta,
@@ -1611,6 +1934,10 @@ export const runCritiqueCheck = async (request: {
     targetLocale: request.targetLocale,
   }, 'Running critique check with glossary');
 
+  // Use much higher maxTokens for critic (prompts are very long with detailed instructions)
+  // Gemini API supports up to 8192 output tokens
+  const criticMaxTokens = request.maxTokens ? Math.max(request.maxTokens, 8192) : 8192;
+  
   const result = await orchestrator.runCritique(
     request.sourceText,
     request.draftText,
@@ -1622,6 +1949,7 @@ export const runCritiqueCheck = async (request: {
       yandexFolderId: context?.yandexFolderId,
       sourceLocale: request.sourceLocale,
       targetLocale: request.targetLocale,
+      maxTokens: criticMaxTokens,
     },
   );
 
@@ -1926,18 +2254,50 @@ export const testAICredentials = async (provider: string, apiKey?: string, yande
   const { env } = await import('../utils/env');
   
   try {
+    // Validate API key presence
+    if (!apiKey && provider !== 'yandex') {
+      return {
+        success: false,
+        message: `API key is required for ${provider}`,
+        provider,
+        hasApiKey: false,
+        hasYandexFolderId: !!yandexFolderId,
+        error: 'Missing API key',
+      };
+    }
+    
+    if (provider === 'yandex' && (!apiKey || !yandexFolderId)) {
+      return {
+        success: false,
+        message: 'Both API key and Folder ID are required for Yandex GPT',
+        provider,
+        hasApiKey: !!apiKey,
+        hasYandexFolderId: !!yandexFolderId,
+        error: 'Missing API key or Folder ID',
+      };
+    }
+    
     const aiProvider = getProvider(provider, apiKey, yandexFolderId);
     
     // Create a simple test request
     const testRequest = {
       prompt: 'Translate "Hello" to Spanish. Return JSON: [{"segment_id":"test","target_mt":"Hola"}]',
       segments: [{ segmentId: 'test', sourceText: 'Hello' }],
+      model: undefined,
+      temperature: 0.2,
+      maxTokens: 100,
     };
+    
+    logger.info({ provider, hasApiKey: !!apiKey, hasYandexFolderId: !!yandexFolderId }, 'Testing AI credentials');
     
     const response = await aiProvider.callModel(testRequest);
     
     // Check if we got a valid response (not a mock)
     const isMock = response.usage?.metadata?.mock === true;
+    
+    if (isMock) {
+      logger.warn({ provider }, 'Credentials test returned mock response - credentials may be invalid');
+    }
     
     return {
       success: !isMock,
@@ -1947,15 +2307,27 @@ export const testAICredentials = async (provider: string, apiKey?: string, yande
       provider,
       hasApiKey: !!apiKey,
       hasYandexFolderId: !!yandexFolderId,
+      usage: response.usage,
     };
   } catch (error) {
-    logger.error({ error, provider }, 'Failed to test AI credentials');
-    return {
-      success: false,
-      message: `Error testing credentials: ${(error as Error).message}`,
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorStack = error instanceof Error ? error.stack : undefined;
+    
+    logger.error({
+      error: errorMessage,
+      errorStack,
       provider,
       hasApiKey: !!apiKey,
       hasYandexFolderId: !!yandexFolderId,
+    }, 'Failed to test AI credentials');
+    
+    return {
+      success: false,
+      message: `Error testing credentials: ${errorMessage}`,
+      provider,
+      hasApiKey: !!apiKey,
+      hasYandexFolderId: !!yandexFolderId,
+      error: errorMessage,
     };
   }
 };

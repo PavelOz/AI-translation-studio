@@ -4,7 +4,16 @@ import { z } from 'zod';
 import { asyncHandler } from '../utils/asyncHandler';
 import { requireAuth } from '../utils/authMiddleware';
 import { listGlossaryEntries, upsertGlossaryEntry, getGlossaryEntry, deleteGlossaryEntry, importGlossaryCsv } from '../services/glossary.service';
+import { findRelevantGlossaryEntries } from '../services/glossary-search.service';
+import { getGlossaryEmbeddingStats } from '../services/vector-search.service';
 import { ApiError } from '../utils/apiError';
+
+const contextRulesSchema = z.object({
+  useOnlyIn: z.array(z.string()).optional(),
+  excludeFrom: z.array(z.string()).optional(),
+  documentTypes: z.array(z.string()).optional(),
+  requires: z.array(z.string()).optional(),
+}).optional();
 
 const upsertSchema = z.object({
   id: z.string().uuid().optional(),
@@ -17,10 +26,19 @@ const upsertSchema = z.object({
   status: z.enum(['PREFERRED', 'DEPRECATED']).optional(),
   forbidden: z.boolean().optional(),
   notes: z.string().optional(),
+  contextRules: contextRulesSchema,
 });
 
 const importSchema = z.object({
   projectId: z.string().uuid().optional(),
+});
+
+const searchSchema = z.object({
+  sourceText: z.string().min(1),
+  projectId: z.string().uuid().optional(),
+  sourceLocale: z.string().optional(),
+  targetLocale: z.string().optional(),
+  minSimilarity: z.number().min(0).max(1).optional(),
 });
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
@@ -50,6 +68,47 @@ glossaryRoutes.post(
   }),
 );
 
+// Specific routes must come before parameterized routes (/:entryId)
+glossaryRoutes.get(
+  '/embedding-stats',
+  asyncHandler(async (req, res) => {
+    const stats = await getGlossaryEmbeddingStats(
+      req.query.projectId as string | undefined,
+    );
+    res.json(stats);
+  }),
+);
+
+glossaryRoutes.post(
+  '/import',
+  upload.single('file'),
+  asyncHandler(async (req, res) => {
+    if (!req.file) {
+      throw ApiError.badRequest('Glossary file is required');
+    }
+    const payload = importSchema.parse(req.body);
+    const result = await importGlossaryCsv(req.file.buffer, payload.projectId);
+    res.status(201).json(result);
+  }),
+);
+
+glossaryRoutes.post(
+  '/search',
+  asyncHandler(async (req, res) => {
+    const payload = searchSchema.parse(req.body);
+
+    const results = await findRelevantGlossaryEntries(payload.sourceText, {
+      projectId: payload.projectId,
+      sourceLocale: payload.sourceLocale,
+      targetLocale: payload.targetLocale,
+      minSimilarity: payload.minSimilarity,
+    });
+
+    res.json(results);
+  }),
+);
+
+// Parameterized routes come last
 glossaryRoutes.get(
   '/:entryId',
   asyncHandler(async (req, res) => {
@@ -72,19 +131,6 @@ glossaryRoutes.delete(
   asyncHandler(async (req, res) => {
     await deleteGlossaryEntry(req.params.entryId);
     res.status(204).send();
-  }),
-);
-
-glossaryRoutes.post(
-  '/import',
-  upload.single('file'),
-  asyncHandler(async (req, res) => {
-    if (!req.file) {
-      throw ApiError.badRequest('Glossary file is required');
-    }
-    const payload = importSchema.parse(req.body);
-    const result = await importGlossaryCsv(req.file.buffer, payload.projectId);
-    res.status(201).json(result);
   }),
 );
 

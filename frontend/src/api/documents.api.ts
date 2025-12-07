@@ -105,6 +105,7 @@ export const documentsApi = {
       rewriteConfirmed?: boolean;
       rewriteNonConfirmed?: boolean;
       glossaryMode?: GlossaryMode;
+      useCritic?: boolean;
     },
   ): Promise<{
     status: string;

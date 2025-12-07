@@ -127,6 +127,23 @@ export class AIOrchestrator {
       targetLangCode
     );
 
+    const document = options.document ?? {};
+    
+    // Build document context section
+    const documentContextParts: string[] = [];
+    if (document.name) {
+      documentContextParts.push(`Document: ${document.name}`);
+    }
+    if (document.summary) {
+      documentContextParts.push(`Document summary: ${document.summary}`);
+    }
+    if (document.clusterSummary) {
+      documentContextParts.push(`Cluster context: ${document.clusterSummary}`);
+    }
+    const documentContext = documentContextParts.length > 0 
+      ? `\n${documentContextParts.join('\n')}` 
+      : '';
+
     return [
       'You are a professional technical/legal translator.',
       '',
@@ -157,6 +174,7 @@ export class AIOrchestrator {
       '=== PROJECT CONTEXT ===',
       `Project: ${project.name ?? 'AI Translation Studio'} | Client: ${project.client ?? 'N/A'} | Domain: ${project.domain ?? 'general'}`,
       project.summary ? `Project summary/context: ${project.summary}` : 'Project summary/context: not provided.',
+      documentContext,
       '',
       examplesText,
       '',
@@ -637,7 +655,7 @@ export class AIOrchestrator {
     sourceText: string,
     draftText: string,
     glossary: OrchestratorGlossaryEntry[] | undefined,
-    options: { provider?: string; model?: string; apiKey?: string; yandexFolderId?: string; sourceLocale?: string; targetLocale?: string },
+    options: { provider?: string; model?: string; apiKey?: string; yandexFolderId?: string; sourceLocale?: string; targetLocale?: string; maxTokens?: number },
   ): Promise<{
     errors: Array<{ term: string; expected: string; found: string; severity: string }>;
     reasoning: string;
@@ -882,11 +900,24 @@ export class AIOrchestrator {
     ].join('\n');
 
     // 2. Call AI
+    // Critic prompts are very long (detailed instructions + glossary + examples)
+    // Responses can also be long (JSON array + reasoning)
+    // Use much higher maxTokens to avoid truncation
+    // Gemini API supports up to 8192 output tokens for most models
+    const criticMaxTokens = options.maxTokens ? Math.max(options.maxTokens, 8192) : 8192; // Default 8192 for critic
+    
+    logger.debug({
+      promptLength: prompt.length,
+      promptTokensEstimate: Math.ceil(prompt.length / 4), // Rough estimate: ~4 chars per token
+      maxTokens: criticMaxTokens,
+      glossaryEntriesCount: glossary?.length || 0,
+    }, 'Critic: Calling AI with increased maxTokens');
+    
     const response = await provider.callModel({
       prompt,
       model,
       temperature: 0.1, // Keep it cold and logical
-      maxTokens: 1024,
+      maxTokens: criticMaxTokens,
       segments: [{ segmentId: 'critique', sourceText }],
     });
 
@@ -1124,12 +1155,22 @@ export class AIOrchestrator {
       '"text"',
     ].join('\n');
 
+    // Editor/Fix prompts can be long (source text + draft + glossary + error list)
+    // Use higher maxTokens to ensure complete responses
+    const editorMaxTokens = options.maxTokens ? Math.max(options.maxTokens, 2048) : 2048;
+    
+    logger.debug({
+      promptLength: prompt.length,
+      maxTokens: editorMaxTokens,
+      errorsCount: validErrors.length,
+    }, 'fixTranslation: Calling AI with increased maxTokens');
+    
     try {
       const response = await provider.callModel({
         prompt,
         model,
         temperature: options.temperature ?? 0.2,
-        maxTokens: options.maxTokens ?? 1024,
+        maxTokens: editorMaxTokens,
         segments: [{ segmentId: 'fix', sourceText }],
       });
 
@@ -1249,6 +1290,9 @@ export class AIOrchestrator {
     
     // 2. Critic
     onProgress?.('critic', 'Running critique analysis...');
+    // Use much higher maxTokens for critic (prompts are very long, responses can be long too)
+    // Gemini API supports up to 8192 output tokens
+    const criticMaxTokens = options.maxTokens ? Math.max(options.maxTokens, 8192) : 8192;
     const critique = await this.runCritique(
         segment.sourceText, 
         draft.draftText, 
@@ -1260,6 +1304,7 @@ export class AIOrchestrator {
           yandexFolderId: options.yandexFolderId,
           sourceLocale: options.sourceLocale,
           targetLocale: options.targetLocale,
+          maxTokens: criticMaxTokens,
         }
     );
 

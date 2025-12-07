@@ -167,20 +167,29 @@ export default function GlossaryImportModal({
                 disabled={isImporting}
               />
               <p className="text-xs text-gray-500 mt-1">
-                CSV format: sourceTerm,targetTerm,description,status,forbidden,notes
+                CSV must include <code className="bg-gray-100 px-1 rounded">term_source</code> and <code className="bg-gray-100 px-1 rounded">term_target</code> columns
               </p>
             </div>
 
             <div className="bg-blue-50 border border-blue-200 rounded p-3">
               <p className="text-sm text-blue-800 font-medium mb-1">CSV Format:</p>
               <p className="text-xs text-blue-700">
-                The CSV file should have the following columns (in order):<br />
-                <code className="bg-blue-100 px-1 rounded">sourceTerm</code>,{' '}
-                <code className="bg-blue-100 px-1 rounded">targetTerm</code>,{' '}
-                <code className="bg-blue-100 px-1 rounded">description</code> (optional),{' '}
-                <code className="bg-blue-100 px-1 rounded">status</code> (PREFERRED/DEPRECATED, optional),{' '}
-                <code className="bg-blue-100 px-1 rounded">forbidden</code> (true/false, optional),{' '}
-                <code className="bg-blue-100 px-1 rounded">notes</code> (optional)
+                The CSV file must include these required columns:<br />
+                <code className="bg-blue-100 px-1 rounded font-semibold">term_source</code> (required),{' '}
+                <code className="bg-blue-100 px-1 rounded font-semibold">term_target</code> (required)
+                <br />
+                <br />
+                Optional columns:<br />
+                <code className="bg-blue-100 px-1 rounded">notes</code>,{' '}
+                <code className="bg-blue-100 px-1 rounded">forbidden</code> (true/false)
+                <br />
+                <br />
+                Example CSV:<br />
+                <code className="bg-blue-100 px-1 rounded text-xs">
+                  term_source,term_target,notes,forbidden<br />
+                  ТРУ,Товары работы и услуги,Procurement term,false<br />
+                  Исполнитель,Contractor,Legal term,false
+                </code>
               </p>
             </div>
 

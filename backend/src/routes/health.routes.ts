@@ -11,7 +11,7 @@ export const healthRoutes = Router();
  * Returns status: 'ok' if database is connected, 'error' otherwise
  */
 healthRoutes.get(
-  '/health',
+  '/',
   asyncHandler(async (_req, res) => {
     try {
       // Simple database query to verify connection

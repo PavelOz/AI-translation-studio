@@ -52,8 +52,9 @@ Unlike simple translation tools, AI Translation Studio:
 ### Core Capabilities
 
 1. **Upload Documents**
-   - Upload Word documents (.docx), Excel files (.xlsx), or XLIFF files
+   - Upload Word documents (.docx), Excel files (.xlsx), or XLIFF files (.xliff or .xlf)
    - The system automatically breaks them into translatable segments
+   - DOCX files preserve the exact order of paragraphs and tables as they appear in the original document
 
 2. **Translate with AI**
    - Get instant AI-powered translation suggestions
@@ -81,8 +82,9 @@ Unlike simple translation tools, AI Translation Studio:
    - Generate reports on productivity
 
 7. **Export Translated Documents**
-   - Download completed translations
-   - Original formatting is preserved
+   - Download completed translations in the same format as the original
+   - Original formatting and structure are preserved
+   - Paragraph and table order maintained in DOCX files
    - Ready to deliver to clients
 
 ---
@@ -130,6 +132,8 @@ The translation editor is where you do your work. It's divided into several area
 
 **Left Side - Segment List**
 - Shows all the text segments in your document
+- Segments appear in the same order as in the original document
+- Each segment shows its type (paragraph, table-cell, cell, etc.)
 - Color-coded by status:
   - White = Not started
   - Light Blue = Machine translated (AI suggestion)
@@ -138,6 +142,7 @@ The translation editor is where you do your work. It's divided into several area
 
 **Center - Main Editor**
 - Shows the source text (what you're translating from)
+- Displays segment type (paragraph, table cell, etc.)
 - Text box for your translation
 - Buttons to confirm, edit, or get AI suggestions
 
@@ -197,6 +202,7 @@ A glossary is a list of preferred terms and their translations. For example, "р
 - **Import from CSV**: Bulk import terms from Excel files
 - **Filter**: Find terms by project or language
 - **Search**: Quickly find specific terms
+- **Context Rules**: Specify where terms should or should not be used
 
 **Enforcement Modes:**
 - **Off**: Glossary is ignored (not recommended)
@@ -207,6 +213,19 @@ A glossary is a list of preferred terms and their translations. For example, "р
 - Red badge: Forbidden term (must use exactly, no alternatives)
 - Yellow badge: Deprecated term (should not be used)
 - Green badge: Preferred term (should be used)
+
+**Context Rules:**
+You can specify when a glossary term should or should not be used:
+- **Use Only In**: Only use this term in specific contexts/domains (e.g., "legal", "medical")
+- **Exclude From**: Never use this term in these contexts (e.g., "marketing", "casual")
+- **Document Types**: Only use in specific document types (e.g., "contract", "report")
+- **Requires**: Only use when certain conditions are met (e.g., "formal_tone", "technical")
+
+**Example:**
+- Term: "rehabilitation" 
+- Use Only In: "medical, healthcare"
+- Exclude From: "legal, contracts"
+- This means: Use "rehabilitation" only in medical/healthcare contexts, never in legal documents
 
 **Glossary Page:**
 - Accessible from main navigation menu
@@ -421,7 +440,12 @@ A visual indicator in the top navigation bar that shows whether the database is 
 7. Add description or notes (optional)
 8. Set status: Preferred or Deprecated
 9. Mark as "Forbidden" if term must be used exactly
-10. Click "Create"
+10. (Optional) Click "Show Context Rules" to specify when/where to use this term:
+    - **Use Only In**: Enter contexts where term should be used (comma-separated)
+    - **Exclude From**: Enter contexts where term should NOT be used (comma-separated)
+    - **Document Types**: Enter document types where term should be used
+    - **Requires**: Enter conditions that must be met
+11. Click "Create"
 
 **Importing Glossary:**
 1. Go to Glossary page
@@ -435,8 +459,9 @@ A visual indicator in the top navigation bar that shows whether the database is 
 1. Go to Glossary page
 2. Find the entry you want to edit
 3. Click "Edit" button
-4. Modify any field (terms, locales, description, notes, status, forbidden flag)
-5. Click "Update" to save changes
+4. Modify any field (terms, locales, description, notes, status, forbidden flag, context rules)
+5. Click "Show Context Rules" to edit context-specific usage rules if needed
+6. Click "Update" to save changes
 
 **Using Glossary in Translation:**
 1. Set glossary mode in Editor sidebar:
@@ -545,15 +570,22 @@ A visual indicator in the top navigation bar that shows whether the database is 
 ### 6.1 Segments
 
 A **segment** is a single unit of text to translate. It could be:
-- A sentence
-- A paragraph
-- A cell in a spreadsheet
+- A paragraph (most common in Word documents)
+- A cell in a table (within Word documents)
+- A cell in a spreadsheet (Excel files)
 - A translation unit in an XLIFF file
 
 Each segment has:
 - **Source text**: The original text
 - **Target text**: Your translation
 - **Status**: NEW, MT (machine translated), EDITED, or CONFIRMED
+- **Segment Type**: Identifies the content type (paragraph, table-cell, cell, unit, etc.)
+- **Segment Index**: Position in the document (preserves order)
+
+**Order Preservation:**
+- Segments are extracted and displayed in the exact order they appear in the source document
+- For DOCX files, paragraphs and tables maintain their original sequence
+- This ensures the translated document structure matches the original
 
 ### 6.2 Translation Memory (TM)
 
@@ -591,6 +623,17 @@ A **glossary** is your terminology dictionary. It tells the system:
 - **Project Glossary**: Terms specific to one project
 - **Global Glossary**: Terms shared across all projects
 - Both are used when translating in a project
+
+**Context-Aware Filtering:**
+- Glossary entries can have context rules that specify when they should be used
+- Terms are automatically filtered based on:
+  - Project domain (from project settings)
+  - Project client (from project settings)
+  - Document name and type
+- Terms are only applied when their context rules match the current document/project context
+- This ensures terms are used appropriately for different document types and contexts
+- Example: A term with "Use Only In: medical" will only be used in medical projects
+- Example: A term with "Exclude From: legal" will never be used in legal documents
 
 ### 6.4 Projects
 
@@ -749,11 +792,17 @@ Each has different:
 - Check if Caps Lock is on
 
 **Problem: Document won't upload**
-- Check file format (must be .docx, .xlsx, or .xliff)
+- Check file format (must be .docx, .xlsx, .xliff, or .xlf)
 - Ensure file isn't too large (check with administrator for size limits)
 - Check internet connection
 - Try a different browser
 - Make sure file isn't corrupted
+
+**Problem: Document segments appear in wrong order**
+- DOCX files now preserve paragraph and table order correctly
+- If you see order issues, try re-importing the document
+- Check that you're using the latest version of the application
+- For complex documents with mixed content, the system maintains the original structure
 
 **Problem: AI translation not working**
 - Check AI settings in project
@@ -845,6 +894,27 @@ Remember: The system learns from you. The more you use it, the better it becomes
 **Document Version**: 2.3  
 **Last Updated**: January 2025  
 **For Technical Details**: See technical documentation files in `/docs` folder
+
+---
+
+## File Format Support
+
+**DOCX (Word Documents):**
+- Supports paragraphs, tables, headers, and footers
+- Preserves formatting and document structure
+- Maintains exact order of paragraphs and tables
+- Optional LibreOffice integration for enhanced parsing (if configured)
+
+**XLSX (Excel Files):**
+- Supports multiple sheets
+- Extracts cell content as segments
+- Preserves sheet names and cell positions
+
+**XLIFF (Translation Exchange Format):**
+- Standard format for translation projects
+- Supports both .xliff and .xlf file extensions
+- Preserves translation units and tags
+- Supports metadata and notes
 
 ---
 

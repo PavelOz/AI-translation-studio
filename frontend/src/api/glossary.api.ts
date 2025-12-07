@@ -2,6 +2,13 @@ import apiClient from './client';
 
 export type GlossaryStatus = 'PREFERRED' | 'DEPRECATED';
 
+export type ContextRules = {
+  useOnlyIn?: string[]; // Only use in these contexts/domains
+  excludeFrom?: string[]; // Never use in these contexts/domains
+  documentTypes?: string[]; // Only use in these document types
+  requires?: string[]; // Only when these conditions are met
+};
+
 export type GlossaryEntry = {
   id: string;
   projectId?: string;
@@ -13,6 +20,7 @@ export type GlossaryEntry = {
   status: GlossaryStatus;
   forbidden: boolean;
   notes?: string;
+  contextRules?: ContextRules;
   createdAt: string;
   updatedAt: string;
 };
@@ -28,6 +36,7 @@ export type UpsertGlossaryEntryRequest = {
   status?: GlossaryStatus;
   forbidden?: boolean;
   notes?: string;
+  contextRules?: ContextRules;
 };
 
 export const glossaryApi = {
@@ -72,6 +81,53 @@ export const glossaryApi = {
         'Content-Type': 'multipart/form-data',
       },
     });
+    return response.data;
+  },
+
+  search: async (
+    sourceText: string,
+    options?: {
+      projectId?: string;
+      sourceLocale?: string;
+      targetLocale?: string;
+      minSimilarity?: number;
+    },
+  ): Promise<Array<{
+    id: string;
+    sourceTerm: string;
+    targetTerm: string;
+    isForbidden: boolean;
+    similarity: number;
+    matchMethod: 'exact' | 'semantic' | 'hybrid';
+  }>> => {
+    const response = await apiClient.post<Array<{
+      id: string;
+      sourceTerm: string;
+      targetTerm: string;
+      isForbidden: boolean;
+      similarity: number;
+      matchMethod: 'exact' | 'semantic' | 'hybrid';
+    }>>('/glossary/search', {
+      sourceText,
+      ...options,
+    });
+    return response.data;
+  },
+
+  getEmbeddingStats: async (projectId?: string): Promise<{
+    total: number;
+    withEmbedding: number;
+    withoutEmbedding: number;
+    coverage: number;
+  }> => {
+    const params: Record<string, string> = {};
+    if (projectId) params.projectId = projectId;
+    const response = await apiClient.get<{
+      total: number;
+      withEmbedding: number;
+      withoutEmbedding: number;
+      coverage: number;
+    }>('/glossary/embedding-stats', { params });
     return response.data;
   },
 };

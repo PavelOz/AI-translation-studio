@@ -112,25 +112,32 @@ enum DocumentFileType {
 }
 
 model Document {
-  id            String            @id @default(uuid())
-  name          String
-  filename      String?
-  project       Project           @relation(fields: [projectId], references: [id])
-  projectId     String
-  status        DocumentStatus    @default(NEW)
-  fileType      DocumentFileType?
-  sourceLocale  String
-  targetLocale  String
-  storagePath   String
-  wordCount     Int               @default(0)
-  totalSegments Int               @default(0)
-  totalWords    Int               @default(0)
-  version       Int               @default(1)
-  createdAt     DateTime          @default(now())
-  updatedAt     DateTime          @updatedAt
-  segments      Segment[]
-  aiRequests    AIRequest[]
-  chatMessages  ChatMessage[]
+  id                 String            @id @default(uuid())
+  name               String
+  filename           String?
+  project            Project           @relation(fields: [projectId], references: [id])
+  projectId          String
+  status             DocumentStatus    @default(NEW)
+  fileType           DocumentFileType?
+  sourceLocale       String
+  targetLocale       String
+  storagePath        String
+  wordCount          Int               @default(0)
+  totalSegments      Int               @default(0)
+  totalWords         Int               @default(0)
+  version            Int               @default(1)
+  summary            String?           // AI-generated document summary
+  summaryGeneratedAt DateTime?         // When summary was generated
+  clusterId          String?           // Reference to document cluster
+  clusterSummary     String?           // Summary from cluster analysis
+  documentEmbedding  Unsupported("vector(1536)")? // Document-level embedding
+  embeddingModel     String?           // Embedding model used
+  embeddingUpdatedAt DateTime?         // When embedding was generated
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
+  segments           Segment[]
+  aiRequests         AIRequest[]
+  chatMessages       ChatMessage[]
 }
 
 model Segment {
@@ -221,12 +228,20 @@ model GlossaryEntry {
   domain       String?
   isForbidden  Boolean @default(false)
   notes        String?
+  contextRules Json?   // Context-specific usage rules: { useOnlyIn?: string[], excludeFrom?: string[], documentTypes?: string[], requires?: string[] }
+
+  // Vector embedding fields for semantic phrase matching
+  sourceEmbedding    Unsupported("vector(1536)")? // pgvector type - 1536 dimensions for text-embedding-3-small
+  embeddingModel     String? // Track which model was used (e.g., "text-embedding-3-small")
+  embeddingUpdatedAt DateTime? // When embedding was generated/updated
 
   projectId String?
   project   Project? @relation(fields: [projectId], references: [id])
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([sourceEmbedding(ops: raw("vector_cosine_ops"))]) // HNSW index for vector search
 }
 
 model AIRequest {

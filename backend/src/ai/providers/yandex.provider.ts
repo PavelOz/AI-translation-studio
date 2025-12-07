@@ -85,13 +85,31 @@ export class YandexProvider extends BaseProvider {
 
       if (!response.ok) {
         const errorBody = await response.text();
+        let errorMessage = `YandexGPT error (${response.status}): ${errorBody}`;
+        
+        // Try to parse error body as JSON for more details
+        try {
+          const errorJson = JSON.parse(errorBody);
+          if (errorJson.message) {
+            errorMessage = `YandexGPT API error (${response.status}): ${errorJson.message}`;
+          } else if (errorJson.error?.message) {
+            errorMessage = `YandexGPT API error (${response.status}): ${errorJson.error.message}`;
+          }
+        } catch {
+          // If not JSON, use the text as-is
+        }
+        
         logger.error({
           model,
           status: response.status,
           statusText: response.statusText,
           errorBody: errorBody.substring(0, 500),
-        }, 'YandexGPT API returned error');
-        throw new Error(`YandexGPT error (${response.status}): ${errorBody}`);
+          apiKeyPresent: !!this.apiKey,
+          apiKeyLength: this.apiKey?.length ?? 0,
+          hasFolderId: !!folderId,
+        }, 'YandexGPT API request failed');
+        
+        throw new Error(errorMessage);
       }
 
       const payload = await response.json();

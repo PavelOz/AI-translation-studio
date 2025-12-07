@@ -41,11 +41,50 @@ export class OpenAIProvider extends BaseProvider {
 
       if (!response.ok) {
         const errorBody = await response.text();
-        throw new Error(`OpenAI error (${response.status}): ${errorBody}`);
+        let errorMessage = `OpenAI error (${response.status}): ${errorBody}`;
+        
+        // Try to parse error body as JSON for more details
+        try {
+          const errorJson = JSON.parse(errorBody);
+          if (errorJson.error?.message) {
+            errorMessage = `OpenAI API error (${response.status}): ${errorJson.error.message}`;
+          }
+        } catch {
+          // If not JSON, use the text as-is
+        }
+        
+        logger.error({
+          status: response.status,
+          statusText: response.statusText,
+          errorBody,
+          model,
+          apiKeyPresent: !!this.apiKey,
+          apiKeyLength: this.apiKey?.length ?? 0,
+        }, 'OpenAI API request failed');
+        
+        throw new Error(errorMessage);
       }
 
       const payload = await response.json();
+      
+      // Check for errors in the response payload
+      if (payload.error) {
+        const errorMessage = payload.error.message || 'Unknown OpenAI API error';
+        logger.error({
+          error: payload.error,
+          model,
+        }, 'OpenAI API returned error in response');
+        throw new Error(`OpenAI API error: ${errorMessage}`);
+      }
+      
       const outputText = payload?.choices?.[0]?.message?.content ?? '';
+      
+      if (!outputText) {
+        logger.warn({
+          payload,
+          model,
+        }, 'OpenAI API returned empty response');
+      }
 
       return {
         outputText,
@@ -57,7 +96,18 @@ export class OpenAIProvider extends BaseProvider {
         raw: payload,
       };
     } catch (error) {
-      logger.error({ error }, 'OpenAI provider failed');
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorStack = error instanceof Error ? error.stack : undefined;
+      
+      logger.error({
+        error: errorMessage,
+        errorStack,
+        model,
+        apiKeyPresent: !!this.apiKey,
+        apiKeyLength: this.apiKey?.length ?? 0,
+        promptLength: request.prompt?.length ?? 0,
+      }, 'OpenAI provider failed');
+      
       return this.mockResponse(request);
     }
   }

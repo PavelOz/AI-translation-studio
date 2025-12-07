@@ -94,6 +94,11 @@ export async function generateEmbedding(
       throw new Error('Invalid OpenAI API key. Please check your OPENAI_API_KEY.');
     }
     if (error.status === 429) {
+      // Check if it's a quota/billing issue vs rate limit
+      const errorMessage = error.message || '';
+      if (errorMessage.includes('quota') || errorMessage.includes('billing') || errorMessage.includes('exceeded your current quota')) {
+        throw new Error('OpenAI API quota exceeded. Please check your billing and add credits to your OpenAI account.');
+      }
       throw new Error('OpenAI API rate limit exceeded. Please try again later.');
     }
     if (error.status === 500) {
@@ -235,6 +240,11 @@ export async function generateEmbeddingsBatch(
       throw new Error('Invalid OpenAI API key. Please check your OPENAI_API_KEY.');
     }
     if (error.status === 429) {
+      // Check if it's a quota/billing issue vs rate limit
+      const errorMessage = error.message || '';
+      if (errorMessage.includes('quota') || errorMessage.includes('billing') || errorMessage.includes('exceeded your current quota')) {
+        throw new Error('OpenAI API quota exceeded. Please check your billing and add credits to your OpenAI account.');
+      }
       throw new Error('OpenAI API rate limit exceeded. Please try again later.');
     }
     if (error.status === 500) {

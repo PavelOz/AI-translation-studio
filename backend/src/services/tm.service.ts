@@ -803,25 +803,31 @@ export const upsertTranslationMemoryEntry = async (data: {
   }
 
   // Auto-generate embedding for new/updated entry (in background, don't block)
-  // Only generate if entry doesn't have embedding yet
-  // Check using raw query since Prisma doesn't expose Unsupported types
-  const hasEmbeddingResult = (await prisma.$queryRawUnsafe(
-    `SELECT "sourceEmbedding" IS NOT NULL as has_embedding FROM "TranslationMemoryEntry" WHERE id = $1`,
-    entry.id,
-  )) as Array<{ has_embedding: boolean }>;
+  // Run completely in background without awaiting anything
+  (async () => {
+    try {
+      // Only generate if entry doesn't have embedding yet
+      // Check using raw query since Prisma doesn't expose Unsupported types
+      const hasEmbeddingResult = await prisma.$queryRawUnsafe<Array<{ has_embedding: boolean }>>(
+        `SELECT "sourceEmbedding" IS NOT NULL as has_embedding FROM "TranslationMemoryEntry" WHERE id = $1`,
+        entry.id,
+      );
 
-  if (!hasEmbeddingResult[0]?.has_embedding && entry.sourceText && entry.sourceText.trim()) {
-    generateEmbeddingForEntry(entry.id).catch((error) => {
+      if (!hasEmbeddingResult[0]?.has_embedding && entry.sourceText && entry.sourceText.trim()) {
+        await generateEmbeddingForEntry(entry.id);
+        logger.debug({ entryId: entry.id }, 'Background embedding generated successfully');
+      }
+    } catch (error: any) {
       // Log but don't throw - embedding generation is non-critical
       logger.debug(
         {
           entryId: entry.id,
           error: error.message,
         },
-        'Background embedding generation failed',
+        'Background embedding generation failed (non-critical)',
       );
-    });
-  }
+    }
+  })();
 
   return entry;
 };

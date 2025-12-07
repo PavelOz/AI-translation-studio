@@ -332,3 +332,221 @@ export async function getEmbeddingStats(options?: { projectId?: string }): Promi
   };
 }
 
+/**
+ * Store embedding for a GlossaryEntry
+ * @param entryId - The glossary entry ID
+ * @param embedding - The embedding vector (1536 dimensions)
+ * @param model - The embedding model used (e.g., "text-embedding-3-small")
+ */
+export async function storeGlossaryEmbedding(
+  entryId: string,
+  embedding: number[],
+  model: string = 'text-embedding-3-small',
+): Promise<void> {
+  if (!embedding || embedding.length !== 1536) {
+    throw new Error('Invalid embedding: must be 1536 dimensions');
+  }
+
+  const embeddingStr = embeddingToVectorString(embedding);
+
+  try {
+    await prisma.$executeRawUnsafe(
+      `
+      UPDATE "GlossaryEntry"
+      SET 
+        "sourceEmbedding" = $1::vector,
+        "embeddingModel" = $2,
+        "embeddingUpdatedAt" = NOW()
+      WHERE "id" = $3
+    `,
+      embeddingStr,
+      model,
+      entryId,
+    );
+
+    logger.debug(`Stored embedding for glossary entry: ${entryId}`);
+  } catch (error: any) {
+    logger.error(
+      {
+        error: error.message,
+        entryId,
+      },
+      'Failed to store glossary embedding',
+    );
+
+    if (error.message?.includes('type "vector" does not exist')) {
+      throw new Error(
+        'pgvector extension not installed. Please run: CREATE EXTENSION IF NOT EXISTS vector;',
+      );
+    }
+
+    throw new Error(`Failed to store glossary embedding: ${error.message}`);
+  }
+}
+
+/**
+ * Get glossary embedding statistics for a project or globally
+ */
+export async function getGlossaryEmbeddingStats(options?: { projectId?: string }): Promise<{
+  total: number;
+  withEmbedding: number;
+  withoutEmbedding: number;
+  coverage: number; // Percentage with embeddings
+}> {
+  let query = `
+    SELECT 
+      COUNT(*) as total,
+      COUNT("sourceEmbedding") as with_embedding,
+      COUNT(*) - COUNT("sourceEmbedding") as without_embedding
+    FROM "GlossaryEntry"
+    WHERE "sourceTerm" != ''
+  `;
+
+  const params: any[] = [];
+
+  if (options?.projectId) {
+    query += ` AND "projectId" = $1`;
+    params.push(options.projectId);
+  }
+
+  const result = await prisma.$queryRawUnsafe<Array<{
+    total: bigint;
+    with_embedding: bigint;
+    without_embedding: bigint;
+  }>>(query, ...params);
+
+  const stats = result[0];
+  const total = Number(stats.total);
+  const withEmbedding = Number(stats.with_embedding);
+  const withoutEmbedding = Number(stats.without_embedding);
+  const coverage = total > 0 ? (withEmbedding / total) * 100 : 0;
+
+  return {
+    total,
+    withEmbedding,
+    withoutEmbedding,
+    coverage: Math.round(coverage * 100) / 100, // Round to 2 decimal places
+  };
+}
+
+/**
+ * Search Glossary entries using vector similarity
+ * @param queryEmbedding - The embedding vector to search for
+ * @param options - Search options
+ * @returns Array of glossary entries with similarity scores
+ */
+export async function searchGlossaryByVector(
+  queryEmbedding: number[],
+  options: {
+    projectId?: string;
+    sourceLocale?: string;
+    targetLocale?: string;
+    limit?: number;
+    minSimilarity?: number; // Cosine similarity threshold (0-1)
+  },
+): Promise<Array<{
+  id: string;
+  sourceTerm: string;
+  targetTerm: string;
+  sourceLocale: string;
+  targetLocale: string;
+  isForbidden: boolean;
+  similarity: number;
+}>> {
+  if (!queryEmbedding || queryEmbedding.length !== 1536) {
+    throw new Error('Invalid embedding: must be 1536 dimensions');
+  }
+
+  const limit = options.limit || 10;
+  const minSimilarity = options.minSimilarity ?? 0.75; // Default 75% similarity for phrases
+  const embeddingStr = embeddingToVectorString(queryEmbedding);
+
+  try {
+    // Build WHERE clause dynamically
+    const whereConditions: string[] = ['"sourceEmbedding" IS NOT NULL'];
+    const params: any[] = [];
+
+    // Add base parameters first
+    params.push(embeddingStr); // $1 - vector embedding string
+    params.push(Number(minSimilarity)); // $2 - minSimilarity as number
+    params.push(Number(limit)); // $3 - limit as integer
+
+    let paramIndex = 4;
+
+    if (options.projectId) {
+      // Include both project-specific and global (null projectId) entries
+      whereConditions.push(`("projectId" = $${paramIndex} OR "projectId" IS NULL)`);
+      params.push(options.projectId);
+      paramIndex += 1;
+    }
+
+    if (options.sourceLocale) {
+      whereConditions.push(`"sourceLocale" = $${paramIndex}`);
+      params.push(options.sourceLocale);
+      paramIndex += 1;
+    }
+
+    if (options.targetLocale) {
+      whereConditions.push(`"targetLocale" = $${paramIndex}`);
+      params.push(options.targetLocale);
+      paramIndex += 1;
+    }
+
+    const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+
+    const query = `
+      SELECT 
+        id,
+        "sourceTerm",
+        "targetTerm",
+        "sourceLocale",
+        "targetLocale",
+        "isForbidden",
+        1 - ("sourceEmbedding" <=> $1::vector) as similarity
+      FROM "GlossaryEntry"
+      ${whereClause}
+        AND (1 - ("sourceEmbedding" <=> $1::vector)) >= $2
+      ORDER BY "sourceEmbedding" <=> $1::vector
+      LIMIT $3::int
+    `;
+
+    const results = await prisma.$queryRawUnsafe<Array<{
+      id: string;
+      sourceTerm: string;
+      targetTerm: string;
+      sourceLocale: string;
+      targetLocale: string;
+      isForbidden: boolean;
+      similarity: number;
+    }>>(query, ...params);
+
+    logger.debug(`Found ${results.length} similar glossary entries`);
+
+    return results.map((r) => ({
+      id: r.id,
+      sourceTerm: r.sourceTerm,
+      targetTerm: r.targetTerm,
+      sourceLocale: r.sourceLocale,
+      targetLocale: r.targetLocale,
+      isForbidden: r.isForbidden,
+      similarity: Number(r.similarity),
+    }));
+  } catch (error: any) {
+    logger.error(
+      {
+        error: error.message,
+        stack: error.stack?.substring(0, 200),
+      },
+      'Vector search failed for glossary',
+    );
+
+    if (error.message?.includes('type "vector" does not exist')) {
+      throw new Error(
+        'pgvector extension not installed. Please run: CREATE EXTENSION IF NOT EXISTS vector;',
+      );
+    }
+
+    throw new Error(`Glossary vector search failed: ${error.message}`);
+  }
+}
+

@@ -17,7 +17,7 @@ export const env = {
   openAiApiKey: process.env.OPENAI_API_KEY ?? '',
   openAiModel: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
   geminiApiKey: process.env.GEMINI_API_KEY ?? '',
-  geminiModel: process.env.GEMINI_MODEL ?? 'gemini-1.5-flash',
+  geminiModel: process.env.GEMINI_MODEL ?? 'gemini-pro',
   yandexApiKey: process.env.YANDEX_API_KEY ?? '',
   yandexModel: process.env.YANDEX_MODEL ?? 'yandexgpt-lite',
   yandexFolderId: process.env.YANDEX_FOLDER_ID ?? '',

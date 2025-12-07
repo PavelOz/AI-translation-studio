@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useMutation } from 'react-query';
 import { glossaryApi } from '../api/glossary.api';
-import type { GlossaryEntry, UpsertGlossaryEntryRequest } from '../api/glossary.api';
+import type { GlossaryEntry, UpsertGlossaryEntryRequest, ContextRules } from '../api/glossary.api';
 import { projectsApi } from '../api/projects.api';
 import { useQuery } from 'react-query';
 import toast from 'react-hot-toast';
@@ -32,7 +32,9 @@ export default function GlossaryEntryModal({
     status: 'PREFERRED',
     forbidden: false,
     notes: '',
+    contextRules: undefined,
   });
+  const [showContextRules, setShowContextRules] = useState(false);
 
   // Fetch projects for dropdown
   const { data: projects } = useQuery({
@@ -54,7 +56,9 @@ export default function GlossaryEntryModal({
         status: entry.status,
         forbidden: entry.forbidden,
         notes: entry.notes || '',
+        contextRules: entry.contextRules,
       });
+      setShowContextRules(!!entry.contextRules);
     } else {
       // Reset form for new entry
       setFormData({
@@ -67,9 +71,29 @@ export default function GlossaryEntryModal({
         status: 'PREFERRED',
         forbidden: false,
         notes: '',
+        contextRules: undefined,
       });
+      setShowContextRules(false);
     }
   }, [entry, defaultProjectId]);
+
+  const updateContextRule = (field: keyof ContextRules, value: string[]) => {
+    setFormData({
+      ...formData,
+      contextRules: {
+        ...formData.contextRules,
+        [field]: value.length > 0 ? value : undefined,
+      },
+    });
+  };
+
+  const parseContextRule = (value: string): string[] => {
+    return value.split(',').map(s => s.trim()).filter(Boolean);
+  };
+
+  const formatContextRule = (value: string[] | undefined): string => {
+    return value ? value.join(', ') : '';
+  };
 
   const upsertMutation = useMutation({
     mutationFn: (data: UpsertGlossaryEntryRequest) => {
@@ -256,6 +280,90 @@ export default function GlossaryEntryModal({
               <label htmlFor="forbidden" className="ml-2 block text-sm text-gray-700">
                 Mark as forbidden term (should not be used in translations)
               </label>
+            </div>
+
+            {/* Context Rules Section */}
+            <div className="border-t border-gray-200 pt-4">
+              <div className="flex items-center justify-between mb-3">
+                <label className="block text-sm font-medium text-gray-700">
+                  Context Rules <span className="text-gray-400">(optional)</span>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowContextRules(!showContextRules)}
+                  className="text-sm text-primary-600 hover:text-primary-700"
+                >
+                  {showContextRules ? 'Hide' : 'Show'} Context Rules
+                </button>
+              </div>
+              
+              {showContextRules && (
+                <div className="space-y-3 bg-gray-50 p-4 rounded-lg">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">
+                      Use Only In (comma-separated contexts/domains)
+                    </label>
+                    <input
+                      type="text"
+                      value={formatContextRule(formData.contextRules?.useOnlyIn)}
+                      onChange={(e) => updateContextRule('useOnlyIn', parseContextRule(e.target.value))}
+                      placeholder="e.g., legal, medical, technical"
+                      className="input w-full text-sm"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Only use this term when document matches these contexts
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">
+                      Exclude From (comma-separated contexts/domains)
+                    </label>
+                    <input
+                      type="text"
+                      value={formatContextRule(formData.contextRules?.excludeFrom)}
+                      onChange={(e) => updateContextRule('excludeFrom', parseContextRule(e.target.value))}
+                      placeholder="e.g., marketing, casual"
+                      className="input w-full text-sm"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Never use this term in these contexts
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">
+                      Document Types (comma-separated)
+                    </label>
+                    <input
+                      type="text"
+                      value={formatContextRule(formData.contextRules?.documentTypes)}
+                      onChange={(e) => updateContextRule('documentTypes', parseContextRule(e.target.value))}
+                      placeholder="e.g., contract, report, manual"
+                      className="input w-full text-sm"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Only use this term in these document types
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">
+                      Requires (comma-separated conditions)
+                    </label>
+                    <input
+                      type="text"
+                      value={formatContextRule(formData.contextRules?.requires)}
+                      onChange={(e) => updateContextRule('requires', parseContextRule(e.target.value))}
+                      placeholder="e.g., formal_tone, technical"
+                      className="input w-full text-sm"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Only use when all these conditions are met
+                    </p>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="flex justify-end gap-2 pt-4">

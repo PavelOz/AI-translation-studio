@@ -22,6 +22,7 @@ export default function PretranslateModal({
   const [applyAiToEmptyOnly, setApplyAiToEmptyOnly] = useState(false);
   const [rewriteConfirmed, setRewriteConfirmed] = useState(false);
   const [rewriteNonConfirmed, setRewriteNonConfirmed] = useState(false);
+  const [useCritic, setUseCritic] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState<{
     documentId: string;
@@ -143,6 +144,7 @@ export default function PretranslateModal({
         rewriteConfirmed,
         rewriteNonConfirmed,
         glossaryMode, // Pass glossary mode to API
+        useCritic, // Pass critic AI option
       });
       // Small delay to ensure backend has created progress before polling starts
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -261,7 +263,7 @@ export default function PretranslateModal({
                 </label>
               </div>
 
-              <div className="flex items-start">
+              <div className="flex items-start mb-3">
                 <input
                   type="checkbox"
                   id="applyAiToEmptyOnly"
@@ -279,6 +281,23 @@ export default function PretranslateModal({
                   <span className="font-medium">Apply AI translations only to empty segments</span>
                   <p className="text-xs text-gray-500 mt-1">
                     AI will translate only segments with no TM matches at all
+                  </p>
+                </label>
+              </div>
+
+              <div className="flex items-start">
+                <input
+                  type="checkbox"
+                  id="useCritic"
+                  checked={useCritic}
+                  onChange={(e) => setUseCritic(e.target.checked)}
+                  className="mt-1 mr-3"
+                  disabled={isProcessing || (!applyAiToLowMatches && !applyAiToEmptyOnly)}
+                />
+                <label htmlFor="useCritic" className="text-sm text-gray-700 cursor-pointer">
+                  <span className="font-medium">Use Critic AI for higher quality (slower)</span>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Uses Draft → Critique → Fix workflow for better quality. Processes segments one by one instead of in batches. Only available when AI translation is enabled.
                   </p>
                 </label>
               </div>

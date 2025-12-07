@@ -36,11 +36,18 @@ export default function GlossaryPage() {
     ),
   });
 
+  // Fetch embedding statistics
+  const { data: embeddingStats } = useQuery({
+    queryKey: ['glossary-embedding-stats', projectFilter],
+    queryFn: () => glossaryApi.getEmbeddingStats(projectFilter || undefined),
+  });
+
   // Delete mutation
   const deleteMutation = useMutation({
     mutationFn: glossaryApi.delete,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['glossary'] });
+      queryClient.invalidateQueries({ queryKey: ['glossary-embedding-stats'] });
       toast.success('Glossary entry deleted successfully');
     },
     onError: (error: any) => {
@@ -114,6 +121,44 @@ export default function GlossaryPage() {
             </button>
           </div>
         </div>
+
+        {/* Embedding Statistics */}
+        {embeddingStats && (
+          <div className="card bg-blue-50 border-blue-200">
+            <h2 className="text-lg font-semibold mb-4 text-gray-900">Vector Embeddings Status</h2>
+            <p className="text-sm text-gray-600 mb-4">
+              Embeddings enable semantic search for glossary entries. Entries with embeddings can be found using AI-powered similarity matching.
+            </p>
+            <div className="grid grid-cols-4 gap-4">
+              <div className="bg-white p-3 rounded border">
+                <div className="text-sm text-gray-600">Total Entries</div>
+                <div className="text-2xl font-bold text-gray-900">{embeddingStats.total}</div>
+              </div>
+              <div className="bg-white p-3 rounded border">
+                <div className="text-sm text-gray-600">With Embeddings</div>
+                <div className="text-2xl font-bold text-green-600">{embeddingStats.withEmbedding}</div>
+              </div>
+              <div className="bg-white p-3 rounded border">
+                <div className="text-sm text-gray-600">Without Embeddings</div>
+                <div className="text-2xl font-bold text-orange-600">{embeddingStats.withoutEmbedding}</div>
+              </div>
+              <div className="bg-white p-3 rounded border">
+                <div className="text-sm text-gray-600">Coverage</div>
+                <div className="text-2xl font-bold text-blue-600">{embeddingStats.coverage.toFixed(1)}%</div>
+              </div>
+            </div>
+            {embeddingStats.withoutEmbedding > 0 && (
+              <div className="mt-4 text-sm text-gray-600">
+                <p>
+                  💡 To generate embeddings for existing entries, run:{' '}
+                  <code className="bg-gray-100 px-2 py-1 rounded text-xs">
+                    npx ts-node backend/scripts/generate-glossary-embeddings.ts
+                  </code>
+                </p>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="card">
           <h2 className="text-lg font-semibold mb-4">Filters & Search</h2>
@@ -354,6 +399,7 @@ export default function GlossaryPage() {
           entry={editingEntry}
           onSuccess={() => {
             queryClient.invalidateQueries({ queryKey: ['glossary'] });
+            queryClient.invalidateQueries({ queryKey: ['glossary-embedding-stats'] });
           }}
         />
 
@@ -362,6 +408,7 @@ export default function GlossaryPage() {
           onClose={() => setIsImportModalOpen(false)}
           onSuccess={() => {
             queryClient.invalidateQueries({ queryKey: ['glossary'] });
+            queryClient.invalidateQueries({ queryKey: ['glossary-embedding-stats'] });
             setIsImportModalOpen(false);
           }}
         />
