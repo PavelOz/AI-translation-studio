@@ -178,6 +178,20 @@ export class GeminiProvider extends BaseProvider {
         // So we should use just the model name, not models/model_name
         const modelNameForUrl = modelAttempt; // Use short name, endpoint already has /models
         
+        // Estimate prompt tokens (rough: ~4 chars per token)
+        const promptTokensEstimate = Math.ceil((request.prompt?.length ?? 0) / 4);
+        const requestedMaxTokens = request.maxTokens ?? 2048;
+        
+        // Warn if prompt is very long (might exceed input token limits)
+        if (promptTokensEstimate > 100000) {
+          logger.warn({
+            promptTokensEstimate,
+            promptLength: request.prompt?.length ?? 0,
+            modelAttempt,
+            warning: 'Prompt is very long - may exceed input token limits',
+          }, 'Very long prompt detected');
+        }
+        
         const apiUrl = `${attemptEndpoint}/${modelNameForUrl}:generateContent?key=${this.apiKey}`;
         
         logger.debug({
@@ -192,12 +206,13 @@ export class GeminiProvider extends BaseProvider {
         
         // Log maxTokens for debugging
         if (request.maxTokens && request.maxTokens > 2048) {
-          logger.debug({
-            requestedMaxTokens: request.maxTokens,
-            actualMaxOutputTokens: maxOutputTokens,
-            modelAttempt,
-            promptLength: request.prompt?.length ?? 0,
-          }, 'Using high maxTokens for Gemini API (likely critic workflow)');
+        logger.debug({
+          requestedMaxTokens: request.maxTokens,
+          actualMaxOutputTokens: maxOutputTokens,
+          modelAttempt,
+          promptLength: request.prompt?.length ?? 0,
+          promptTokensEstimate: Math.ceil((request.prompt?.length ?? 0) / 4),
+        }, 'Using high maxTokens for Gemini API (likely critic workflow)');
         }
         
         const response = await fetch(apiUrl, {
@@ -218,6 +233,9 @@ export class GeminiProvider extends BaseProvider {
             // Some models may have lower limits, but 8192 is safe for most
             // Cap at 8192 to avoid API errors
             maxOutputTokens,
+            // Note: Gemini 2.5 Flash and newer models use "thoughts" (internal reasoning)
+            // which can consume output tokens. For workflows requiring long outputs,
+            // consider using gemini-1.5-pro or gemini-pro instead.
           },
         }),
       });
@@ -288,30 +306,77 @@ export class GeminiProvider extends BaseProvider {
         // Check if response was truncated due to MAX_TOKENS
         if (finishReason === 'MAX_TOKENS') {
           const requestedMaxTokens = request.maxTokens ?? 2048;
-          const actualOutputTokens = payload?.usageMetadata?.candidatesTokenCount;
-          const promptTokens = payload?.usageMetadata?.promptTokenCount;
+          // Try multiple fields to get actual token count
+          const actualOutputTokens = payload?.usageMetadata?.candidatesTokenCount 
+            ?? payload?.usageMetadata?.totalTokenCount 
+            ?? payload?.usageMetadata?.completionTokenCount
+            ?? undefined;
+          const promptTokens = payload?.usageMetadata?.promptTokenCount 
+            ?? payload?.usageMetadata?.inputTokenCount
+            ?? undefined;
+          const totalTokens = payload?.usageMetadata?.totalTokenCount ?? undefined;
           
-          logger.error({
+          // Check if thoughts consumed most tokens (Gemini 2.5 Flash issue)
+          const thoughtsTokens = payload?.usageMetadata?.thoughtsTokenCount ?? 0;
+          const thoughtsConsumedMost = thoughtsTokens > requestedMaxTokens * 0.5; // More than 50% of tokens
+          
+          // Log full usage metadata for debugging
+          logger.warn({
             finishReason,
             requestedMaxTokens,
             actualOutputTokens,
             promptTokens,
+            totalTokens,
+            thoughtsTokenCount: thoughtsTokens,
+            thoughtsConsumedMost,
             outputLength: outputText.length,
             promptLength: request.prompt?.length ?? 0,
             modelAttempt,
+            usageMetadata: payload?.usageMetadata, // Log full metadata for debugging
           }, 'Gemini API response exceeded max tokens - response was truncated');
           
-          // If we got some output, log a warning but don't fail completely
+          // If we got some output, return it with a warning (don't throw error)
           // The caller can decide what to do with truncated output
           if (outputText) {
             logger.warn({
               truncatedOutputLength: outputText.length,
               requestedMaxTokens,
-              actualOutputTokens,
-            }, 'Gemini API response was truncated but contains partial output');
+              actualOutputTokens: actualOutputTokens ?? 'unknown',
+              thoughtsTokenCount: thoughtsTokens,
+              recommendation: thoughtsConsumedMost 
+                ? `Model ${modelAttempt} used ${thoughtsTokens} tokens for thoughts. Consider using gemini-1.5-pro or gemini-pro for this workflow, or optimize the prompt.`
+                : `Consider increasing maxTokens to ${Math.min(requestedMaxTokens * 2, 8192)} or optimizing the prompt`,
+            }, 'Gemini API response was truncated but contains partial output - returning truncated result');
+            // Don't throw error - return the truncated output
+            // The caller can handle it appropriately
           } else {
             // No output at all - this is a real error
-            throw new Error(`Gemini API response exceeded max tokens (requested: ${requestedMaxTokens}, actual: ${actualOutputTokens}). Consider increasing maxTokens (current: ${requestedMaxTokens}, recommended: ${Math.max(requestedMaxTokens * 2, 8192)}) or optimizing the prompt.`);
+            // Log detailed information for debugging
+            logger.error({
+              finishReason,
+              requestedMaxTokens,
+              actualOutputTokens,
+              promptTokens,
+              totalTokens,
+              outputLength: 0,
+              promptLength: request.prompt?.length ?? 0,
+              promptTokensEstimate: Math.ceil((request.prompt?.length ?? 0) / 4),
+              modelAttempt,
+              usageMetadata: payload?.usageMetadata,
+              payloadKeys: payload ? Object.keys(payload) : [],
+              candidatesLength: payload?.candidates?.length ?? 0,
+            }, 'Gemini API response exceeded max tokens - no output received');
+            
+            const actualTokensStr = actualOutputTokens !== undefined ? String(actualOutputTokens) : 'unknown';
+            const recommendedMaxTokens = Math.min(requestedMaxTokens * 2, 8192);
+            
+            // Provide specific recommendation if thoughts consumed most tokens
+            let recommendation = `Consider increasing maxTokens (current: ${requestedMaxTokens}, recommended: ${recommendedMaxTokens}) or optimizing the prompt.`;
+            if (thoughtsConsumedMost) {
+              recommendation = `Model ${modelAttempt} used ${thoughtsTokens} tokens for internal thoughts, leaving no room for output. Consider using gemini-1.5-pro or gemini-pro for this workflow (they don't use thoughts), or significantly reduce the prompt length.`;
+            }
+            
+            throw new Error(`Gemini API response exceeded max tokens (requested: ${requestedMaxTokens}, actual: ${actualTokensStr}, thoughts: ${thoughtsTokens}). ${recommendation}`);
           }
         }
         

@@ -662,7 +662,18 @@ export class AIOrchestrator {
     usage?: ProviderUsage;
   }> {
     const provider = getProvider(options.provider, options.apiKey, options.yandexFolderId);
-    const model = options.model ?? provider.defaultModel;
+    let model = options.model ?? provider.defaultModel;
+    
+    // For Gemini 2.5 Flash and newer models with thoughts, use gemini-1.5-pro for critic workflow
+    // to avoid thoughtsTokenCount consuming all output tokens
+    if (provider.name === 'gemini' && (model.includes('2.5') || model.includes('2.0') || model.includes('3.0'))) {
+      logger.debug({
+        originalModel: model,
+        fallbackModel: 'gemini-1.5-pro',
+        reason: 'Gemini 2.5+ models use thoughts which can consume all output tokens',
+      }, 'Switching to gemini-1.5-pro for critic workflow to avoid thoughts token consumption');
+      model = 'gemini-1.5-pro';
+    }
 
         // Log glossary info for debugging (truncate to avoid encoding issues in logs)
         logger.debug({
