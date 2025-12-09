@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { asyncHandler } from '../utils/asyncHandler';
 import { requireAuth } from '../utils/authMiddleware';
 import { getDocumentSegments, updateSegment, getSegment, bulkUpdateSegments, searchSegments } from '../services/segment.service';
-import { runSegmentMachineTranslation, runSegmentMachineTranslationWithCritic } from '../services/ai.service';
+import { runSegmentMachineTranslation, runSegmentMachineTranslationWithCritic, getSegmentDebugInfo } from '../services/ai.service';
 import { getSegmentMetrics, runSegmentQualityCheck } from '../services/quality.service';
 import type { GlossaryMode } from '../types/glossary';
 
@@ -236,6 +236,14 @@ segmentRoutes.get(
   asyncHandler(async (req, res) => {
     const metrics = await getSegmentMetrics(req.params.segmentId);
     res.json(metrics);
+  }),
+);
+
+segmentRoutes.get(
+  '/:segmentId/debug',
+  asyncHandler(async (req, res) => {
+    const debugInfo = await getSegmentDebugInfo(req.params.segmentId);
+    res.json(debugInfo);
   }),
 );
 

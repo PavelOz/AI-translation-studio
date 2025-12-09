@@ -12,6 +12,7 @@ import { getDocumentSegments } from '../services/segment.service';
 import { runDocumentMachineTranslation, pretranslateDocument } from '../services/ai.service';
 import { getDocumentMetricsSummary, runDocumentQualityCheck } from '../services/quality.service';
 import { getProgress, cancelProgress, clearProgress } from '../services/pretranslateProgress';
+import { generateGlossary, listDocumentGlossary } from '../services/glossary.service';
 
 // Configure multer to preserve UTF-8 encoding for filenames (including Cyrillic)
 // Multer handles UTF-8 filenames correctly when sent from modern browsers
@@ -197,6 +198,22 @@ documentRoutes.post(
   asyncHandler(async (req, res) => {
     const report = await runDocumentQualityCheck(req.params.documentId);
     res.json(report);
+  }),
+);
+
+documentRoutes.post(
+  '/:documentId/generate-glossary',
+  asyncHandler(async (req, res) => {
+    const result = await generateGlossary(req.params.documentId);
+    res.json(result);
+  }),
+);
+
+documentRoutes.get(
+  '/:documentId/glossary',
+  asyncHandler(async (req, res) => {
+    const entries = await listDocumentGlossary(req.params.documentId);
+    res.json(entries);
   }),
 );
 

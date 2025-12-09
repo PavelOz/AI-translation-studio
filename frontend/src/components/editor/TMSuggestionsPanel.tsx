@@ -923,32 +923,34 @@ export default function TMSuggestionsPanel({
                   <div className="text-sm font-medium text-gray-900 mt-2">{suggestion.targetText}</div>
                 </div>
               <div className="ml-3 flex flex-col items-end gap-1">
-                <span className={`text-sm font-semibold ${getScoreColor(suggestion.fuzzyScore)}`}>
+                <span 
+                  className={`text-sm font-semibold ${
+                    suggestion.searchMethod === 'vector' || suggestion.searchMethod === 'hybrid'
+                      ? 'text-blue-600'
+                      : 'text-green-600'
+                  }`}
+                >
                   {suggestion.fuzzyScore}%
                 </span>
                 {/* Search Method Badge */}
                 {suggestion.searchMethod && (
                   <span
-                    className={`text-xs px-2 py-0.5 rounded font-medium ${
-                      suggestion.searchMethod === 'vector'
-                        ? 'bg-green-100 text-green-700'
-                        : suggestion.searchMethod === 'hybrid'
-                          ? 'bg-purple-100 text-purple-700'
-                          : 'bg-blue-100 text-blue-700'
+                    className={`text-xs px-2 py-0.5 rounded font-medium border ${
+                      suggestion.searchMethod === 'vector' || suggestion.searchMethod === 'hybrid'
+                        ? 'bg-blue-100 text-blue-800 border-blue-300'
+                        : 'bg-green-100 text-green-800 border-green-300'
                     }`}
                     title={
                       suggestion.searchMethod === 'vector'
-                        ? 'Found via semantic (vector) search'
+                        ? 'Found via semantic (vector) search - use for context/inspiration'
                         : suggestion.searchMethod === 'hybrid'
-                          ? 'Found via both fuzzy and vector search'
-                          : 'Found via fuzzy (text-based) search'
+                          ? 'Found via both fuzzy and vector search - use for context/inspiration'
+                          : 'Found via fuzzy (text-based) search - edit slightly'
                     }
                   >
-                    {suggestion.searchMethod === 'vector'
-                      ? '🔍 Vector'
-                      : suggestion.searchMethod === 'hybrid'
-                        ? '🔀 Hybrid'
-                        : '📝 Fuzzy'}
+                    {suggestion.searchMethod === 'vector' || suggestion.searchMethod === 'hybrid'
+                      ? '[MEANING MATCH]'
+                      : '[TEXT MATCH]'}
                   </span>
                 )}
                 <span className="text-xs text-gray-500 mt-1">

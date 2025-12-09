@@ -166,5 +166,27 @@ export const documentsApi = {
     const response = await apiClient.post(`/documents/${documentId}/pretranslate/cancel`);
     return response.data;
   },
+
+  generateGlossary: async (documentId: string): Promise<{ count: number }> => {
+    const response = await apiClient.post<{ count: number }>(`/documents/${documentId}/generate-glossary`);
+    return response.data;
+  },
+
+  listDocumentGlossary: async (documentId: string): Promise<Array<{
+    id: string;
+    documentId: string;
+    sourceTerm: string;
+    targetTerm: string;
+    createdAt: string;
+  }>> => {
+    const response = await apiClient.get<Array<{
+      id: string;
+      documentId: string;
+      sourceTerm: string;
+      targetTerm: string;
+      createdAt: string;
+    }>>(`/documents/${documentId}/glossary`);
+    return response.data;
+  },
 };
 

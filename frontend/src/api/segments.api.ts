@@ -97,6 +97,55 @@ export const segmentsApi = {
     const response = await apiClient.post<Segment>(`/segments/${segmentId}/mt`, options || {});
     return response.data;
   },
+
+  getDebugInfo: async (segmentId: string): Promise<{
+    segment: {
+      id: string;
+      segmentIndex: number;
+      sourceText: string;
+      targetMt?: string;
+      targetFinal?: string;
+      fuzzyScore?: number;
+      bestTmEntryId?: string;
+    };
+    tmMatches: Array<{
+      id: string;
+      sourceText: string;
+      targetText: string;
+      fuzzyScore: number;
+      searchMethod: 'fuzzy' | 'vector' | 'hybrid';
+      scope: 'project' | 'global';
+    }>;
+    glossaryTerms: Array<{
+      sourceTerm: string;
+      targetTerm: string;
+      isForbidden: boolean;
+      notes?: string;
+    }>;
+    context: {
+      previous: {
+        segmentIndex: number;
+        sourceText: string;
+        targetText?: string;
+      } | null;
+      next: {
+        segmentIndex: number;
+        sourceText: string;
+        targetText?: string;
+      } | null;
+    };
+    prompt: string;
+    document: {
+      name: string;
+      sourceLocale: string;
+      targetLocale: string;
+      summary?: string;
+      clusterSummary?: string;
+    };
+  }> => {
+    const response = await apiClient.get(`/segments/${segmentId}/debug`);
+    return response.data;
+  },
 };
 
 

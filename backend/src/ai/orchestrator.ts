@@ -1488,4 +1488,14 @@ export class AIOrchestrator {
         usage: draft.usage
     };
   }
+
+  /**
+   * Build prompt for a single segment (public method for debug purposes)
+   */
+  buildPromptForSegment(
+    segment: OrchestratorSegment,
+    options: TranslateSegmentsOptions,
+  ): string {
+    return this.buildBatchPrompt([segment], options);
+  }
 }

@@ -643,18 +643,55 @@ export default function AITranslationPanel({
                 
                 {/* TM Direct Match - Full Text */}
                 {meta.tmDirectMatch && (
-                  <div className="mt-3 p-3 bg-green-50 rounded-lg border-2 border-green-300">
-                    <p className="font-bold text-green-900 text-sm mb-2">✅ Direct TM Match ({meta.tmDirectMatch.fuzzyScore}% similarity, {meta.tmDirectMatch.searchMethod})</p>
+                  <div className={`mt-3 p-3 rounded-lg border-2 ${
+                    meta.tmDirectMatch.searchMethod === 'vector' || meta.tmDirectMatch.searchMethod === 'hybrid'
+                      ? 'bg-blue-50 border-blue-300'
+                      : 'bg-green-50 border-green-300'
+                  }`}>
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className={`px-2 py-0.5 rounded text-xs font-medium border ${
+                        meta.tmDirectMatch.searchMethod === 'vector' || meta.tmDirectMatch.searchMethod === 'hybrid'
+                          ? 'bg-blue-100 text-blue-800 border-blue-300'
+                          : 'bg-green-100 text-green-800 border-green-300'
+                      }`}>
+                        {meta.tmDirectMatch.searchMethod === 'vector' || meta.tmDirectMatch.searchMethod === 'hybrid'
+                          ? '[MEANING MATCH]'
+                          : '[TEXT MATCH]'}
+                      </span>
+                      <p className={`font-bold text-sm ${
+                        meta.tmDirectMatch.searchMethod === 'vector' || meta.tmDirectMatch.searchMethod === 'hybrid'
+                          ? 'text-blue-900'
+                          : 'text-green-900'
+                      }`}>
+                        ✅ Direct TM Match ({meta.tmDirectMatch.fuzzyScore}% similarity)
+                      </p>
+                    </div>
                     <div className="space-y-2">
                       <div>
-                        <p className="text-xs font-semibold text-green-800 mb-1">Source:</p>
-                        <p className="text-green-900 text-sm bg-white p-2 rounded border border-green-200 font-mono whitespace-pre-wrap break-words">
+                        <p className={`text-xs font-semibold mb-1 ${
+                          meta.tmDirectMatch.searchMethod === 'vector' || meta.tmDirectMatch.searchMethod === 'hybrid'
+                            ? 'text-blue-800'
+                            : 'text-green-800'
+                        }`}>Source:</p>
+                        <p className={`text-sm bg-white p-2 rounded border font-mono whitespace-pre-wrap break-words ${
+                          meta.tmDirectMatch.searchMethod === 'vector' || meta.tmDirectMatch.searchMethod === 'hybrid'
+                            ? 'text-blue-900 border-blue-200'
+                            : 'text-green-900 border-green-200'
+                        }`}>
                           {meta.tmDirectMatch.sourceText}
                         </p>
                       </div>
                       <div>
-                        <p className="text-xs font-semibold text-green-800 mb-1">Target (Used):</p>
-                        <p className="text-green-900 text-sm bg-white p-2 rounded border border-green-200 font-mono whitespace-pre-wrap break-words">
+                        <p className={`text-xs font-semibold mb-1 ${
+                          meta.tmDirectMatch.searchMethod === 'vector' || meta.tmDirectMatch.searchMethod === 'hybrid'
+                            ? 'text-blue-800'
+                            : 'text-green-800'
+                        }`}>Target (Used):</p>
+                        <p className={`text-sm bg-white p-2 rounded border font-mono whitespace-pre-wrap break-words ${
+                          meta.tmDirectMatch.searchMethod === 'vector' || meta.tmDirectMatch.searchMethod === 'hybrid'
+                            ? 'text-blue-900 border-blue-200'
+                            : 'text-green-900 border-green-200'
+                        }`}>
                           {meta.tmDirectMatch.targetText}
                         </p>
                       </div>
@@ -673,8 +710,21 @@ export default function AITranslationPanel({
                         <div key={exIdx} className="bg-white p-2 rounded border border-yellow-200">
                           <div className="flex items-center gap-2 mb-1">
                             <span className="text-xs font-bold text-yellow-800 bg-yellow-100 px-2 py-0.5 rounded">#{exIdx + 1}</span>
-                            <span className="text-xs text-yellow-700">
-                              {ex.fuzzyScore}% match ({ex.searchMethod})
+                            <span className={`text-xs px-2 py-0.5 rounded font-medium border ${
+                              ex.searchMethod === 'vector' || ex.searchMethod === 'hybrid'
+                                ? 'bg-blue-100 text-blue-800 border-blue-300'
+                                : 'bg-green-100 text-green-800 border-green-300'
+                            }`}>
+                              {ex.searchMethod === 'vector' || ex.searchMethod === 'hybrid'
+                                ? '[MEANING MATCH]'
+                                : '[TEXT MATCH]'}
+                            </span>
+                            <span className={`text-xs font-semibold ${
+                              ex.searchMethod === 'vector' || ex.searchMethod === 'hybrid'
+                                ? 'text-blue-700'
+                                : 'text-green-700'
+                            }`}>
+                              {ex.fuzzyScore}% match
                             </span>
                           </div>
                           <div className="space-y-1">

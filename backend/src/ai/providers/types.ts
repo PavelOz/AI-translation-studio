@@ -7,6 +7,7 @@ export type ProviderUsage = {
 
 export type ProviderPromptRequest = {
   prompt: string;
+  systemPrompt?: string;
   model?: string;
   temperature?: number;
   maxTokens?: number;
