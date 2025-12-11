@@ -42,6 +42,19 @@ function mapPrismaToApi(entry: PrismaGlossaryEntry): {
     notes = undefined;
   }
   
+  // Map Prisma GlossaryStatus enum to API status
+  // Prisma has: CANDIDATE, PREFERRED, DEPRECATED
+  // API returns: PREFERRED, DEPRECATED (CANDIDATE is mapped to PREFERRED for backward compatibility)
+  let apiStatus: 'PREFERRED' | 'DEPRECATED' = 'PREFERRED';
+  if (entry.status === 'DEPRECATED') {
+    apiStatus = 'DEPRECATED';
+  } else if (entry.status === 'PREFERRED') {
+    apiStatus = 'PREFERRED';
+  } else {
+    // CANDIDATE or any other value defaults to PREFERRED
+    apiStatus = 'PREFERRED';
+  }
+  
   return {
     id: entry.id,
     projectId: entry.projectId || undefined,
@@ -50,7 +63,7 @@ function mapPrismaToApi(entry: PrismaGlossaryEntry): {
     sourceLocale: entry.sourceLocale,
     targetLocale: entry.targetLocale,
     description,
-    status: 'PREFERRED' as const, // Default status (not in Prisma schema)
+    status: apiStatus,
     forbidden: entry.isForbidden,
     notes,
     contextRules: entry.contextRules as ContextRules | undefined,
@@ -90,23 +103,46 @@ export const listGlossaryEntries = async (
 export const upsertGlossaryEntry = async (data: {
   id?: string;
   projectId?: string;
-  sourceTerm: string;
-  targetTerm: string;
-  sourceLocale: string;
-  targetLocale: string;
+  sourceTerm?: string;
+  targetTerm?: string;
+  sourceLocale?: string;
+  targetLocale?: string;
   description?: string;
-  status?: 'PREFERRED' | 'DEPRECATED'; // Not used in Prisma, kept for API compatibility
-  forbidden?: boolean; // API accepts 'forbidden' for backward compatibility
+  status?: 'PREFERRED' | 'DEPRECATED';
+  forbidden?: boolean;
   notes?: string;
-  contextRules?: ContextRules;
+  contextRules?: ContextRules | null;
 }) => {
   // Map 'forbidden' to 'isForbidden' for Prisma schema
   // Normalize terms by trimming whitespace
   // Generate direction from sourceLocale and targetLocale
-  const { forbidden, status, description, notes, contextRules, ...rest } = data;
+  const { 
+    forbidden, 
+    status, 
+    description, 
+    notes, 
+    contextRules: rawContextRules,
+    sourceTerm,
+    targetTerm,
+    sourceLocale,
+    targetLocale,
+    projectId,
+    id,
+  } = data;
+  
+  // Convert null contextRules to undefined
+  const contextRules = rawContextRules === null ? undefined : rawContextRules;
+  
+  // Validate required fields for new entries
+  if (!id && (!sourceTerm || !targetTerm || !sourceLocale || !targetLocale)) {
+    throw ApiError.badRequest('sourceTerm, targetTerm, sourceLocale, and targetLocale are required for new entries');
+  }
   
   // Generate direction string (e.g., "ru-en", "en-ru")
-  const direction = `${data.sourceLocale}-${data.targetLocale}`;
+  // Only generate if both locales are provided (for new entries or full updates)
+  const direction = (sourceLocale && targetLocale) 
+    ? `${sourceLocale}-${targetLocale}` 
+    : undefined;
   
   // Combine description and notes into notes field (Prisma schema only has notes, not description)
   // Format: "DESCRIPTION\n\n---\n\nNOTES" or just one of them
@@ -119,52 +155,159 @@ export const upsertGlossaryEntry = async (data: {
     combinedNotes = notes;
   }
   
-  const prismaData = {
-    ...rest,
-    sourceTerm: data.sourceTerm.trim(),
-    targetTerm: data.targetTerm.trim(),
-    direction, // Required field in Prisma schema
-    isForbidden: forbidden ?? false,
-    notes: combinedNotes,
-    contextRules: contextRules ? (contextRules as any) : undefined,
-  };
+  // Map status: API accepts 'PREFERRED' | 'DEPRECATED', Prisma uses GlossaryStatus enum (CANDIDATE, PREFERRED, DEPRECATED)
+  // If status is provided, use it; otherwise for updates, don't include it (preserve existing), for creates default to CANDIDATE
+  let statusToSave: 'CANDIDATE' | 'PREFERRED' | 'DEPRECATED' | undefined = undefined;
+  if (status !== undefined) {
+    statusToSave = status === 'PREFERRED' 
+      ? 'PREFERRED' 
+      : status === 'DEPRECATED' 
+      ? 'DEPRECATED' 
+      : 'CANDIDATE';
+  } else if (!id) {
+    // For new entries, default to CANDIDATE if status not provided
+    statusToSave = 'CANDIDATE';
+  }
+  
+  // Build prismaData - only include fields that are provided
+  const prismaData: any = {};
+  
+  // Only include these fields if they're provided
+  if (sourceTerm !== undefined) {
+    prismaData.sourceTerm = sourceTerm.trim();
+  }
+  if (targetTerm !== undefined) {
+    prismaData.targetTerm = targetTerm.trim();
+  }
+  if (sourceLocale !== undefined && targetLocale !== undefined) {
+    prismaData.direction = `${sourceLocale}-${targetLocale}`;
+  } else if (!id) {
+    // For new entries, direction is required
+    prismaData.direction = `${sourceLocale}-${targetLocale}`;
+  }
+  
+  if (projectId !== undefined) {
+    prismaData.projectId = projectId;
+  }
+  
+  if (forbidden !== undefined) {
+    prismaData.isForbidden = forbidden;
+  } else if (!id) {
+    prismaData.isForbidden = false; // Default for new entries
+  }
+  
+  if (combinedNotes !== undefined) {
+    prismaData.notes = combinedNotes;
+  }
+  
+  if (contextRules !== undefined) {
+    prismaData.contextRules = contextRules ? (contextRules as any) : undefined;
+  }
+  
+  // Only include status if it's provided or it's a new entry
+  // CRITICAL: Always include status if provided, even for updates
+  if (status !== undefined) {
+    // Status was explicitly provided - always include it
+    prismaData.status = statusToSave!; // statusToSave is guaranteed to be set if status !== undefined
+    logger.info(
+      { entryId: id, status, statusToSave, willIncludeInUpdate: !!id, prismaDataStatus: prismaData.status },
+      'Status explicitly provided - will be included in prismaData',
+    );
+  } else if (statusToSave !== undefined) {
+    // For new entries, include status (defaults to CANDIDATE)
+    prismaData.status = statusToSave;
+    logger.debug(
+      { entryId: id, statusToSave, isNewEntry: !id },
+      'Status included for new entry',
+    );
+  }
 
   // If updating existing entry by ID
-  if (data.id) {
+  if (id) {
+    // Log what we're updating
+    logger.info(
+      { 
+        entryId: id, 
+        sourceTerm: sourceTerm || 'N/A', 
+        status: status !== undefined ? statusToSave : 'not provided',
+        statusProvided: status !== undefined,
+        statusToSave,
+        projectId: projectId, 
+        prismaDataKeys: Object.keys(prismaData), 
+        prismaData,
+        prismaDataHasStatus: 'status' in prismaData,
+      },
+      'Updating glossary entry',
+    );
+    
+    // Ensure we have at least one field to update
+    if (Object.keys(prismaData).length === 0) {
+      logger.warn({ entryId: id }, 'No fields to update in prismaData - this should not happen');
+      throw ApiError.badRequest('No fields provided for update');
+    }
+    
     const updated = await prisma.glossaryEntry.update({
-      where: { id: data.id },
+      where: { id },
       data: prismaData,
     });
     
-    // Regenerate embedding if sourceTerm changed (in background)
-    const oldEntry = await prisma.glossaryEntry.findUnique({
-      where: { id: data.id },
-      select: { sourceTerm: true },
-    });
+    // Verify the update actually changed the status
+    logger.info(
+      { 
+        entryId: id, 
+        requestedStatus: prismaData.status,
+        actualUpdatedStatus: updated.status,
+        updatedKeys: Object.keys(prismaData),
+        statusWasIncluded: 'status' in prismaData,
+        statusWasUpdated: prismaData.status === updated.status,
+      },
+      'Glossary entry updated successfully',
+    );
     
-    if (oldEntry && oldEntry.sourceTerm !== prismaData.sourceTerm) {
-      // Source term changed, regenerate embedding
-      (async () => {
-        try {
-          // First, clear existing embedding
-          await prisma.$executeRawUnsafe(
-            `UPDATE "GlossaryEntry" SET "sourceEmbedding" = NULL, "embeddingUpdatedAt" = NULL WHERE id = $1`,
-            data.id,
-          );
-          
-          const { generateEmbeddingForGlossaryEntry } = await import('./embedding-generation.service');
-          await generateEmbeddingForGlossaryEntry(data.id);
-          logger.debug({ entryId: data.id }, 'Background glossary embedding regenerated successfully');
-        } catch (error: any) {
-          logger.debug(
-            {
-              entryId: data.id,
-              error: error.message,
-            },
-            'Background glossary embedding regeneration failed (non-critical)',
-          );
-        }
-      })();
+    // Double-check: if status was supposed to be updated but wasn't, log a warning
+    if ('status' in prismaData && prismaData.status !== updated.status) {
+      logger.error(
+        { 
+          entryId: id,
+          requestedStatus: prismaData.status,
+          actualStatus: updated.status,
+          prismaData,
+        },
+        'CRITICAL: Status update failed - requested status does not match updated status',
+      );
+    }
+    
+    // Regenerate embedding if sourceTerm changed (in background)
+    if (sourceTerm) {
+      const oldEntry = await prisma.glossaryEntry.findUnique({
+        where: { id },
+        select: { sourceTerm: true },
+      });
+      
+      if (oldEntry && oldEntry.sourceTerm !== sourceTerm.trim()) {
+        // Source term changed, regenerate embedding
+        (async () => {
+          try {
+            // First, clear existing embedding
+            await prisma.$executeRawUnsafe(
+              `UPDATE "GlossaryEntry" SET "sourceEmbedding" = NULL, "embeddingUpdatedAt" = NULL WHERE id = $1`,
+              id,
+            );
+            
+            const { generateEmbeddingForGlossaryEntry } = await import('./embedding-generation.service');
+            await generateEmbeddingForGlossaryEntry(id);
+            logger.debug({ entryId: id }, 'Background glossary embedding regenerated successfully');
+          } catch (error: any) {
+            logger.debug(
+              {
+                entryId: id,
+                error: error.message,
+              },
+              'Background glossary embedding regeneration failed (non-critical)',
+            );
+          }
+        })();
+      }
     }
     
     // Map Prisma schema to API response format
@@ -174,21 +317,21 @@ export const upsertGlossaryEntry = async (data: {
   // For new entries, check for duplicates first
   // A duplicate is defined as: same sourceTerm, targetTerm, sourceLocale, targetLocale, and projectId
   // Normalize terms by trimming whitespace for comparison
-  const normalizedSourceTerm = data.sourceTerm.trim();
-  const normalizedTargetTerm = data.targetTerm.trim();
+  const normalizedSourceTerm = (sourceTerm || '').trim();
+  const normalizedTargetTerm = (targetTerm || '').trim();
   
   // Build where clause for duplicate check
   // Handle projectId: null and undefined both mean "global entry"
   const duplicateWhere: any = {
     sourceTerm: normalizedSourceTerm,
     targetTerm: normalizedTargetTerm,
-    sourceLocale: data.sourceLocale,
-    targetLocale: data.targetLocale,
+    sourceLocale: sourceLocale!,
+    targetLocale: targetLocale!,
   };
   
   // For global entries (no projectId), check for entries with null projectId
-  if (data.projectId) {
-    duplicateWhere.projectId = data.projectId;
+  if (projectId) {
+    duplicateWhere.projectId = projectId;
   } else {
     duplicateWhere.projectId = null;
   }
@@ -209,6 +352,13 @@ export const upsertGlossaryEntry = async (data: {
   }
 
   // No duplicate found, create new entry
+  // Log status when creating new entry
+  if (status !== undefined) {
+    logger.info(
+      { sourceTerm: sourceTerm || 'N/A', status: statusToSave, projectId: projectId },
+      'Creating new glossary entry with status',
+    );
+  }
   const created = await prisma.glossaryEntry.create({ data: prismaData });
   
   // Generate embedding in background (non-blocking)
@@ -853,20 +1003,324 @@ Return a JSON array of terminology pairs.`;
 };
 
 /**
- * List glossary entries for a specific document
+ * List glossary entries for a specific document with status lookup
  */
+// Helper function to normalize locale for matching (handles "ru" vs "ru-RU" variations)
+const normalizeLocaleForMatching = (locale: string): string => {
+  // Convert to lowercase and remove any whitespace
+  return locale.toLowerCase().trim();
+};
+
+// Helper function to check if two locales match (handles "ru" vs "ru-RU" variations)
+const localesMatch = (locale1: string, locale2: string): boolean => {
+  const norm1 = normalizeLocaleForMatching(locale1);
+  const norm2 = normalizeLocaleForMatching(locale2);
+  
+  // Exact match
+  if (norm1 === norm2) return true;
+  
+  // Check if one is a prefix of the other (e.g., "ru" matches "ru-ru" or "ru-us")
+  if (norm1.startsWith(norm2 + '-') || norm2.startsWith(norm1 + '-')) return true;
+  
+  // Check if they share the same base language (e.g., "ru" matches "ru-ru")
+  const base1 = norm1.split('-')[0];
+  const base2 = norm2.split('-')[0];
+  if (base1 === base2 && (norm1.length <= 3 || norm2.length <= 3)) return true;
+  
+  return false;
+};
+
 export const listDocumentGlossary = async (documentId: string) => {
-  const entries = await prisma.documentGlossaryEntry.findMany({
-    where: { documentId },
-    orderBy: { sourceTerm: 'asc' },
-    select: {
-      id: true,
-      documentId: true,
-      sourceTerm: true,
-      targetTerm: true,
-      createdAt: true,
+  try {
+    // Get document to access sourceLocale and targetLocale
+    const document = await prisma.document.findUnique({
+      where: { id: documentId },
+      select: {
+        sourceLocale: true,
+        targetLocale: true,
+        projectId: true,
+      },
+    });
+
+    if (!document) {
+      throw ApiError.notFound('Document not found');
+    }
+
+    // Fetch all DocumentGlossaryEntry records for this document
+    const documentEntries = await prisma.documentGlossaryEntry.findMany({
+      where: { documentId },
+      orderBy: { sourceTerm: 'asc' },
+    });
+
+    // If no entries, return empty array
+    if (documentEntries.length === 0) {
+      return [];
+    }
+
+    // For each entry, lookup the matching GlossaryEntry to get status
+    const entriesWithStatus = await Promise.all(
+      documentEntries.map(async (entry) => {
+        // Try to find matching GlossaryEntry (first check global, then project)
+        let glossaryStatus: string | undefined = undefined;
+        
+        try {
+          // First, try exact match with case-insensitive locales
+          let glossaryEntry = await prisma.glossaryEntry.findFirst({
+            where: {
+              projectId: null, // Global first
+              sourceTerm: { equals: entry.sourceTerm, mode: 'insensitive' },
+              sourceLocale: { equals: document.sourceLocale, mode: 'insensitive' },
+              targetLocale: { equals: document.targetLocale, mode: 'insensitive' },
+            },
+            select: {
+              status: true,
+              sourceLocale: true,
+              targetLocale: true,
+            },
+          });
+
+          // If not found with exact locale match, try flexible locale matching
+          if (!glossaryEntry) {
+            // Fetch all global entries with matching source term
+            const candidateEntries = await prisma.glossaryEntry.findMany({
+              where: {
+                projectId: null,
+                sourceTerm: { equals: entry.sourceTerm, mode: 'insensitive' },
+              },
+              select: {
+                status: true,
+                sourceLocale: true,
+                targetLocale: true,
+              },
+            });
+            
+            // Find entry with matching locales (flexible matching)
+            glossaryEntry = candidateEntries.find(
+              (candidate) =>
+                localesMatch(candidate.sourceLocale, document.sourceLocale) &&
+                localesMatch(candidate.targetLocale, document.targetLocale)
+            );
+          }
+
+          if (glossaryEntry && glossaryEntry.status) {
+            glossaryStatus = glossaryEntry.status;
+            logger.debug(
+              { 
+                documentId, 
+                sourceTerm: entry.sourceTerm,
+                foundStatus: glossaryStatus,
+                foundSourceLocale: glossaryEntry.sourceLocale,
+                foundTargetLocale: glossaryEntry.targetLocale,
+                documentSourceLocale: document.sourceLocale,
+                documentTargetLocale: document.targetLocale,
+              },
+              'Found matching global glossary entry',
+            );
+          } else {
+            // If not found in global, check project-specific with flexible matching
+            let projectEntry = await prisma.glossaryEntry.findFirst({
+              where: {
+                projectId: document.projectId,
+                sourceTerm: { equals: entry.sourceTerm, mode: 'insensitive' },
+                sourceLocale: { equals: document.sourceLocale, mode: 'insensitive' },
+                targetLocale: { equals: document.targetLocale, mode: 'insensitive' },
+              },
+              select: {
+                status: true,
+                sourceLocale: true,
+                targetLocale: true,
+              },
+            });
+            
+            // If not found with exact match, try flexible matching
+            if (!projectEntry) {
+              const candidateProjectEntries = await prisma.glossaryEntry.findMany({
+                where: {
+                  projectId: document.projectId,
+                  sourceTerm: { equals: entry.sourceTerm, mode: 'insensitive' },
+                },
+                select: {
+                  status: true,
+                  sourceLocale: true,
+                  targetLocale: true,
+                },
+              });
+              
+              projectEntry = candidateProjectEntries.find(
+                (candidate) =>
+                  localesMatch(candidate.sourceLocale, document.sourceLocale) &&
+                  localesMatch(candidate.targetLocale, document.targetLocale)
+              );
+            }
+            
+            if (projectEntry && projectEntry.status) {
+              glossaryStatus = projectEntry.status;
+              logger.debug(
+                { documentId, sourceTerm: entry.sourceTerm, foundStatus: glossaryStatus },
+                'Found matching project glossary entry',
+              );
+            }
+          }
+        } catch (error: any) {
+          // If lookup fails, just continue without status (will default to CANDIDATE)
+          logger.debug(
+            { documentId, sourceTerm: entry.sourceTerm, error: error.message },
+            'Failed to lookup glossary entry status, defaulting to CANDIDATE',
+          );
+          glossaryStatus = undefined;
+        }
+
+        // Map status: PREFERRED -> APPROVED, CANDIDATE -> CANDIDATE, DEPRECATED -> DEPRECATED
+        // Always ensure status is set (default to CANDIDATE if not found)
+        let status: 'CANDIDATE' | 'APPROVED' | 'DEPRECATED' = 'CANDIDATE';
+        if (glossaryStatus) {
+          if (glossaryStatus === 'PREFERRED') {
+            status = 'APPROVED';
+          } else if (glossaryStatus === 'DEPRECATED') {
+            status = 'DEPRECATED';
+          } else if (glossaryStatus === 'CANDIDATE') {
+            status = 'CANDIDATE';
+          }
+          // If glossaryStatus is any other value, keep default 'CANDIDATE'
+        }
+        
+        // Debug logging to help diagnose missing approved terms
+        if (status === 'CANDIDATE' && !glossaryStatus) {
+          logger.debug(
+            { 
+              documentId, 
+              sourceTerm: entry.sourceTerm,
+              sourceLocale: document.sourceLocale,
+              targetLocale: document.targetLocale,
+              projectId: document.projectId,
+            },
+            'Term defaulting to CANDIDATE - no GlossaryEntry found with status',
+          );
+        }
+
+        // Ensure frequency is always a valid number (default to 1 if missing or invalid)
+        const frequency = typeof entry.occurrenceCount === 'number' && entry.occurrenceCount > 0 
+          ? entry.occurrenceCount 
+          : 1;
+
+        return {
+          id: entry.id,
+          sourceTerm: entry.sourceTerm,
+          targetTerm: entry.targetTerm,
+          frequency,
+          status,
+        };
+      }),
+    );
+
+    return entriesWithStatus;
+  } catch (error: any) {
+    logger.error(
+      { documentId, error: error.message, stack: error.stack },
+      'Error in listDocumentGlossary',
+    );
+    throw ApiError.badRequest(`Failed to fetch document glossary: ${error.message || 'Unknown error'}`);
+  }
+};
+
+/**
+ * Updates a document glossary entry by finding/creating the corresponding GlossaryEntry
+ * and updating its status and/or targetTerm
+ */
+export const updateDocumentGlossaryEntry = async (
+  documentGlossaryEntryId: string,
+  data: {
+    status?: 'PREFERRED' | 'DEPRECATED' | 'CANDIDATE';
+    targetTerm?: string;
+  },
+) => {
+  // Get the DocumentGlossaryEntry
+  const documentEntry = await prisma.documentGlossaryEntry.findUnique({
+    where: { id: documentGlossaryEntryId },
+    include: {
+      document: {
+        select: {
+          sourceLocale: true,
+          targetLocale: true,
+          projectId: true,
+        },
+      },
     },
   });
 
-  return entries;
+  if (!documentEntry) {
+    throw ApiError.notFound('Document glossary entry not found');
+  }
+
+  const { document } = documentEntry;
+
+  // Find or create the corresponding GlossaryEntry
+  // First check global (projectId: null)
+  let glossaryEntry = await prisma.glossaryEntry.findFirst({
+    where: {
+      projectId: null,
+      sourceTerm: { equals: documentEntry.sourceTerm, mode: 'insensitive' },
+      sourceLocale: document.sourceLocale,
+      targetLocale: document.targetLocale,
+    },
+  });
+
+  // If not found in global, check project-specific
+  if (!glossaryEntry) {
+    glossaryEntry = await prisma.glossaryEntry.findFirst({
+      where: {
+        projectId: document.projectId,
+        sourceTerm: { equals: documentEntry.sourceTerm, mode: 'insensitive' },
+        sourceLocale: document.sourceLocale,
+        targetLocale: document.targetLocale,
+      },
+    });
+  }
+
+  // If still not found, create a new GlossaryEntry
+  if (!glossaryEntry) {
+    const statusToSave = data.status === 'CANDIDATE' ? 'CANDIDATE' : data.status || 'CANDIDATE';
+    glossaryEntry = await prisma.glossaryEntry.create({
+      data: {
+        sourceTerm: documentEntry.sourceTerm,
+        targetTerm: data.targetTerm || documentEntry.targetTerm,
+        sourceLocale: document.sourceLocale,
+        targetLocale: document.targetLocale,
+        direction: `${document.sourceLocale}-${document.targetLocale}`,
+        projectId: document.projectId, // Create in project scope
+        status: statusToSave as any,
+      },
+    });
+  } else {
+    // Update existing GlossaryEntry
+    const updateData: any = {};
+    if (data.status !== undefined) {
+      updateData.status = data.status === 'CANDIDATE' ? 'CANDIDATE' : data.status;
+    }
+    if (data.targetTerm !== undefined) {
+      updateData.targetTerm = data.targetTerm;
+    }
+
+    if (Object.keys(updateData).length > 0) {
+      glossaryEntry = await prisma.glossaryEntry.update({
+        where: { id: glossaryEntry.id },
+        data: updateData,
+      });
+    }
+  }
+
+  // Also update the DocumentGlossaryEntry if targetTerm changed
+  if (data.targetTerm !== undefined && data.targetTerm !== documentEntry.targetTerm) {
+    await prisma.documentGlossaryEntry.update({
+      where: { id: documentGlossaryEntryId },
+      data: { targetTerm: data.targetTerm },
+    });
+  }
+
+  return {
+    id: documentGlossaryEntryId,
+    sourceTerm: documentEntry.sourceTerm,
+    targetTerm: glossaryEntry.targetTerm,
+    status: glossaryEntry.status === 'PREFERRED' ? 'APPROVED' : glossaryEntry.status === 'DEPRECATED' ? 'DEPRECATED' : 'CANDIDATE',
+  };
 };

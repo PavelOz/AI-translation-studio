@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useMutation } from 'react-query';
+import { useMutation, useQueryClient } from 'react-query';
 import { glossaryApi } from '../api/glossary.api';
 import type { GlossaryEntry, UpsertGlossaryEntryRequest, ContextRules } from '../api/glossary.api';
 import { projectsApi } from '../api/projects.api';
@@ -22,6 +22,7 @@ export default function GlossaryEntryModal({
   projectId: defaultProjectId,
   onSuccess,
 }: GlossaryEntryModalProps) {
+  const queryClient = useQueryClient();
   const [formData, setFormData] = useState<UpsertGlossaryEntryRequest>({
     projectId: defaultProjectId,
     sourceTerm: '',
@@ -98,12 +99,17 @@ export default function GlossaryEntryModal({
   const upsertMutation = useMutation({
     mutationFn: (data: UpsertGlossaryEntryRequest) => {
       if (entry?.id) {
-        return glossaryApi.update(entry.id, data);
+        // For updates, don't send id in body (it's in URL), and only send changed fields
+        const { id, ...updateData } = data;
+        return glossaryApi.update(entry.id, updateData);
       }
       return glossaryApi.upsert(data);
     },
     onSuccess: () => {
       toast.success(entry ? 'Glossary entry updated successfully' : 'Glossary entry created successfully');
+      // Invalidate glossary queries to refresh the UI
+      queryClient.invalidateQueries({ queryKey: ['glossary'] });
+      queryClient.invalidateQueries({ queryKey: ['glossary-embedding-stats'] });
       onSuccess?.();
       onClose(); // Close modal after successful creation/update
     },
@@ -131,6 +137,7 @@ export default function GlossaryEntryModal({
       projectId: formData.projectId || undefined,
       description: formData.description?.trim() || undefined,
       notes: formData.notes?.trim() || undefined,
+      contextRules: formData.contextRules || undefined, // Convert null to undefined
     };
 
     upsertMutation.mutate(cleanedData);

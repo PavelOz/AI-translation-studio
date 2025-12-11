@@ -14,7 +14,8 @@ export const useDocumentGlossary = (documentId: string | undefined) => {
     queryKey: ['glossary', documentId],
     queryFn: () => documentsApi.listDocumentGlossary(documentId!),
     enabled: !!documentId,
-    staleTime: 30000, // Cache for 30 seconds
+    staleTime: 0, // Always refetch when invalidated (no stale time cache)
   });
 };
+
 

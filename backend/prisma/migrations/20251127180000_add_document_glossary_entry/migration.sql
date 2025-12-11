@@ -15,3 +15,5 @@ CREATE INDEX "DocumentGlossaryEntry_documentId_idx" ON "DocumentGlossaryEntry"("
 -- AddForeignKey
 ALTER TABLE "DocumentGlossaryEntry" ADD CONSTRAINT "DocumentGlossaryEntry_documentId_fkey" FOREIGN KEY ("documentId") REFERENCES "Document"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
+
+

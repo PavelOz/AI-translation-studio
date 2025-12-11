@@ -12,7 +12,9 @@ import { getDocumentSegments } from '../services/segment.service';
 import { runDocumentMachineTranslation, pretranslateDocument } from '../services/ai.service';
 import { getDocumentMetricsSummary, runDocumentQualityCheck } from '../services/quality.service';
 import { getProgress, cancelProgress, clearProgress } from '../services/pretranslateProgress';
-import { generateGlossary, listDocumentGlossary } from '../services/glossary.service';
+import { generateGlossary, listDocumentGlossary, updateDocumentGlossaryEntry } from '../services/glossary.service';
+import { runFullAnalysis, getAnalysisResults, cancelAnalysis, cleanupStaleAnalyses, resetAnalysisStatus } from '../services/analysis.service';
+import { logger } from '../utils/logger';
 
 // Configure multer to preserve UTF-8 encoding for filenames (including Cyrillic)
 // Multer handles UTF-8 filenames correctly when sent from modern browsers
@@ -214,6 +216,90 @@ documentRoutes.get(
   asyncHandler(async (req, res) => {
     const entries = await listDocumentGlossary(req.params.documentId);
     res.json(entries);
+  }),
+);
+
+documentRoutes.post(
+  '/:documentId/analyze',
+  asyncHandler(async (req, res) => {
+    const documentId = req.params.documentId;
+    const forceReset = req.body?.forceReset === true || req.query?.forceReset === 'true';
+    
+    // Start analysis in background - don't wait for completion
+    runFullAnalysis(documentId, forceReset).catch((error) => {
+      logger.error(
+        { documentId, forceReset, error: error.message },
+        'Background analysis failed',
+      );
+    });
+    
+    // Return immediately with RUNNING status
+    res.status(202).json({
+      status: 'RUNNING',
+      message: forceReset ? 'Analysis started with force reset (all data will be cleared)' : 'Analysis started in background',
+    });
+  }),
+);
+
+documentRoutes.get(
+  '/:documentId/analysis',
+  asyncHandler(async (req, res) => {
+    const results = await getAnalysisResults(req.params.documentId);
+    res.json(results);
+  }),
+);
+
+documentRoutes.delete(
+  '/:documentId/analysis',
+  asyncHandler(async (req, res) => {
+    cancelAnalysis(req.params.documentId);
+    res.json({ message: 'Analysis cancellation requested' });
+  }),
+);
+
+// Manual reset of analysis status (useful for fixing stale RUNNING statuses)
+documentRoutes.post(
+  '/:documentId/analysis/reset',
+  asyncHandler(async (req, res) => {
+    const result = await resetAnalysisStatus(req.params.documentId);
+    res.json({ message: 'Analysis status reset', status: result.status });
+  }),
+);
+
+// Manual cleanup of all stale analyses
+documentRoutes.post(
+  '/analysis/cleanup-stale',
+  asyncHandler(async (req, res) => {
+    const count = await cleanupStaleAnalyses();
+    res.json({ message: `Cleaned up ${count} stale analysis(es)`, count });
+  }),
+);
+
+documentRoutes.get(
+  '/:documentId/glossary',
+  asyncHandler(async (req, res) => {
+    const glossary = await listDocumentGlossary(req.params.documentId);
+    res.json(glossary);
+  }),
+);
+
+documentRoutes.patch(
+  '/:documentId/glossary/:entryId',
+  asyncHandler(async (req, res) => {
+    const { entryId } = req.params;
+    const { status, targetTerm } = req.body;
+    
+    // Validate status if provided
+    if (status && !['PREFERRED', 'DEPRECATED', 'CANDIDATE'].includes(status)) {
+      throw ApiError.badRequest('Invalid status. Must be PREFERRED, DEPRECATED, or CANDIDATE');
+    }
+    
+    const updated = await updateDocumentGlossaryEntry(entryId, {
+      status: status as 'PREFERRED' | 'DEPRECATED' | 'CANDIDATE' | undefined,
+      targetTerm,
+    });
+    
+    res.json(updated);
   }),
 );
 

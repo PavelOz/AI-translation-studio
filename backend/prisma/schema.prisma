@@ -34,6 +34,7 @@ enum SegmentStatus {
 }
 
 enum GlossaryStatus {
+  CANDIDATE
   PREFERRED
   DEPRECATED
 }
@@ -139,6 +140,8 @@ model Document {
   aiRequests         AIRequest[]
   chatMessages       ChatMessage[]
   extractedGlossary  DocumentGlossaryEntry[]
+  analysis           DocumentAnalysis?
+  styleRules         DocumentStyleRule[]
 }
 
 model Segment {
@@ -230,6 +233,7 @@ model GlossaryEntry {
   isForbidden  Boolean @default(false)
   notes        String?
   contextRules Json? // Context-specific usage rules: { useOnlyIn?: string[], excludeFrom?: string[], documentTypes?: string[], requires?: string[] }
+  status       GlossaryStatus @default(CANDIDATE) // CANDIDATE = new terms awaiting approval, PREFERRED = approved, DEPRECATED = deprecated
 
   // Vector embedding fields for semantic phrase matching
   sourceEmbedding    Unsupported("vector(1536)")? // pgvector type - 1536 dimensions for text-embedding-3-small
@@ -322,12 +326,42 @@ model ChatMessage {
 }
 
 model DocumentGlossaryEntry {
-  id         String   @id @default(uuid())
-  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
-  documentId String
-  sourceTerm String
-  targetTerm String
-  createdAt  DateTime @default(now())
+  id              String   @id @default(uuid())
+  document        Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  documentId      String
+  sourceTerm      String
+  targetTerm      String
+  occurrenceCount Int      @default(1) // Number of times this term appears in the document
+  createdAt       DateTime @default(now())
+
+  @@index([documentId])
+}
+
+model DocumentAnalysis {
+  id                String   @id @default(uuid())
+  document          Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  documentId        String   @unique
+  status            String   @default("PENDING") // 'PENDING', 'RUNNING', 'COMPLETED', 'FAILED'
+  glossaryExtracted Boolean  @default(false)
+  styleRulesExtracted Boolean @default(false)
+  currentStage      String?  // Current stage: 'fetching', 'frequency_analysis', 'ai_glossary', 'ai_style', 'saving_glossary', 'saving_style', 'completed'
+  progressPercentage Int     @default(0) // 0-100
+  currentMessage    String?  // Human-readable progress message
+  completedAt       DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+model DocumentStyleRule {
+  id          String   @id @default(uuid())
+  document    Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  documentId  String
+  ruleType    String   // e.g. 'date_format', 'list_style', 'number_format', 'capitalization', etc.
+  pattern     String   // e.g. 'DD.MM.YYYY', 'verbs', 'sentence case'
+  description String?  // Human-readable description
+  examples    Json?    // Array of strings showing examples
+  priority    Int      @default(50) // Higher = more important
+  createdAt   DateTime @default(now())
 
   @@index([documentId])
 }

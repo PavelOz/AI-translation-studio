@@ -13,19 +13,19 @@ const contextRulesSchema = z.object({
   excludeFrom: z.array(z.string()).optional(),
   documentTypes: z.array(z.string()).optional(),
   requires: z.array(z.string()).optional(),
-}).optional();
+}).optional().nullable();
 
 const upsertSchema = z.object({
   id: z.string().uuid().optional(),
-  projectId: z.string().uuid().optional(),
+  projectId: z.string().uuid().optional().nullable(),
   sourceTerm: z.string(),
   targetTerm: z.string(),
   sourceLocale: z.string(),
   targetLocale: z.string(),
-  description: z.string().optional(),
+  description: z.string().optional().nullable(),
   status: z.enum(['PREFERRED', 'DEPRECATED']).optional(),
   forbidden: z.boolean().optional(),
-  notes: z.string().optional(),
+  notes: z.string().optional().nullable(),
   contextRules: contextRulesSchema,
 });
 
@@ -120,7 +120,16 @@ glossaryRoutes.get(
 glossaryRoutes.patch(
   '/:entryId',
   asyncHandler(async (req, res) => {
-    const payload = upsertSchema.parse(req.body);
+    // For PATCH, don't require id in body since it's in URL params
+    // Also allow partial updates (make most fields optional)
+    const patchSchema = upsertSchema.partial().extend({
+      id: z.string().uuid().optional(), // ID is optional in body since it's in URL
+      sourceTerm: z.string().optional(),
+      targetTerm: z.string().optional(),
+      sourceLocale: z.string().optional(),
+      targetLocale: z.string().optional(),
+    });
+    const payload = patchSchema.parse(req.body);
     const entry = await upsertGlossaryEntry({ ...payload, id: req.params.entryId });
     res.json(entry);
   }),

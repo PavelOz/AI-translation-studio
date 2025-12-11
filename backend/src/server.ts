@@ -3,6 +3,7 @@ import { createApp } from './app';
 import { env } from './utils/env';
 import { logger } from './utils/logger';
 import { DocxHandler } from './utils/file-handlers/docx.handler';
+import { cleanupStaleAnalyses } from './services/analysis.service';
 
 const app = createApp();
 const server = http.createServer(app);
@@ -34,6 +35,11 @@ const checkLibreOffice = async () => {
 
 server.listen(env.port, async () => {
   logger.info(`AI Translation Studio backend listening on port ${env.port}`);
+  
+  // Cleanup stale analyses (RUNNING statuses from before server restart)
+  cleanupStaleAnalyses().catch((error) => {
+    logger.error({ error }, 'Failed to cleanup stale analyses');
+  });
   
   // Check LibreOffice asynchronously (don't block server startup)
   checkLibreOffice().catch((error) => {

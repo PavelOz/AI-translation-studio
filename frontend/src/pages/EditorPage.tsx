@@ -13,12 +13,12 @@ import GlossaryModePanel from '../components/editor/GlossaryModePanel';
 import QAIssuesPanel from '../components/editor/QAIssuesPanel';
 import DebugInspectorPanel from '../components/editor/DebugInspectorPanel';
 import EditorToolbar from '../components/editor/EditorToolbar';
-import SegmentFilter from '../components/editor/SegmentFilter';
 import DocumentGlossary from '../components/DocumentGlossary';
+import AnalysisSidebar from '../components/AnalysisSidebar';
+import GlossaryReviewTable from '../components/Glossary/GlossaryReviewTable';
 import type { Segment, SegmentStatus } from '../api/segments.api';
 import type { GlossaryMode } from '../types/glossary';
 import { getLanguageName } from '../utils/languages';
-import toast from 'react-hot-toast';
 
 export default function EditorPage() {
   const { documentId } = useParams<{ documentId: string }>();
@@ -65,7 +65,7 @@ export default function EditorPage() {
     stage: string;
     details?: string;
   } | null>(null);
-  const [isGeneratingGlossary, setIsGeneratingGlossary] = useState(false);
+  const [showGlossaryReview, setShowGlossaryReview] = useState(false);
 
   const { data: documentData, isLoading: isLoadingDocument } = useQuery({
     queryKey: ['documents', documentId],
@@ -234,31 +234,6 @@ export default function EditorPage() {
   const handleSegmentClick = useCallback((index: number) => {
     setActiveSegmentIndex(index);
   }, []);
-
-  const handleGenerateGlossaryClick = useCallback(async () => {
-    if (!documentId || isGeneratingGlossary) return;
-
-    setIsGeneratingGlossary(true);
-    try {
-      const result = await documentsApi.generateGlossary(documentId);
-      
-      toast.success(`Successfully generated ${result.count} glossary term${result.count !== 1 ? 's' : ''}`);
-      
-      // Invalidate glossary-related queries to refresh the UI
-      queryClient.invalidateQueries({ queryKey: ['glossary'] });
-      queryClient.invalidateQueries({ queryKey: ['glossary', documentData?.projectId] });
-      queryClient.invalidateQueries({ queryKey: ['glossary', documentId] }); // Document-specific glossary
-      
-      // Also invalidate document queries in case glossary is shown in document context
-      queryClient.invalidateQueries({ queryKey: ['documents', documentId] });
-    } catch (error: any) {
-      const errorMessage = error?.response?.data?.error || error?.message || 'Failed to generate glossary';
-      toast.error(`Glossary generation failed: ${errorMessage}`);
-      console.error('Glossary generation error:', error);
-    } finally {
-      setIsGeneratingGlossary(false);
-    }
-  }, [documentId, isGeneratingGlossary, queryClient, documentData?.projectId]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -504,21 +479,22 @@ export default function EditorPage() {
               </select>
             </div>
             <button
-              onClick={handleGenerateGlossaryClick}
-              disabled={isGeneratingGlossary}
-              className="btn btn-primary text-sm disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
+              onClick={() => setShowGlossaryReview(!showGlossaryReview)}
+              className={`btn text-sm whitespace-nowrap ${
+                showGlossaryReview ? 'btn-secondary' : 'btn-outline'
+              }`}
             >
-              {isGeneratingGlossary ? (
-                <>
-                  <span className="inline-block animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent mr-2"></span>
-                  Generating...
-                </>
-              ) : (
-                'Generate Glossary'
-              )}
+              {showGlossaryReview ? 'Hide' : 'Show'} Glossary Review
             </button>
           </div>
         </div>
+
+        {/* Glossary Review Section (Collapsible) */}
+        {showGlossaryReview && (
+          <div className="bg-gray-50 border-b border-gray-200 p-6">
+            <GlossaryReviewTable documentId={documentId!} />
+          </div>
+        )}
 
         {/* Main Content */}
         <div className="flex-1 flex overflow-hidden">
@@ -588,6 +564,8 @@ export default function EditorPage() {
                     onClick={(e) => e.stopPropagation()}
                     onMouseDown={(e) => e.stopPropagation()}
                   >
+                    <AnalysisSidebar documentId={documentId!} />
+
                     <AIChatPanel
                       projectId={documentData.projectId}
                       documentId={documentId!}

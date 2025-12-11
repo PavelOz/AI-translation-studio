@@ -84,6 +84,31 @@ export const glossaryApi = {
     return response.data;
   },
 
+  getGlossary: async (documentId: string): Promise<Array<{
+    id: string;
+    sourceTerm: string;
+    targetTerm: string;
+    frequency: number;
+    status: 'CANDIDATE' | 'APPROVED' | 'DEPRECATED';
+  }>> => {
+    const response = await apiClient.get(`/documents/${documentId}/glossary`);
+    return response.data;
+  },
+
+  updateDocumentGlossaryEntry: async (
+    documentId: string,
+    entryId: string,
+    data: { status?: 'PREFERRED' | 'DEPRECATED' | 'CANDIDATE'; targetTerm?: string },
+  ): Promise<{
+    id: string;
+    sourceTerm: string;
+    targetTerm: string;
+    status: 'CANDIDATE' | 'APPROVED' | 'DEPRECATED';
+  }> => {
+    const response = await apiClient.patch(`/documents/${documentId}/glossary/${entryId}`, data);
+    return response.data;
+  },
+
   search: async (
     sourceText: string,
     options?: {
