@@ -59,6 +59,103 @@ export class AIOrchestrator {
       .join('\n');
   }
 
+  private buildDocumentGlossarySection(documentGlossary?: Array<{ sourceTerm: string; targetTerm: string; status: string; occurrenceCount: number }>) {
+    if (!documentGlossary || documentGlossary.length === 0) {
+      return '';
+    }
+    
+    // Format document-specific glossary terms
+    const formattedTerms = documentGlossary
+      .map((entry) => {
+        const statusLabel = entry.status === 'PREFERRED' ? '[APPROVED]' : entry.status === 'CANDIDATE' ? '[CANDIDATE]' : '';
+        return `- ${entry.sourceTerm} => ${entry.targetTerm} ${statusLabel} (appears ${entry.occurrenceCount}x)`;
+      })
+      .join('\n');
+    
+    return formattedTerms;
+  }
+
+  private buildDocumentStyleRulesSection(styleRules?: Array<{ ruleType: string; pattern: string; description: string | null; examples: any }>) {
+    if (!styleRules || styleRules.length === 0) {
+      return '';
+    }
+    
+    const formattedRules = styleRules.map((rule) => {
+      const examplesText = rule.examples 
+        ? (Array.isArray(rule.examples) ? rule.examples.join(', ') : JSON.stringify(rule.examples))
+        : '';
+      
+      return [
+        `Rule Type: ${rule.ruleType}`,
+        `Pattern: ${rule.pattern}`,
+        rule.description ? `Description: ${rule.description}` : '',
+        examplesText ? `Examples: ${examplesText}` : '',
+      ].filter(Boolean).join('\n');
+    }).join('\n\n');
+    
+    return formattedRules;
+  }
+
+  /**
+   * Format combined glossary terms for the new hierarchical prompt structure
+   * Combines document-specific glossary and project-level glossary
+   */
+  private formatGlossaryTermsForHierarchy(
+    documentGlossary?: Array<{ sourceTerm: string; targetTerm: string; status: string; occurrenceCount: number }>,
+    projectGlossary?: OrchestratorGlossaryEntry[]
+  ): string {
+    const parts: string[] = [];
+    
+    // Document-specific glossary (highest priority)
+    if (documentGlossary && documentGlossary.length > 0) {
+      documentGlossary.forEach((entry) => {
+        const statusLabel = entry.status === 'PREFERRED' ? '[APPROVED]' : entry.status === 'CANDIDATE' ? '[CANDIDATE]' : '';
+        parts.push(`- ${entry.sourceTerm} => ${entry.targetTerm} ${statusLabel} (appears ${entry.occurrenceCount}x)`);
+      });
+    }
+    
+    // Project-level glossary
+    if (projectGlossary && projectGlossary.length > 0) {
+      projectGlossary.slice(0, 200).forEach((entry) => {
+        const forbiddenLabel = entry.forbidden ? ' (FORBIDDEN TERM: do not translate differently)' : '';
+        const notesLabel = entry.notes ? ` | Notes: ${entry.notes}` : '';
+        parts.push(`- ${entry.term} => ${entry.translation}${forbiddenLabel}${notesLabel}`);
+      });
+    }
+    
+    if (parts.length === 0) {
+      return 'No glossary terms provided.';
+    }
+    
+    return parts.join('\n');
+  }
+
+  /**
+   * Format style rules for the new hierarchical prompt structure
+   */
+  private formatStyleRulesForHierarchy(
+    styleRules?: Array<{ ruleType: string; pattern: string; description: string | null; examples: any }>
+  ): string {
+    if (!styleRules || styleRules.length === 0) {
+      return 'No specific style rules provided. Follow standard professional translation practices.';
+    }
+    
+    const formattedRules = styleRules.map((rule) => {
+      const examplesText = rule.examples 
+        ? (Array.isArray(rule.examples) ? rule.examples.join(', ') : JSON.stringify(rule.examples))
+        : '';
+      
+      return [
+        `Rule Type: ${rule.ruleType}`,
+        `Pattern: ${rule.pattern}`,
+        rule.description ? `Description: ${rule.description}` : '',
+        examplesText ? `Examples: ${examplesText}` : '',
+      ].filter(Boolean).join('\n');
+    }).join('\n\n');
+    
+    return formattedRules;
+  }
+
   private buildTranslationExamplesSection(tmExamples?: TmExample[]) {
     if (!tmExamples || tmExamples.length === 0) {
       return 'No translation examples available. Use your best judgment based on the glossary and guidelines.';
@@ -90,8 +187,14 @@ export class AIOrchestrator {
   private buildBatchPrompt(batch: OrchestratorSegment[], options: TranslateSegmentsOptions): string {
     const project = options.project ?? {};
     const guidelineText = this.buildGuidelineSection(options.guidelines);
-    const glossaryText = this.buildGlossarySection(options.glossary);
     const examplesText = this.buildTranslationExamplesSection(options.tmExamples);
+    
+    // Format combined glossary and style rules for new hierarchical structure
+    const formattedGlossaryTerms = this.formatGlossaryTermsForHierarchy(
+      options.documentGlossary,
+      options.glossary
+    );
+    const formattedStyleRules = this.formatStyleRulesForHierarchy(options.documentStyleRules);
     
     const segmentsPayload = batch.map((segment) => ({
       segment_id: segment.segmentId,
@@ -144,55 +247,33 @@ export class AIOrchestrator {
       ? `\n${documentContextParts.join('\n')}` 
       : '';
 
+    // NEW HIERARCHICAL PROMPT STRUCTURE (Simplified per requirements)
     return [
-      'You are a professional technical/legal translator.',
+      `You are a professional technical translator specializing in ${sourceLangCode} to ${targetLangCode}. Your primary objective is to deliver a fluent and idiomatic translation.`,
       '',
-      '=== TRANSLATION TASK (READ CAREFULLY - THIS IS CRITICAL) ===',
-      `YOUR TASK: Translate text from ${sourceLang} to ${targetLang}.`,
+      '### 👑 CONTEXT HIERARCHY:',
+      '1. **TERMINOLOGY (NON-NEGOTIABLE):** You MUST strictly use the translations provided in the Glossary. Failure to use a required term is a critical error.',
+      '2. **STYLE & FORMATTING (HIGHLY RECOMMENDED):** Apply these rules unless they severely compromise the fluency or mandatory grammar of the target language.',
       '',
-      `SOURCE LANGUAGE: ${sourceLang} (code: ${sourceLangCode})`,
-      `  - This is the ORIGINAL language of the input text`,
-      `  - Input segments are written in ${sourceLang}`,
+      '### CRITICAL GLOSSARY:',
+      formattedGlossaryTerms,
       '',
-      `TARGET LANGUAGE: ${targetLang} (code: ${targetLangCode})`,
-      `  - This is the TRANSLATION language for the output`,
-      `  - ALL output translations MUST be in ${targetLang}`,
+      '### STYLE & FORMATTING RULES:',
+      formattedStyleRules,
       '',
-      `TRANSLATION DIRECTION: ${sourceLang} → ${targetLang}`,
-      '',
-      naturalLanguageInstructions,
-      '',
-      `CRITICAL RULES (MUST FOLLOW):`,
-      `1. Input text is written in ${sourceLang} (SOURCE language)`,
-      `2. You MUST translate it to ${targetLang} (TARGET language)`,
-      `3. Output text MUST be written in ${targetLang} ONLY`,
-      `4. DO NOT return text in ${sourceLang} - it is WRONG`,
-      `5. DO NOT return text in any other language - ONLY ${targetLang}`,
-      `6. All translations in the JSON response MUST be in ${targetLang} language only.`,
-      `7. If you return text in ${sourceLang}, the translation is INCORRECT and will be rejected.`,
-      '',
-      '=== PROJECT CONTEXT ===',
-      `Project: ${project.name ?? 'AI Translation Studio'} | Client: ${project.client ?? 'N/A'} | Domain: ${project.domain ?? 'general'}`,
-      project.summary ? `Project summary/context: ${project.summary}` : 'Project summary/context: not provided.',
-      documentContext,
-      '',
-      examplesText,
-      '',
-      '=== TRANSLATION GUIDELINES ===',
-      'Follow ALL guidelines strictly:',
-      guidelineText,
-      '',
-      '=== GLOSSARY ===',
-      'Glossary (must be enforced exactly):',
-      glossaryText,
+      // Add segments in the required format
+      ...batch.map((segment) => [
+        `Source Segment: ${segment.sourceText}`,
+        'Target Translation:',
+        '',
+      ]),
       '',
       '=== OUTPUT FORMAT ===',
-      'Translate each segment and return ONLY valid JSON matching this schema:',
+      'Return ONLY valid JSON array matching this schema:',
       `[{"segment_id":"<id>","target_mt":"<translation>"}]`,
       'Do not include comments or prose outside the JSON array.',
-      `IMPORTANT: All translations must be in the target language (${targetLang}).`,
       '',
-      '=== SEGMENTS TO TRANSLATE ===',
+      '=== SEGMENTS DATA (for reference) ===',
       JSON.stringify(segmentsPayload, null, 2),
     ].join('\n');
   }

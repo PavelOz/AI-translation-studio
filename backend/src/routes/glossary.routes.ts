@@ -23,7 +23,7 @@ const upsertSchema = z.object({
   sourceLocale: z.string(),
   targetLocale: z.string(),
   description: z.string().optional().nullable(),
-  status: z.enum(['PREFERRED', 'DEPRECATED']).optional(),
+  status: z.enum(['CANDIDATE', 'PREFERRED', 'DEPRECATED']).optional(),
   forbidden: z.boolean().optional(),
   notes: z.string().optional().nullable(),
   contextRules: contextRulesSchema,

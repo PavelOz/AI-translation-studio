@@ -15,3 +15,4 @@ ALTER TABLE "GlossaryEntry" ALTER COLUMN "status" SET DEFAULT 'CANDIDATE';
 ALTER TABLE "GlossaryEntry" ALTER COLUMN "status" SET NOT NULL;
 
 
+

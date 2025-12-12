@@ -4,3 +4,4 @@ ALTER TABLE "DocumentAnalysis" ADD COLUMN IF NOT EXISTS "progressPercentage" INT
 ALTER TABLE "DocumentAnalysis" ADD COLUMN IF NOT EXISTS "currentMessage" TEXT;
 
 
+

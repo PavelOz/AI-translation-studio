@@ -30,7 +30,7 @@ export default function GlossaryEntryModal({
     sourceLocale: '',
     targetLocale: '',
     description: '',
-    status: 'PREFERRED',
+    status: 'CANDIDATE',
     forbidden: false,
     notes: '',
     contextRules: undefined,
@@ -69,7 +69,7 @@ export default function GlossaryEntryModal({
         sourceLocale: '',
         targetLocale: '',
         description: '',
-        status: 'PREFERRED',
+        status: 'CANDIDATE',
         forbidden: false,
         notes: '',
         contextRules: undefined,
@@ -189,9 +189,10 @@ export default function GlossaryEntryModal({
                 </label>
                 <select
                   value={formData.status}
-                  onChange={(e) => setFormData({ ...formData, status: e.target.value as 'PREFERRED' | 'DEPRECATED' })}
+                  onChange={(e) => setFormData({ ...formData, status: e.target.value as 'CANDIDATE' | 'PREFERRED' | 'DEPRECATED' })}
                   className="input w-full"
                 >
+                  <option value="CANDIDATE">Candidate</option>
                   <option value="PREFERRED">Preferred</option>
                   <option value="DEPRECATED">Deprecated</option>
                 </select>

@@ -20,7 +20,7 @@ function mapPrismaToApi(entry: PrismaGlossaryEntry): {
   sourceLocale: string;
   targetLocale: string;
   description?: string;
-  status: 'PREFERRED' | 'DEPRECATED';
+  status: 'CANDIDATE' | 'PREFERRED' | 'DEPRECATED';
   forbidden: boolean;
   notes?: string;
   contextRules?: ContextRules;
@@ -44,16 +44,24 @@ function mapPrismaToApi(entry: PrismaGlossaryEntry): {
   
   // Map Prisma GlossaryStatus enum to API status
   // Prisma has: CANDIDATE, PREFERRED, DEPRECATED
-  // API returns: PREFERRED, DEPRECATED (CANDIDATE is mapped to PREFERRED for backward compatibility)
-  let apiStatus: 'PREFERRED' | 'DEPRECATED' = 'PREFERRED';
+  // API now returns: CANDIDATE, PREFERRED, DEPRECATED (all statuses exposed)
+  let apiStatus: 'CANDIDATE' | 'PREFERRED' | 'DEPRECATED' = 'CANDIDATE';
   if (entry.status === 'DEPRECATED') {
     apiStatus = 'DEPRECATED';
   } else if (entry.status === 'PREFERRED') {
     apiStatus = 'PREFERRED';
+  } else if (entry.status === 'CANDIDATE') {
+    apiStatus = 'CANDIDATE';
   } else {
-    // CANDIDATE or any other value defaults to PREFERRED
-    apiStatus = 'PREFERRED';
+    // Default to CANDIDATE for any other value
+    apiStatus = 'CANDIDATE';
   }
+  
+  // #region agent log
+  if (entry.targetTerm && entry.targetTerm.length < 20) {
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'glossary.service.ts:61',message:'Reading targetTerm from DB',data:{id:entry.id,sourceTerm:entry.sourceTerm,targetTerm:entry.targetTerm,targetTermLength:entry.targetTerm.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
+  }
+  // #endregion
   
   return {
     id: entry.id,
@@ -108,7 +116,7 @@ export const upsertGlossaryEntry = async (data: {
   sourceLocale?: string;
   targetLocale?: string;
   description?: string;
-  status?: 'PREFERRED' | 'DEPRECATED';
+  status?: 'CANDIDATE' | 'PREFERRED' | 'DEPRECATED';
   forbidden?: boolean;
   notes?: string;
   contextRules?: ContextRules | null;
@@ -155,15 +163,20 @@ export const upsertGlossaryEntry = async (data: {
     combinedNotes = notes;
   }
   
-  // Map status: API accepts 'PREFERRED' | 'DEPRECATED', Prisma uses GlossaryStatus enum (CANDIDATE, PREFERRED, DEPRECATED)
+  // Map status: API accepts 'CANDIDATE' | 'PREFERRED' | 'DEPRECATED', Prisma uses GlossaryStatus enum (CANDIDATE, PREFERRED, DEPRECATED)
   // If status is provided, use it; otherwise for updates, don't include it (preserve existing), for creates default to CANDIDATE
   let statusToSave: 'CANDIDATE' | 'PREFERRED' | 'DEPRECATED' | undefined = undefined;
   if (status !== undefined) {
-    statusToSave = status === 'PREFERRED' 
-      ? 'PREFERRED' 
-      : status === 'DEPRECATED' 
-      ? 'DEPRECATED' 
-      : 'CANDIDATE';
+    if (status === 'PREFERRED') {
+      statusToSave = 'PREFERRED';
+    } else if (status === 'DEPRECATED') {
+      statusToSave = 'DEPRECATED';
+    } else if (status === 'CANDIDATE') {
+      statusToSave = 'CANDIDATE';
+    } else {
+      // Default to CANDIDATE for any other value
+      statusToSave = 'CANDIDATE';
+    }
   } else if (!id) {
     // For new entries, default to CANDIDATE if status not provided
     statusToSave = 'CANDIDATE';
@@ -175,15 +188,39 @@ export const upsertGlossaryEntry = async (data: {
   // Only include these fields if they're provided
   if (sourceTerm !== undefined) {
     prismaData.sourceTerm = sourceTerm.trim();
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'glossary.service.ts:177',message:'Saving sourceTerm to DB',data:{original:sourceTerm,trimmed:sourceTerm.trim(),originalLength:sourceTerm.length,trimmedLength:sourceTerm.trim().length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+    // #endregion
   }
   if (targetTerm !== undefined) {
-    prismaData.targetTerm = targetTerm.trim();
+    const trimmedTargetTerm = targetTerm.trim();
+    prismaData.targetTerm = trimmedTargetTerm;
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'glossary.service.ts:180',message:'Saving targetTerm to DB',data:{original:targetTerm,trimmed:trimmedTargetTerm,originalLength:targetTerm.length,trimmedLength:trimmedTargetTerm.length,isTruncated:trimmedTargetTerm.length<targetTerm.length*0.9},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+    // #endregion
   }
-  if (sourceLocale !== undefined && targetLocale !== undefined) {
+  // Add sourceLocale and targetLocale (required for new entries)
+  // For new entries, these must be provided (validated above)
+  if (!id) {
+    // For new entries, sourceLocale and targetLocale are required
+    if (sourceLocale === undefined || targetLocale === undefined) {
+      throw ApiError.badRequest('sourceLocale and targetLocale are required for new entries');
+    }
+    prismaData.sourceLocale = sourceLocale;
+    prismaData.targetLocale = targetLocale;
     prismaData.direction = `${sourceLocale}-${targetLocale}`;
-  } else if (!id) {
-    // For new entries, direction is required
-    prismaData.direction = `${sourceLocale}-${targetLocale}`;
+  } else {
+    // For updates, only include if provided
+    if (sourceLocale !== undefined) {
+      prismaData.sourceLocale = sourceLocale;
+    }
+    if (targetLocale !== undefined) {
+      prismaData.targetLocale = targetLocale;
+    }
+    // Update direction if both locales are provided
+    if (sourceLocale !== undefined && targetLocale !== undefined) {
+      prismaData.direction = `${sourceLocale}-${targetLocale}`;
+    }
   }
   
   if (projectId !== undefined) {

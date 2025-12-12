@@ -13,6 +13,7 @@ import { searchGlossaryByVector } from './vector-search.service';
 import { env } from '../utils/env';
 import type { GlossaryMode } from '../types/glossary';
 import type { ContextRules } from './glossary.service';
+import { getDocumentGlossaryForSegment, getDocumentStyleRules } from './analysis.service';
 
 const orchestrator = new AIOrchestrator();
 const qaEngine = new QAEngine();
@@ -792,6 +793,48 @@ export const generateSegmentSuggestions = async (documentId: string): Promise<Se
       },
     });
 
+    // Stage 2: Fetch document-specific context from Analyst Stage
+    // Get style rules for the document (same for all segments)
+    const documentStyleRules = await getDocumentStyleRules(document.id);
+    
+    // Get document glossary terms that match any segment in the batch
+    // We'll collect all matching terms from all segments, then deduplicate and limit
+    const documentGlossaryMap = new Map<string, { sourceTerm: string; targetTerm: string; status: string; occurrenceCount: number }>();
+    
+    // For each segment, find matching glossary terms
+    for (const segment of segmentsNeedingAI) {
+      const matchingTerms = await getDocumentGlossaryForSegment(document.id, segment.sourceText);
+      // Add to map (deduplicate by sourceTerm, keeping highest priority)
+      for (const term of matchingTerms) {
+        const existing = documentGlossaryMap.get(term.sourceTerm);
+        if (!existing || term.status === 'PREFERRED' || (term.status === 'CANDIDATE' && existing.status !== 'PREFERRED')) {
+          documentGlossaryMap.set(term.sourceTerm, term);
+        }
+      }
+    }
+    
+    // Convert to array and limit to top 20 (prioritize PREFERRED, then by occurrenceCount)
+    const documentGlossary = Array.from(documentGlossaryMap.values())
+      .sort((a, b) => {
+        const statusPriority = { PREFERRED: 3, CANDIDATE: 2, DEPRECATED: 1 };
+        const aPriority = statusPriority[a.status as keyof typeof statusPriority] || 0;
+        const bPriority = statusPriority[b.status as keyof typeof statusPriority] || 0;
+        if (aPriority !== bPriority) return bPriority - aPriority;
+        return b.occurrenceCount - a.occurrenceCount;
+      })
+      .slice(0, 20)
+      .filter(term => term.status !== 'DEPRECATED'); // Exclude deprecated
+
+    logger.debug(
+      {
+        documentId: document.id,
+        segmentsCount: segmentsNeedingAI.length,
+        documentGlossaryCount: documentGlossary.length,
+        documentStyleRulesCount: documentStyleRules.length,
+      },
+      'Stage 2: Document context fetched for translation',
+    );
+
     const aiResults = await orchestrator.translateSegments({
       provider: context.settings?.provider,
       model: context.settings?.model,
@@ -810,6 +853,10 @@ export const generateSegmentSuggestions = async (documentId: string): Promise<Se
       targetLocale: document.targetLocale, // Pass explicit target locale from document
       temperature: context.settings?.temperature ?? 0.2,
       maxTokens: context.settings?.maxTokens ?? 1024,
+      // Stage 2: Document-specific context
+      documentGlossary: documentGlossary.length > 0 ? documentGlossary : undefined,
+      documentStyleRules: documentStyleRules.length > 0 ? documentStyleRules : undefined,
+      documentId: document.id,
     });
 
     aiResults.forEach((result) => {
@@ -1125,7 +1172,7 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
 
 export const runSegmentMachineTranslationWithCritic = async (
   segmentId: string,
-  options?: MachineTranslationOptions,
+  options?: MachineTranslationOptions & { ignoreContext?: boolean },
   onProgress?: (stage: 'draft' | 'critic' | 'editor' | 'complete', message?: string) => void,
 ) => {
   const segment = await getSegmentWithDocument(segmentId);
@@ -1232,6 +1279,30 @@ export const runSegmentMachineTranslationWithCritic = async (
     documentContext,
   );
 
+  // Stage 2: Fetch document-specific context from Analyst Stage (unless ignoreContext is true)
+  let documentStyleRules: Array<{ ruleType: string; pattern: string; description: string | null; examples: any }> = [];
+  let documentGlossary: Array<{ sourceTerm: string; targetTerm: string; status: string; occurrenceCount: number }> = [];
+  
+  if (!options?.ignoreContext) {
+    documentStyleRules = await getDocumentStyleRules(segment.document.id);
+    documentGlossary = await getDocumentGlossaryForSegment(segment.document.id, segment.sourceText);
+    
+    logger.debug(
+      {
+        segmentId: segment.id,
+        documentId: segment.document.id,
+        documentGlossaryCount: documentGlossary.length,
+        documentStyleRulesCount: documentStyleRules.length,
+      },
+      'Stage 2: Document context fetched for single segment translation',
+    );
+  } else {
+    logger.info(
+      { segmentId: segment.id },
+      'Blind translation mode: Skipping document context (ignoreContext=true)',
+    );
+  }
+
   logger.info({
     provider: context.settings?.provider,
     model: context.settings?.model,
@@ -1254,6 +1325,10 @@ export const runSegmentMachineTranslationWithCritic = async (
       temperature: context.settings?.temperature ?? 0.2,
       maxTokens: context.settings?.maxTokens ?? 1024,
       glossaryMode,
+      // Stage 2: Document-specific context (only if not ignoring context)
+      documentGlossary: !options?.ignoreContext && documentGlossary.length > 0 ? documentGlossary : undefined,
+      documentStyleRules: !options?.ignoreContext && documentStyleRules.length > 0 ? documentStyleRules : undefined,
+      documentId: segment.document.id,
     },
     onProgress,
   );
@@ -1441,6 +1516,31 @@ export const runDocumentMachineTranslation = async (
       },
     });
 
+    // Stage 2: Fetch document-specific context from Analyst Stage
+    const documentStyleRules = await getDocumentStyleRules(document.id);
+    const documentGlossaryMap = new Map<string, { sourceTerm: string; targetTerm: string; status: string; occurrenceCount: number }>();
+    
+    for (const segment of orchestratorSegments) {
+      const matchingTerms = await getDocumentGlossaryForSegment(document.id, segment.sourceText);
+      for (const term of matchingTerms) {
+        const existing = documentGlossaryMap.get(term.sourceTerm);
+        if (!existing || term.status === 'PREFERRED' || (term.status === 'CANDIDATE' && existing.status !== 'PREFERRED')) {
+          documentGlossaryMap.set(term.sourceTerm, term);
+        }
+      }
+    }
+    
+    const documentGlossary = Array.from(documentGlossaryMap.values())
+      .sort((a, b) => {
+        const statusPriority = { PREFERRED: 3, CANDIDATE: 2, DEPRECATED: 1 };
+        const aPriority = statusPriority[a.status as keyof typeof statusPriority] || 0;
+        const bPriority = statusPriority[b.status as keyof typeof statusPriority] || 0;
+        if (aPriority !== bPriority) return bPriority - aPriority;
+        return b.occurrenceCount - a.occurrenceCount;
+      })
+      .slice(0, 20)
+      .filter(term => term.status !== 'DEPRECATED');
+
     const aiResults = await orchestrator.translateSegments({
       provider: context.settings?.provider,
       model: context.settings?.model,
@@ -1461,6 +1561,10 @@ export const runDocumentMachineTranslation = async (
       temperature: context.settings?.temperature ?? 0.2,
       maxTokens: context.settings?.maxTokens ?? 1024,
       glossaryMode, // Pass glossary mode to orchestrator
+      // Stage 2: Document-specific context
+      documentGlossary: documentGlossary.length > 0 ? documentGlossary : undefined,
+      documentStyleRules: documentStyleRules.length > 0 ? documentStyleRules : undefined,
+      documentId: document.id,
     });
 
     const resultMap = new Map(aiResults.map((result) => [result.segmentId, result]));
@@ -1896,6 +2000,31 @@ export const pretranslateDocument = async (
             },
           });
 
+          // Stage 2: Fetch document-specific context from Analyst Stage
+          const documentStyleRules = await getDocumentStyleRules(document.id);
+          const documentGlossaryMap = new Map<string, { sourceTerm: string; targetTerm: string; status: string; occurrenceCount: number }>();
+          
+          for (const segment of orchestratorSegments) {
+            const matchingTerms = await getDocumentGlossaryForSegment(document.id, segment.sourceText);
+            for (const term of matchingTerms) {
+              const existing = documentGlossaryMap.get(term.sourceTerm);
+              if (!existing || term.status === 'PREFERRED' || (term.status === 'CANDIDATE' && existing.status !== 'PREFERRED')) {
+                documentGlossaryMap.set(term.sourceTerm, term);
+              }
+            }
+          }
+          
+          const documentGlossary = Array.from(documentGlossaryMap.values())
+            .sort((a, b) => {
+              const statusPriority = { PREFERRED: 3, CANDIDATE: 2, DEPRECATED: 1 };
+              const aPriority = statusPriority[a.status as keyof typeof statusPriority] || 0;
+              const bPriority = statusPriority[b.status as keyof typeof statusPriority] || 0;
+              if (aPriority !== bPriority) return bPriority - aPriority;
+              return b.occurrenceCount - a.occurrenceCount;
+            })
+            .slice(0, 20)
+            .filter(term => term.status !== 'DEPRECATED');
+
           // eslint-disable-next-line no-await-in-loop
           const aiResults = await orchestrator.translateSegments({
             provider: context.settings.provider,
@@ -1916,6 +2045,10 @@ export const pretranslateDocument = async (
             temperature: context.settings.temperature ?? 0.2,
             maxTokens: context.settings.maxTokens ?? 1024,
             glossaryMode,
+            // Stage 2: Document-specific context
+            documentGlossary: documentGlossary.length > 0 ? documentGlossary : undefined,
+            documentStyleRules: documentStyleRules.length > 0 ? documentStyleRules : undefined,
+            documentId: document.id,
           });
 
           const resultMap = new Map(aiResults.map((result) => [result.segmentId, result]));

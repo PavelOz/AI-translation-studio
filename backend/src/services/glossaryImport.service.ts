@@ -26,6 +26,12 @@ export async function importGlossaryFromExcel(options: ImportGlossaryOptions) {
     const kk = String(row["Перевод на казахский"] || "").trim();
     const en = String(row["ENG"] || "").trim();
 
+    // #region agent log
+    if (en && en.length > 0) {
+      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'glossaryImport.service.ts:27',message:'Reading EN term from Excel',data:{ru,en,enLength:en.length,rawEn:row["ENG"],rawEnType:typeof row["ENG"]},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
+    }
+    // #endregion
+
     if (!ru) continue;
 
     // ru → en

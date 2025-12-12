@@ -71,25 +71,9 @@ export default function AgentStepTranslation({
       },
     },
   );
-  
-  // Debug: Log when locales or glossary changes
-  useEffect(() => {
-    console.log('AgentStepTranslation props:', {
-      sourceText: sourceText?.substring(0, 50),
-      sourceLocale,
-      targetLocale,
-      projectId,
-      hasGlossaryEntries: !!glossaryEntries,
-      glossaryCount: glossaryEntries?.length || 0,
-      isLoadingGlossary,
-      glossaryError,
-      currentProvider,
-      aiSettingsProvider: aiSettings?.provider,
-      aiSettingsModel: aiSettings?.model,
-    });
-  }, [sourceText, sourceLocale, targetLocale, projectId, glossaryEntries, isLoadingGlossary, glossaryError, currentProvider, aiSettings]);
 
   // Compute current provider from localStorage or project settings (reactive)
+  // MUST be defined before useEffect that uses it
   const currentProvider = useMemo((): AIProvider => {
     // First, try to get from localStorage (user's current selection in AITranslationPanel)
     if (typeof window !== 'undefined') {
@@ -108,6 +92,23 @@ export default function AgentStepTranslation({
     }
     return 'gemini'; // Default
   }, [aiSettings]);
+  
+  // Debug: Log when locales or glossary changes
+  useEffect(() => {
+    console.log('AgentStepTranslation props:', {
+      sourceText: sourceText?.substring(0, 50),
+      sourceLocale,
+      targetLocale,
+      projectId,
+      hasGlossaryEntries: !!glossaryEntries,
+      glossaryCount: glossaryEntries?.length || 0,
+      isLoadingGlossary,
+      glossaryError,
+      currentProvider,
+      aiSettingsProvider: aiSettings?.provider,
+      aiSettingsModel: aiSettings?.model,
+    });
+  }, [sourceText, sourceLocale, targetLocale, projectId, glossaryEntries, isLoadingGlossary, glossaryError, currentProvider, aiSettings]);
 
   // Load selected provider state (for UI updates)
   const [selectedProvider, setSelectedProvider] = useState<AIProvider>(currentProvider);

@@ -18,3 +18,4 @@ CREATE INDEX IF NOT EXISTS "Document_documentEmbedding_idx" ON "Document" USING 
 
 
 
+

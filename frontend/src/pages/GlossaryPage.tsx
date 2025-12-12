@@ -269,6 +269,8 @@ export default function GlossaryPage() {
                       ? 'border-red-300 bg-red-50'
                       : entry.status === 'DEPRECATED'
                       ? 'border-yellow-300 bg-yellow-50'
+                      : entry.status === 'CANDIDATE'
+                      ? 'border-gray-300 bg-gray-50'
                       : 'border-gray-200'
                   }`}
                 >
@@ -282,6 +284,11 @@ export default function GlossaryPage() {
                           {entry.forbidden && (
                             <span className="px-2 py-0.5 bg-red-100 text-red-800 rounded text-xs font-medium">
                               FORBIDDEN
+                            </span>
+                          )}
+                          {entry.status === 'CANDIDATE' && (
+                            <span className="px-2 py-0.5 bg-gray-100 text-gray-800 rounded text-xs font-medium">
+                              CANDIDATE
                             </span>
                           )}
                           {entry.status === 'DEPRECATED' && (

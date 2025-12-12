@@ -59,6 +59,10 @@ export type TranslateSegmentsOptions = {
   sourceLocale?: string;
   targetLocale?: string;
   glossaryMode?: 'off' | 'strict_source' | 'strict_semantic';
+  // Stage 2: Document-specific context from Analyst Stage
+  documentGlossary?: Array<{ sourceTerm: string; targetTerm: string; status: string; occurrenceCount: number }>;
+  documentStyleRules?: Array<{ ruleType: string; pattern: string; description: string | null; examples: any }>;
+  documentId?: string; // Optional: for per-segment glossary lookup
 };
 
 // Valid provider names for translation results

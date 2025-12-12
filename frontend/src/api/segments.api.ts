@@ -98,6 +98,25 @@ export const segmentsApi = {
     return response.data;
   },
 
+  translateBlind: async (
+    segmentId: string,
+    options?: {
+      applyTm?: boolean;
+      minScore?: number;
+      glossaryMode?: GlossaryMode;
+      tmRagSettings?: {
+        minScore?: number;
+        vectorSimilarity?: number;
+        mode?: 'basic' | 'extended';
+        useVectorSearch?: boolean;
+        limit?: number;
+      };
+    }
+  ): Promise<Segment> => {
+    const response = await apiClient.post<Segment>(`/segments/${segmentId}/translate-blind`, options || {});
+    return response.data;
+  },
+
   getDebugInfo: async (segmentId: string): Promise<{
     segment: {
       id: string;

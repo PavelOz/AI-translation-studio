@@ -1,6 +1,6 @@
 import apiClient from './client';
 
-export type GlossaryStatus = 'PREFERRED' | 'DEPRECATED';
+export type GlossaryStatus = 'CANDIDATE' | 'PREFERRED' | 'DEPRECATED';
 
 export type ContextRules = {
   useOnlyIn?: string[]; // Only use in these contexts/domains

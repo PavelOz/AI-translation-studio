@@ -247,3 +247,71 @@ segmentRoutes.get(
   }),
 );
 
+// Control endpoint for blind translation (without document context)
+segmentRoutes.post(
+  '/:segmentId/translate-blind',
+  asyncHandler(async (req, res) => {
+    const payload = mtSchema.parse(req.body ?? {});
+    
+    // Check if client wants SSE (Server-Sent Events) for progress
+    const acceptSSE = req.headers.accept?.includes('text/event-stream');
+    
+    if (acceptSSE) {
+      // Set up SSE headers
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
+      
+      // Progress callback
+      const sendProgress = (stage: 'draft' | 'critic' | 'editor' | 'complete', message?: string) => {
+        res.write(`data: ${JSON.stringify({ stage, message, timestamp: new Date().toISOString() })}\n\n`);
+      };
+      
+      try {
+        const result = await runSegmentMachineTranslationWithCritic(
+          req.params.segmentId,
+          {
+            applyTm: payload.applyTm,
+            minScore: payload.minScore,
+            glossaryMode: payload.glossaryMode ?? 'strict_source',
+            tmRagSettings: payload.tmRagSettings,
+            ignoreContext: true, // Skip document context
+          },
+          sendProgress,
+        );
+        
+        // Send final result
+        res.write(`data: ${JSON.stringify({ 
+          stage: 'complete', 
+          result: {
+            id: result.id,
+            targetMt: result.targetMt,
+            targetFinal: result.targetFinal,
+            status: result.status,
+            fuzzyScore: result.fuzzyScore,
+          },
+          timestamp: new Date().toISOString() 
+        })}\n\n`);
+        res.end();
+      } catch (error) {
+        res.write(`data: ${JSON.stringify({ stage: 'error', error: (error as Error).message, timestamp: new Date().toISOString() })}\n\n`);
+        res.end();
+      }
+    } else {
+      // Regular HTTP response
+      const result = await runSegmentMachineTranslationWithCritic(
+        req.params.segmentId,
+        {
+          applyTm: payload.applyTm,
+          minScore: payload.minScore,
+          glossaryMode: payload.glossaryMode ?? 'strict_source',
+          tmRagSettings: payload.tmRagSettings,
+          ignoreContext: true, // Skip document context
+        },
+      );
+      res.json(result);
+    }
+  }),
+);
+

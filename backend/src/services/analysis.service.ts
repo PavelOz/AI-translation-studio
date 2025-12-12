@@ -72,26 +72,43 @@ const extractFrequentTerms = (text: string): string[] => {
 
   // Helper function to check if a phrase is relevant
   const isRelevant = (phrase: string) => {
-    if (phrase.length < 3) return false;
+    // 1. Length check & Acronym Rescue
+    if (phrase.length < 3) {
+      // RESCUE: Allow if it's a 2-character, all-uppercase acronym
+      // This checks for Latin and Cyrillic uppercase letters.
+      if (phrase.length === 2 && phrase === phrase.toUpperCase() && /[A-ZА-Я]/.test(phrase)) {
+        
+        // Anti-Noise Check: Block common 2-letter words like "ON" or "AS" that might be capitalized.
+        // NOTE: The stopWords set already handles much of this, but this adds a final safeguard.
+        const minimalAcronymStoplist = new Set(['no', 'in', 'of', 'as', 'at', 'on', 'if', 'or', 'by', 'up']);
+        if (!minimalAcronymStoplist.has(phrase.toLowerCase())) {
+          return true; // Acronym Rescued (e.g., HV, MV, ID)
+        }
+      }
+      return false; // Otherwise, block all phrases shorter than 3
+    }
+
+    // 2. Stop words check (Original Logic)
     if (stopWords.has(phrase.toLowerCase())) return false;
     
-    // Reject phrases starting with numbers or containing just punctuation
-    if (/^\d/.test(phrase)) return false; // Starts with digit
-    if (!/[a-zA-Zа-яА-Я]/.test(phrase)) return false; // No letters
+    // 3a. Reject phrases starting with numbers
+    if (/^\d/.test(phrase)) return false;
     
-    // Reject table artifacts: "Word Number Number" pattern (e.g., "user 4 1", "document 15")
-    // Pattern: starts with letters, followed by space(s) and one or more numbers
+    // 3b. Reject phrases with no letters
+    if (!/[a-zA-Zа-яА-Я]/.test(phrase)) return false;
+    
+    // 3c. Reject "Word Number Number" pattern (Table Artifact)
     if (/^[a-zA-Zа-яА-Я]+\s+\d+(\s+\d+)*$/.test(phrase)) return false;
     
-    // Reject if contains more digits than letters (likely a table artifact or ID)
+    // 3d. Reject if more digits than letters
     const letterCount = (phrase.match(/[a-zA-Zа-яА-Я]/g) || []).length;
     const digitCount = (phrase.match(/\d/g) || []).length;
     if (digitCount > letterCount && digitCount > 0) return false;
     
-    // Reject common table artifact patterns
+    // 3e. Reject common table artifact prefixes (e.g., user 4)
     const lowerPhrase = phrase.toLowerCase();
     if (/^(user|document|table|row|column|item|entry)\s+\d+/.test(lowerPhrase)) return false;
-    
+
     return true;
   };
 
@@ -343,18 +360,47 @@ const translateTermWithAI = async (
 
 Term: ${sourceTerm}`;
 
+  // Use a model without thoughts for simple translation tasks
+  // gemini-2.5-pro uses too many tokens for thoughts (499 out of 500), leaving no room for output
+  // Try gemini-2.0-flash or gemini-pro-latest which may not use thoughts, or significantly increase maxTokens
+  let translationModel = model;
+  if (model.includes('2.5-pro') || model.includes('2.5-flash')) {
+    // Try gemini-2.0-flash first (may not use thoughts), fallback to gemini-2.5-pro with very high maxTokens
+    translationModel = 'gemini-2.0-flash';
+  }
+
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:364',message:'Calling AI for term translation',data:{sourceTerm,sourceTermLength:sourceTerm.length,originalModel:model,translationModel,maxTokens:200},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+  // #endregion
+
   try {
     const response = await provider.callModel({
       prompt: translationPrompt,
       systemPrompt: 'You are a professional translator. Translate technical terms accurately and concisely.',
-      model,
+      model: translationModel,
       temperature: 0.1,
-      maxTokens: 100,
+      // Use very high maxTokens for models with thoughts (2.5-pro), normal for others
+      maxTokens: translationModel.includes('2.5-pro') ? 2000 : (translationModel.includes('2.5-flash') ? 1000 : 200),
       segments: [],
     });
 
-    return response.outputText.trim();
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:376',message:'AI translation response received',data:{sourceTerm,rawResponse:response.outputText,rawResponseLength:response.outputText.length,trimmedResponse:response.outputText.trim(),trimmedLength:response.outputText.trim().length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+    // #endregion
+
+    const translated = response.outputText.trim();
+    
+    // #region agent log
+    const isNotTranslated = translated === sourceTerm || translated.trim() === sourceTerm.trim();
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:381',message:'AI translation result',data:{sourceTerm,translated,isNotTranslated,rawResponse:response.outputText},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
+    // #endregion
+    
+    return translated;
   } catch (error: any) {
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:390',message:'AI translation failed, using fallback',data:{sourceTerm,error:error.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
+    // #endregion
+    
     logger.warn(
       {
         sourceTerm,
@@ -624,7 +670,23 @@ export const extractGlossary = async (documentId: string): Promise<{ count: numb
   }
   
   const provider = getProvider(aiSettings?.provider, apiKey, yandexFolderId);
-  const model = aiSettings?.model ?? provider.defaultModel;
+  let model = aiSettings?.model ?? provider.defaultModel;
+  
+  // For glossary extraction, prefer gemini-2.5-pro over gemini-2.5-flash
+  // Flash models use too many tokens for "thoughts" which causes truncation
+  if (provider.name === 'gemini' && (model === 'gemini-pro' || model.includes('flash'))) {
+    const originalModel = model;
+    model = 'gemini-2.5-pro'; // Use pro model which uses fewer thoughts tokens
+    logger.info(
+      {
+        documentId,
+        originalModel,
+        switchedTo: model,
+        reason: 'Flash models use too many thoughts tokens causing truncation',
+      },
+      'Switching to gemini-2.5-pro for glossary extraction',
+    );
+  }
 
   // Step 4: Call AI for filtering and hunting
   const systemPrompt = `You are a strict Senior Terminologist and Linguist.
@@ -787,12 +849,18 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
 
       // Add timeout wrapper for AI call (90 seconds max for large documents)
       const aiCallStartTime = Date.now();
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:815',message:'Before AI call for glossary',data:{model,promptLength:userPrompt.length,systemPromptLength:systemPrompt.length,requestedMaxTokens:8192},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
+      // #endregion
+      
+      // Use higher maxTokens for glossary extraction to avoid truncation
+      // gemini-2.5-flash uses thoughts which can consume most tokens, so we need more headroom
       const aiCallPromise = provider.callModel({
         prompt: userPrompt,
         systemPrompt,
         model,
         temperature: 0,
-        maxTokens: 4096,
+        maxTokens: 8192, // Increased from 4096 to handle large term lists and thoughts
         segments: [],
       });
 
@@ -869,16 +937,20 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
       responseText = aiResponse.outputText.trim();
 
       // Log after AI call: raw response
-      logger.info(
-        {
-          documentId,
-          attempt,
-          responseLength: responseText.length,
-          responsePreview: responseText.substring(0, 200),
-        },
-        `AI Raw Output received (attempt ${attempt})`,
-      );
-      console.log(`AI Raw Output (attempt ${attempt}):`, responseText);
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:910',message:'After AI call for glossary',data:{responseLength:responseText.length,usage:aiResponse.usage,thoughtsTokenCount:aiResponse.usage?.thoughtsTokenCount,actualOutputTokens:aiResponse.usage?.candidatesTokenCount,requestedMaxTokens:8192},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
+        // #endregion
+        
+        logger.info(
+          {
+            documentId,
+            attempt,
+            responseLength: responseText.length,
+            responsePreview: responseText.substring(0, 200),
+          },
+          `AI Raw Output received (attempt ${attempt})`,
+        );
+        console.log(`AI Raw Output (attempt ${attempt}):`, responseText);
       
       // Validate response is not empty
       if (!responseText || responseText.length < 10) {
@@ -963,7 +1035,11 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
     await updateProgress(documentId, 'parsing_glossary', 45, 'Parsing JSON array...', true);
     const parsed = parseJsonArray(cleanedResponse, documentId);
     parsedArrayLength = parsed.length;
-    
+
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1018',message:'Parsed JSON array from AI',data:{parsedArrayLength,responseLength:responseText.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
+    // #endregion
+
     await updateProgress(documentId, 'parsing_glossary', 46, `Parsed ${parsedArrayLength} items, validating...`, true);
 
     // Enhanced validation with detailed logging
@@ -1004,9 +1080,21 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
         
         validCount++;
         // Note: targetTerm from AI response is optional - waterfall lookup will handle translation
-        return { term, frequency, suggestedTargetTerm: item.targetTerm ? String(item.targetTerm).trim() : undefined };
+        const suggestedTargetTerm = item.targetTerm ? String(item.targetTerm).trim() : undefined;
+        
+        // #region agent log
+        if (suggestedTargetTerm) {
+          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1024',message:'Parsed targetTerm from AI response',data:{term,suggestedTargetTerm,suggestedTargetTermLength:suggestedTargetTerm.length,rawTargetTerm:item.targetTerm,rawTargetTermLength:String(item.targetTerm).length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+        }
+        // #endregion
+        
+        return { term, frequency, suggestedTargetTerm };
       })
       .filter((item): item is { term: string; frequency: number; suggestedTargetTerm?: string | undefined } => item !== null);
+
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1028',message:'After validation',data:{parsedArrayLength,validCount:aiTerms.length,invalidCount},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
+    // #endregion
 
     // Log validation results
     logger.info(
@@ -1141,7 +1229,10 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
   let processedCount = 0;
   const totalTerms = aiTerms.length;
   
-  for (const { term: sourceTerm, frequency } of aiTerms) {
+  for (const { term: sourceTerm, frequency, suggestedTargetTerm } of aiTerms) {
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1211',message:'Processing term from AI',data:{sourceTerm,frequency,hasSuggestedTargetTerm:!!suggestedTargetTerm,suggestedTargetTerm},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
+    // #endregion
     // Check for cancellation during processing
     if (isAnalysisCancelled(documentId)) {
       throw new Error('Analysis cancelled by user');
@@ -1173,15 +1264,81 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
       });
 
       if (globalEntry) {
+        // #region agent log
+        const isNotTranslated = globalEntry.targetTerm.trim() === sourceTerm.trim();
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1193',message:'Found in Global Glossary',data:{sourceTerm,targetTerm:globalEntry.targetTerm,targetTermLength:globalEntry.targetTerm.length,isNotTranslated},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
+        
+        // If term is not translated (targetTerm === sourceTerm), translate it with AI
+        // But first check if the term is already in the target language (e.g., English terms when target is English)
+        let targetTerm = globalEntry.targetTerm;
+        if (isNotTranslated && document.sourceLocale !== document.targetLocale) {
+          // Check if term is already in target language
+          const hasCyrillic = /[А-Яа-яЁё]/.test(sourceTerm);
+          const hasLatin = /[A-Za-z]/.test(sourceTerm);
+          const targetIsEnglish = document.targetLocale.toLowerCase().startsWith('en');
+          const targetIsRussian = document.targetLocale.toLowerCase().startsWith('ru');
+          
+          // If target is English and term has no Cyrillic (only Latin), it's already in target language
+          // If target is Russian and term has Cyrillic, it's already in target language
+          const isAlreadyInTargetLanguage = 
+            (targetIsEnglish && !hasCyrillic && hasLatin) ||
+            (targetIsRussian && hasCyrillic);
+          
+          if (isAlreadyInTargetLanguage) {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1252',message:'Term already in target language, skipping translation',data:{sourceTerm,targetTerm:globalEntry.targetTerm,sourceLocale:document.sourceLocale,targetLocale:document.targetLocale,hasCyrillic,hasLatin},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
+            // #endregion
+            logger.debug({ documentId, sourceTerm, targetTerm }, 'Term already in target language, skipping translation');
+          } else {
+            logger.debug({ documentId, sourceTerm }, 'Term found in Global Glossary but not translated, translating with AI');
+            
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1260',message:'Translating untranslated term from Global Glossary',data:{sourceTerm,originalTargetTerm:globalEntry.targetTerm},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
+            // #endregion
+            
+            try {
+              targetTerm = await translateTermWithAI(
+                sourceTerm,
+                document.sourceLocale,
+                document.targetLocale,
+                provider,
+                model,
+              );
+              
+              // Update the glossary entry with the translation
+              if (targetTerm.trim() !== sourceTerm.trim()) {
+                await prisma.glossaryEntry.update({
+                  where: { id: globalEntry.id },
+                  data: { targetTerm },
+                });
+                logger.info(
+                  { documentId, sourceTerm, oldTargetTerm: globalEntry.targetTerm, newTargetTerm: targetTerm },
+                  'Updated untranslated term in Global Glossary',
+                );
+              }
+            } catch (error: any) {
+              logger.warn(
+                { documentId, sourceTerm, error: error.message },
+                'Failed to translate untranslated term from Global Glossary, using original',
+              );
+              // Keep original targetTerm if translation fails
+            }
+          }
+        }
+        
+        // If term is in Global Glossary, treat it as APPROVED regardless of DB status
+        // CANDIDATE status in DB is for internal tracking (newly extracted terms),
+        // but once in global glossary, it should be trusted for document translation
         finalTerms.push({
           sourceTerm: globalEntry.sourceTerm,
-          targetTerm: globalEntry.targetTerm,
+          targetTerm,
           frequency,
-          status: globalEntry.status === 'PREFERRED' ? 'APPROVED' : 'CANDIDATE',
+          status: 'APPROVED', // All terms from global glossary are APPROVED
           source: 'GLOBAL',
         });
         logger.debug(
-          { documentId, sourceTerm, targetTerm: globalEntry.targetTerm },
+          { documentId, sourceTerm, targetTerm },
           'Found term in Global Glossary',
         );
         continue;
@@ -1198,32 +1355,150 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
       });
 
       if (projectEntry) {
+        // #region agent log
+        const isNotTranslated = projectEntry.targetTerm.trim() === sourceTerm.trim();
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1272',message:'Found in Project Glossary',data:{sourceTerm,targetTerm:projectEntry.targetTerm,targetTermLength:projectEntry.targetTerm.length,isNotTranslated},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
+        // #endregion
+
+        // If term is not translated (targetTerm === sourceTerm), translate it with AI
+        // But first check if the term is already in the target language
+        let targetTerm = projectEntry.targetTerm;
+        if (isNotTranslated && document.sourceLocale !== document.targetLocale) {
+          // Check if term is already in target language
+          const hasCyrillic = /[А-Яа-яЁё]/.test(sourceTerm);
+          const hasLatin = /[A-Za-z]/.test(sourceTerm);
+          const targetIsEnglish = document.targetLocale.toLowerCase().startsWith('en');
+          const targetIsRussian = document.targetLocale.toLowerCase().startsWith('ru');
+          
+          // If target is English and term has no Cyrillic (only Latin), it's already in target language
+          // If target is Russian and term has Cyrillic, it's already in target language
+          const isAlreadyInTargetLanguage = 
+            (targetIsEnglish && !hasCyrillic && hasLatin) ||
+            (targetIsRussian && hasCyrillic);
+          
+          if (isAlreadyInTargetLanguage) {
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1305',message:'Term already in target language, skipping translation',data:{sourceTerm,targetTerm:projectEntry.targetTerm,sourceLocale:document.sourceLocale,targetLocale:document.targetLocale,hasCyrillic,hasLatin},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
+            // #endregion
+            logger.debug({ documentId, sourceTerm, targetTerm }, 'Term already in target language, skipping translation');
+          } else {
+            logger.debug({ documentId, sourceTerm }, 'Term found in Project Glossary but not translated, translating with AI');
+            
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1313',message:'Translating untranslated term from Project Glossary',data:{sourceTerm,originalTargetTerm:projectEntry.targetTerm},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
+            // #endregion
+            
+            try {
+              targetTerm = await translateTermWithAI(
+                sourceTerm,
+                document.sourceLocale,
+                document.targetLocale,
+                provider,
+                model,
+              );
+              
+              // Update the glossary entry with the translation
+              if (targetTerm.trim() !== sourceTerm.trim()) {
+                await prisma.glossaryEntry.update({
+                  where: { id: projectEntry.id },
+                  data: { targetTerm },
+                });
+                logger.info(
+                  { documentId, sourceTerm, oldTargetTerm: projectEntry.targetTerm, newTargetTerm: targetTerm },
+                  'Updated untranslated term in Project Glossary',
+                );
+              }
+            } catch (error: any) {
+              logger.warn(
+                { documentId, sourceTerm, error: error.message },
+                'Failed to translate untranslated term from Project Glossary, using original',
+              );
+              // Keep original targetTerm if translation fails
+            }
+          }
+        }
+
+        // If term is in Project Glossary, treat it as APPROVED regardless of DB status
+        // CANDIDATE status in DB is for internal tracking,
+        // but once in project glossary, it should be trusted for document translation
         finalTerms.push({
           sourceTerm: projectEntry.sourceTerm,
-          targetTerm: projectEntry.targetTerm,
+          targetTerm,
           frequency,
-          status: projectEntry.status === 'PREFERRED' ? 'APPROVED' : 'CANDIDATE',
+          status: 'APPROVED', // All terms from project glossary are APPROVED
           source: 'PROJECT',
         });
         logger.debug(
-          { documentId, sourceTerm, targetTerm: projectEntry.targetTerm },
+          { documentId, sourceTerm, targetTerm },
           'Found term in Project Glossary',
         );
         continue;
       }
 
-      // 6c. Not found - translate with AI and save as CANDIDATE in Global Glossary
+      // 6c. Not found - use suggestedTargetTerm from AI if available, otherwise translate with AI
       logger.debug({ documentId, sourceTerm }, 'Term not found in glossaries, translating with AI');
-      const targetTerm = await translateTermWithAI(
-        sourceTerm,
-        document.sourceLocale,
-        document.targetLocale,
-        provider,
-        model,
-      );
+      
+      let targetTerm: string;
+      
+      // Check if AI already provided a translation in the extraction response
+      if (suggestedTargetTerm && suggestedTargetTerm.trim() !== sourceTerm.trim() && suggestedTargetTerm.trim().length > 0) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1289',message:'Using suggestedTargetTerm from AI response',data:{sourceTerm,suggestedTargetTerm,isNotTranslated:suggestedTargetTerm.trim()===sourceTerm.trim()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
+        // #endregion
+        targetTerm = suggestedTargetTerm.trim();
+      } else {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1294',message:'Before AI translation (no suggestedTargetTerm)',data:{sourceTerm,sourceTermLength:sourceTerm.length,hasSuggestedTargetTerm:!!suggestedTargetTerm,suggestedTargetTerm},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+        
+        targetTerm = await translateTermWithAI(
+          sourceTerm,
+          document.sourceLocale,
+          document.targetLocale,
+          provider,
+          model,
+        );
+      }
+
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1242',message:'After AI translation',data:{sourceTerm,targetTerm,targetTermLength:targetTerm.length,isTruncated:targetTerm.length<sourceTerm.length*0.5},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
+
+      // Validate translation before saving
+      const isNotTranslated = targetTerm.trim() === sourceTerm.trim();
+      if (isNotTranslated) {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1310',message:'WARNING: targetTerm equals sourceTerm, skipping DB save',data:{sourceTerm,targetTerm,sourceLocale:document.sourceLocale,targetLocale:document.targetLocale},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
+        // #endregion
+        
+        logger.warn(
+          {
+            documentId,
+            sourceTerm,
+            targetTerm,
+            sourceLocale: document.sourceLocale,
+            targetLocale: document.targetLocale,
+          },
+          'Skipping term save: targetTerm equals sourceTerm (translation failed or term already in target language)',
+        );
+        
+        // Still add to finalTerms but mark as not translated
+        finalTerms.push({
+          sourceTerm,
+          targetTerm,
+          frequency,
+          status: 'CANDIDATE',
+          source: 'AI',
+        });
+        continue;
+      }
 
       // Save to Global Glossary as CANDIDATE
       try {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1335',message:'Before DB save',data:{sourceTerm,targetTerm,targetTermLength:targetTerm.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
+        
         await prisma.glossaryEntry.create({
           data: {
             sourceTerm,
@@ -1235,6 +1510,11 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
             status: 'CANDIDATE',
           },
         });
+        
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1260',message:'After DB save',data:{sourceTerm,targetTerm,targetTermLength:targetTerm.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
+        
         logger.info(
           { documentId, sourceTerm, targetTerm },
           'Saved new term to Global Glossary as CANDIDATE',
@@ -1271,6 +1551,12 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
           'Failed to save term to Global Glossary, continuing anyway',
         );
       }
+
+      // Note: isNotTranslated check already done above, term already added to finalTerms if not translated
+      // This code path is only reached if translation was successful and saved to DB
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1375',message:'Adding successfully translated term to finalTerms',data:{sourceTerm,targetTerm,source:'AI'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
+      // #endregion
 
       finalTerms.push({
         sourceTerm,
@@ -1777,6 +2063,10 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
     'Glossary extraction completed with incremental non-destructive approach',
   );
 
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1870',message:'Final glossary extraction summary',data:{totalSegments,aiTermsCount:aiTerms.length,finalTermsCount:finalCount,createdCount,updatedCount},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
+  // #endregion
+
   return { count: finalCount };
 };
 
@@ -2043,6 +2333,10 @@ Analyze this text and extract all formatting and style rules. Return a JSON arra
     // Validate and normalize rules
     extractedRules = parsed
       .map((item: any, index: number) => {
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2062',message:'Processing style rule item',data:{index,itemKeys:Object.keys(item),hasRuleType:!!item.ruleType,hasPattern:!!item.pattern,hasSelector:!!item.selector,hasProperties:!!item.properties},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+        
         if (!item || typeof item !== 'object') {
           logger.debug({ documentId, index, item }, 'Skipping invalid item (not an object)');
           return null;
@@ -2051,6 +2345,112 @@ Analyze this text and extract all formatting and style rules. Return a JSON arra
         // Try to extract ruleType and pattern - handle both expected format and AI variations
         let ruleType = String(item.ruleType || item.element_name || item.type || '').trim();
         let pattern = String(item.pattern || '').trim();
+        
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2074',message:'After initial extraction',data:{ruleType,pattern,hasSelector:!!item.selector,hasProperties:!!item.properties,hasRuleName:!!item.rule_name,hasTextTransform:!!item.text_transform},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+        // #endregion
+        
+        // Handle format with rule_name and individual style fields (font_weight, text_transform, text_align) - NEW FIX
+        if ((!ruleType || !pattern) && (item.rule_name || item.text_transform || item.font_weight || item.text_align)) {
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2080',message:'Detected rule_name/individual style fields format',data:{ruleName:item.rule_name,textTransform:item.text_transform,fontWeight:item.font_weight,textAlign:item.text_align},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+          // #endregion
+          
+          const styleParts: string[] = [];
+          
+          // Map individual style fields to ruleType and pattern
+          if (item.text_transform) {
+            if (!ruleType) ruleType = 'capitalization';
+            styleParts.push(`text-transform: ${item.text_transform}`);
+          }
+          if (item.font_weight) {
+            if (!ruleType && !item.text_transform) ruleType = 'other';
+            styleParts.push(`font-weight: ${item.font_weight}`);
+          }
+          if (item.text_align) {
+            if (!ruleType && !item.text_transform) ruleType = 'spacing';
+            styleParts.push(`text-align: ${item.text_align}`);
+          }
+          if (item.font_size) {
+            if (!ruleType && !item.text_transform) ruleType = 'other';
+            styleParts.push(`font-size: ${item.font_size}`);
+          }
+          
+          // Use rule_name as pattern if pattern is missing
+          if (!pattern && item.rule_name) {
+            pattern = String(item.rule_name).substring(0, 200).trim();
+          }
+          
+          // If we have style parts, append them to pattern
+          if (styleParts.length > 0) {
+            const styleStr = styleParts.join(', ');
+            if (pattern && !pattern.includes(styleStr)) {
+              pattern = `${pattern} (${styleStr})`;
+            } else if (!pattern) {
+              pattern = styleStr;
+            }
+          }
+          
+          // Default ruleType if still missing
+          if (!ruleType) {
+            ruleType = 'other';
+          }
+          
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2120',message:'After rule_name format conversion',data:{ruleType,pattern,patternLength:pattern.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+          // #endregion
+        }
+        
+        // Handle CSS-like format (selector + properties) - NEW FIX
+        if ((!ruleType || !pattern) && item.selector && item.properties && typeof item.properties === 'object') {
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2078',message:'Detected selector/properties format',data:{selector:item.selector,propertiesKeys:Object.keys(item.properties)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+          // #endregion
+          
+          const props = item.properties;
+          const styleParts: string[] = [];
+          
+          // Map CSS properties to ruleType and pattern (handle both kebab-case and snake_case)
+          const textTransform = props['text-transform'] || props['text_transform'];
+          if (textTransform) {
+            if (!ruleType) ruleType = 'capitalization';
+            styleParts.push(`text-transform: ${textTransform}`);
+          }
+          const fontWeight = props['font-weight'] || props['font_weight'];
+          if (fontWeight) {
+            if (!ruleType && !textTransform) ruleType = 'other';
+            styleParts.push(`font-weight: ${fontWeight}`);
+          }
+          const textAlign = props['text-align'] || props['text_align'];
+          if (textAlign) {
+            if (!ruleType && !textTransform) ruleType = 'spacing';
+            styleParts.push(`text-align: ${textAlign}`);
+          }
+          const fontSize = props['font-size'] || props['font_size'];
+          if (fontSize) {
+            if (!ruleType && !textTransform) ruleType = 'other';
+            styleParts.push(`font-size: ${fontSize}`);
+          }
+          
+          // Use selector as pattern if pattern is missing
+          if (!pattern) {
+            pattern = String(item.selector).substring(0, 200).trim();
+          }
+          
+          // If we have style parts, append them to pattern
+          if (styleParts.length > 0 && !pattern.includes(styleParts[0])) {
+            pattern = pattern ? `${pattern} (${styleParts.join(', ')})` : styleParts.join(', ');
+          }
+          
+          // Default ruleType if still missing
+          if (!ruleType) {
+            ruleType = 'other';
+          }
+          
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2110',message:'After CSS format conversion',data:{ruleType,pattern,patternLength:pattern.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+          // #endregion
+        }
         
         // If pattern is missing but we have styles object, try to extract from it
         if (!pattern && item.styles && typeof item.styles === 'object') {
@@ -2070,7 +2470,22 @@ Analyze this text and extract all formatting and style rules. Return a JSON arra
           pattern = String(item.notes).substring(0, 100).trim();
         }
         
-        // If ruleType is missing, try to infer from element_name or use 'other'
+        // If ruleType is missing, try to infer from rule_name, element_name, or use 'other'
+        if (!ruleType && item.rule_name) {
+          const ruleName = String(item.rule_name).toLowerCase();
+          if (ruleName.includes('heading') || ruleName.includes('title')) {
+            ruleType = 'capitalization';
+          } else if (ruleName.includes('date') || ruleName.includes('time')) {
+            ruleType = 'date_format';
+          } else if (ruleName.includes('number') || ruleName.includes('currency')) {
+            ruleType = 'number_format';
+          } else if (ruleName.includes('list')) {
+            ruleType = 'list_style';
+          } else {
+            ruleType = 'other';
+          }
+        }
+        
         if (!ruleType && item.element_name) {
           const elementName = String(item.element_name).toLowerCase();
           if (elementName.includes('date') || elementName.includes('time')) {
@@ -2086,12 +2501,20 @@ Analyze this text and extract all formatting and style rules. Return a JSON arra
           }
         }
         
+        // Final fallback: ensure ruleType is set if we have a pattern
+        if (!ruleType && pattern) {
+          ruleType = 'other';
+        }
+        
         const description = item.description ? String(item.description).trim() : undefined;
         let examples: string[] | undefined = undefined;
         
         // Try to extract examples from various fields
         if (Array.isArray(item.examples)) {
           examples = item.examples.map((ex: any) => String(ex).trim()).filter((ex: string) => ex.length > 0);
+        } else if (item.example) {
+          // Handle singular 'example' field (from AI response format)
+          examples = [String(item.example).trim()].filter((ex: string) => ex.length > 0);
         } else if (item.notes) {
           // Try to extract examples from notes field
           const notesStr = String(item.notes);
@@ -2101,6 +2524,10 @@ Analyze this text and extract all formatting and style rules. Return a JSON arra
           }
         }
         
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2250',message:'Final validation check',data:{ruleType,pattern,hasRuleType:!!ruleType,hasPattern:!!pattern,willBeFiltered:!ruleType||!pattern},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
+        
         if (!ruleType || !pattern) {
           logger.debug(
             { documentId, index, item, ruleType, pattern, itemKeys: Object.keys(item) },
@@ -2108,6 +2535,10 @@ Analyze this text and extract all formatting and style rules. Return a JSON arra
           );
           return null;
         }
+        
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2150',message:'Returning valid rule',data:{ruleType,pattern,description:!!description,examplesCount:examples?.length||0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
         
         return { ruleType, pattern, description, examples };
       })
@@ -2168,7 +2599,7 @@ Analyze this text and extract all formatting and style rules. Return a JSON arra
   if (extractedRules.length === 0) {
     // Check if this is a legitimate case (very small document) or an error
     const document = await prisma.document.findUnique({
-      where: { documentId },
+      where: { id: documentId },
       select: { segments: { select: { id: true } } },
     });
     
@@ -2891,6 +3322,168 @@ export const getAnalysisResults = async (documentId: string) => {
       'Error in getAnalysisResults',
     );
     throw ApiError.badRequest(`Failed to fetch analysis results: ${error.message || 'Unknown error'}`);
+  }
+};
+
+/**
+ * Get document-specific glossary terms that match a segment's source text
+ * Returns top 20 most relevant terms, prioritizing PREFERRED (APPROVED) status
+ * Used for Stage 2: Context-Aware Translation ("The Drafter")
+ */
+export const getDocumentGlossaryForSegment = async (
+  documentId: string,
+  sourceText: string,
+): Promise<Array<{ sourceTerm: string; targetTerm: string; status: string; occurrenceCount: number }>> => {
+  try {
+    // Get document to access locales
+    const document = await prisma.document.findUnique({
+      where: { id: documentId },
+      select: {
+        sourceLocale: true,
+        targetLocale: true,
+      },
+    });
+
+    if (!document) {
+      logger.warn({ documentId }, 'Document not found for glossary lookup');
+      return [];
+    }
+
+    // Fetch all DocumentGlossaryEntry records for this document
+    const documentEntries = await prisma.documentGlossaryEntry.findMany({
+      where: { documentId },
+      orderBy: { occurrenceCount: 'desc' }, // Prioritize by frequency
+      select: {
+        sourceTerm: true,
+        targetTerm: true,
+        occurrenceCount: true,
+      },
+    });
+
+    if (documentEntries.length === 0) {
+      return [];
+    }
+
+    // Filter: Find terms whose sourceTerm appears in the segment source text
+    // Use case-insensitive matching and word boundary awareness
+    const matchingTerms = documentEntries.filter((entry) => {
+      const sourceTerm = entry.sourceTerm.trim();
+      if (!sourceTerm) return false;
+
+      // Simple string match (case-insensitive)
+      // Check if the term appears as a whole word or phrase in the source text
+      const escapedTerm = sourceTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(`\\b${escapedTerm}\\b`, 'i');
+      return regex.test(sourceText);
+    });
+
+    if (matchingTerms.length === 0) {
+      return [];
+    }
+
+    // Lookup status from GlossaryEntry for each matching term
+    const termsWithStatus = await Promise.all(
+      matchingTerms.map(async (entry) => {
+        // Find matching GlossaryEntry to get status
+        const glossaryEntry = await prisma.glossaryEntry.findFirst({
+          where: {
+            sourceTerm: entry.sourceTerm,
+            sourceLocale: document.sourceLocale,
+            targetLocale: document.targetLocale,
+          },
+          select: {
+            status: true,
+          },
+        });
+
+        const status = glossaryEntry?.status || 'CANDIDATE';
+
+        return {
+          sourceTerm: entry.sourceTerm,
+          targetTerm: entry.targetTerm,
+          status,
+          occurrenceCount: entry.occurrenceCount,
+        };
+      }),
+    );
+
+    // Sort: PREFERRED first, then by occurrenceCount descending
+    termsWithStatus.sort((a, b) => {
+      // Priority: PREFERRED > CANDIDATE > DEPRECATED
+      const statusPriority = { PREFERRED: 3, CANDIDATE: 2, DEPRECATED: 1 };
+      const aPriority = statusPriority[a.status as keyof typeof statusPriority] || 0;
+      const bPriority = statusPriority[b.status as keyof typeof statusPriority] || 0;
+
+      if (aPriority !== bPriority) {
+        return bPriority - aPriority; // Higher priority first
+      }
+
+      // If same status, sort by occurrence count
+      return b.occurrenceCount - a.occurrenceCount;
+    });
+
+    // Filter out DEPRECATED terms and limit to top 20
+    const topTerms = termsWithStatus
+      .filter((term) => term.status !== 'DEPRECATED')
+      .slice(0, 20);
+
+    logger.debug(
+      {
+        documentId,
+        sourceTextLength: sourceText.length,
+        totalDocumentEntries: documentEntries.length,
+        matchingTerms: matchingTerms.length,
+        topTermsReturned: topTerms.length,
+      },
+      'Document glossary lookup for segment',
+    );
+
+    return topTerms;
+  } catch (error: any) {
+    logger.error(
+      { documentId, error: error.message, stack: error.stack },
+      'Error in getDocumentGlossaryForSegment',
+    );
+    // Return empty array on error to not break translation flow
+    return [];
+  }
+};
+
+/**
+ * Get all document-specific style rules
+ * Used for Stage 2: Context-Aware Translation ("The Drafter")
+ */
+export const getDocumentStyleRules = async (
+  documentId: string,
+): Promise<Array<{ ruleType: string; pattern: string; description: string | null; examples: any }>> => {
+  try {
+    const styleRules = await prisma.documentStyleRule.findMany({
+      where: { documentId },
+      orderBy: { priority: 'desc' }, // Higher priority first
+      select: {
+        ruleType: true,
+        pattern: true,
+        description: true,
+        examples: true,
+      },
+    });
+
+    logger.debug(
+      {
+        documentId,
+        styleRulesCount: styleRules.length,
+      },
+      'Fetched document style rules',
+    );
+
+    return styleRules;
+  } catch (error: any) {
+    logger.error(
+      { documentId, error: error.message, stack: error.stack },
+      'Error in getDocumentStyleRules',
+    );
+    // Return empty array on error to not break translation flow
+    return [];
   }
 };
 

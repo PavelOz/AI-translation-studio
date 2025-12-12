@@ -10,7 +10,8 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev --name init --create-only",
     "lint": "echo \"Add linting\"",
-    "import:glossary": "ts-node scripts/importGlossary.ts"
+    "import:glossary": "ts-node scripts/importGlossary.ts",
+    "fix:truncated-terms": "ts-node scripts/fix-truncated-glossary-terms.ts"
   },
   "keywords": [],
   "author": "",

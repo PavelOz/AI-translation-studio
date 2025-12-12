@@ -91,6 +91,9 @@ export default function AITranslationPanel({
   const [translationMetadata, setTranslationMetadata] = useState<any[]>([]);
   const [showGlassBox, setShowGlassBox] = useState<boolean>(false);
   const [useCritic, setUseCritic] = useState(false);
+  // Blind translation state (control test)
+  const [blindTranslation, setBlindTranslation] = useState<string>('');
+  const [isBlindTranslating, setIsBlindTranslating] = useState(false);
   const [autoTranslate, setAutoTranslate] = useState<boolean>(() => {
     // Load from localStorage, default to false
     if (typeof window !== 'undefined') {
@@ -253,10 +256,21 @@ export default function AITranslationPanel({
       return;
     }
 
-    // Check TM first
+    // Guard: Prevent multiple concurrent calls
+    if (isTranslating) {
+      return;
+    }
+
+    // Check TM first with debouncing to prevent loops
     let timeoutId: NodeJS.Timeout | null = null;
+    let isCancelled = false;
     
     const checkTMAndAutoTranslate = async () => {
+      // Check if cancelled before making API call
+      if (isCancelled) {
+        return;
+      }
+
       try {
         const tmResults = await tmApi.search({
           sourceText,
@@ -267,6 +281,11 @@ export default function AITranslationPanel({
           minScore: 70, // Same threshold as backend
         });
 
+        // Check again if cancelled after API call
+        if (isCancelled) {
+          return;
+        }
+
         // If no TM match found (or score < 70%), auto-translate with AI
         if (tmResults.length === 0 || tmResults[0].fuzzyScore < 70) {
           hasAutoTranslatedRef.current = true;
@@ -275,10 +294,12 @@ export default function AITranslationPanel({
             // Double-check conditions before translating
             // Use refs to get current values without adding to dependencies
             if (
+              !isCancelled &&
               lastSegmentIdRef.current === segmentId &&
               sourceText.trim() &&
               sourceLocale &&
-              targetLocale
+              targetLocale &&
+              !isTranslating
             ) {
               // Call handleTranslate directly - it will check conditions internally
               handleTranslate();
@@ -294,16 +315,25 @@ export default function AITranslationPanel({
       }
     };
 
-    checkTMAndAutoTranslate();
+    // Debounce: Wait 500ms before checking TM to prevent rapid-fire calls
+    const debounceTimeout = setTimeout(() => {
+      if (!isCancelled) {
+        checkTMAndAutoTranslate();
+      }
+    }, 500);
     
     // Cleanup timeout if component unmounts or segment changes
     return () => {
+      isCancelled = true;
       if (timeoutId) {
         clearTimeout(timeoutId);
       }
+      if (debounceTimeout) {
+        clearTimeout(debounceTimeout);
+      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [segmentId, sourceText, sourceLocale, targetLocale, autoTranslate, currentTargetText]);
+  }, [segmentId, sourceText, sourceLocale, targetLocale, autoTranslate, currentTargetText, isTranslating]);
 
   const handleTranslate = async () => {
     if (!sourceText.trim()) {
@@ -525,6 +555,95 @@ export default function AITranslationPanel({
         toast.error(errorMessage);
         setIsTranslating(false);
       }
+    }
+  };
+
+  const handleBlindTranslate = async () => {
+    if (!sourceText.trim()) {
+      toast.error('Source text is empty');
+      return;
+    }
+
+    if (!segmentId) {
+      toast.error('No active segment selected');
+      return;
+    }
+
+    setIsBlindTranslating(true);
+    setBlindTranslation('');
+    setError(null);
+
+    try {
+      // Get TM settings if available
+      const tmRagSettings = getTmSettingsFromStorage();
+
+      // Use fetch with SSE for progress (same as regular translate)
+      const token = useAuthStore.getState().token;
+      const response = await fetch(`/api/segments/${segmentId}/translate-blind`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({
+          useCritic: true, // Always use critic for blind translation
+          glossaryMode,
+          tmRagSettings: tmRagSettings || undefined,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ message: response.statusText }));
+        throw new Error(errorData.message || `Blind translation failed: ${response.statusText}`);
+      }
+
+      // Read the stream
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      if (!reader) {
+        throw new Error('Response body is not readable');
+      }
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              
+              if (data.result && data.stage === 'complete') {
+                const translationText = data.result.targetMt || data.result.targetFinal || '';
+                setBlindTranslation(translationText);
+                setIsBlindTranslating(false);
+                return;
+              }
+              
+              if (data.error) {
+                setError(data.error);
+                toast.error(data.error);
+                setIsBlindTranslating(false);
+                return;
+              }
+            } catch (parseError) {
+              console.error('Failed to parse SSE data:', parseError);
+            }
+          }
+        }
+      }
+    } catch (error: any) {
+      const errorMessage = error.message || 'Failed to perform blind translation';
+      setError(errorMessage);
+      toast.error(errorMessage);
+      setIsBlindTranslating(false);
     }
   };
 
@@ -996,6 +1115,44 @@ export default function AITranslationPanel({
         )}
       </button>
 
+      {/* Blind Translate Button (Control Test) */}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          handleBlindTranslate();
+        }}
+        onMouseDown={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+        }}
+        disabled={isBlindTranslating || !sourceText.trim()}
+        className="btn btn-secondary w-full mb-4"
+        title="Translate without document context (for comparison testing)"
+      >
+        {isBlindTranslating ? (
+          <>
+            <svg
+              className="animate-spin -ml-1 mr-2 h-4 w-4 text-white inline"
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+            >
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+              <path
+                className="opacity-75"
+                fill="currentColor"
+                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+              ></path>
+            </svg>
+            Blind Translating...
+          </>
+        ) : (
+          'Blind Translate (Control)'
+        )}
+      </button>
+
       {/* Error Display */}
       {error && (
         <div className="mb-4 bg-red-50 border border-red-200 text-red-800 text-sm px-4 py-3 rounded-lg">
@@ -1025,6 +1182,21 @@ export default function AITranslationPanel({
           >
             Apply Translation
           </button>
+        </div>
+      )}
+
+      {/* Blind Translation Result (Control) */}
+      {blindTranslation && (
+        <div className="mb-4">
+          <label className="block text-sm font-medium text-gray-700 mb-1">
+            Blind Translation (Control - No Document Context):
+          </label>
+          <div className="bg-yellow-50 border border-yellow-200 rounded p-3 text-sm text-gray-900 whitespace-pre-wrap">
+            {blindTranslation}
+          </div>
+          <p className="text-xs text-gray-500 mt-2">
+            This translation was generated without document-specific glossary terms and style rules for comparison.
+          </p>
         </div>
       )}
 
