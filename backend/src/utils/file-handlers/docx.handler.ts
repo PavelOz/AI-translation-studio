@@ -1288,17 +1288,85 @@ export class DocxHandler implements FileHandler {
   }
 
   /**
+   * Extract runs with their formatting from a paragraph DOM element
+   * Returns array of { run: Element, textNode: Element | null, text: string, hasFormatting: boolean }
+   * Includes ALL runs, even those without text but with formatting
+   */
+  private extractRunsWithFormattingDOM(paraElement: Element): Array<{
+    run: Element;
+    textNode: Element | null;
+    text: string;
+    hasFormatting: boolean;
+  }> {
+    const runs = paraElement.getElementsByTagNameNS(
+      'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+      'r'
+    );
+    const result: Array<{
+      run: Element;
+      textNode: Element | null;
+      text: string;
+      hasFormatting: boolean;
+    }> = [];
+
+    // CRITICAL: Process ALL runs in order to preserve the complete structure
+    // This ensures we maintain ALL formatting properties (bold, italic, underline, color, size, font, etc.)
+    for (let i = 0; i < runs.length; i++) {
+      const run = runs[i];
+      const textNodes = run.getElementsByTagNameNS(
+        'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+        't'
+      );
+      
+      // Check if run has formatting properties (w:rPr)
+      // w:rPr can contain: w:b (bold), w:i (italic), w:u (underline), w:color, w:sz (size), w:rFonts, etc.
+      const rPr = run.getElementsByTagNameNS(
+        'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+        'rPr'
+      );
+      const hasFormatting = rPr.length > 0;
+      
+      let textNode: Element | null = null;
+      let text = '';
+      
+      if (textNodes.length > 0) {
+        textNode = textNodes[0];
+        if (textNode.firstChild && textNode.firstChild.nodeType === 3) { // TEXT_NODE
+          text = textNode.firstChild.nodeValue || '';
+        }
+      }
+      
+      // CRITICAL: Include ALL runs, even those without text
+      // This preserves the complete structure and ALL formatting properties
+      // We need to preserve runs even if they're empty, as they may have formatting
+      // that will be applied when we add text to them
+      result.push({
+        run,
+        textNode,
+        text: text.trim(),
+        hasFormatting
+      });
+    }
+
+    return result;
+  }
+
+  /**
    * Replace text in a paragraph DOM element
-   * Replaces content of the first <w:t> element and clears others
+   * 
+   * Strategy: Preserves all runs with their formatting (w:rPr) and distributes new text proportionally.
+   * This ensures that mixed formatting (bold, italic, etc.) is maintained in the translated text.
+   * 
+   * Example:
+   *   Original: "This is **bold** text" (3 runs: normal, bold, normal)
+   *   Translation: "Это **жирный** текст"
+   *   Result: Text distributed across 3 runs, preserving bold formatting in the middle run
    */
   private replaceTextInParagraphDOM(paraElement: Element, newText: string): void {
-    const textNodes = paraElement.getElementsByTagNameNS(
-      'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
-      't'
-    );
+    const runsWithFormatting = this.extractRunsWithFormattingDOM(paraElement);
     
-    if (textNodes.length === 0) {
-      // No text node found - create one in the first run
+    if (runsWithFormatting.length === 0) {
+      // No runs found - create one
       const runs = paraElement.getElementsByTagNameNS(
         'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
         'r'
@@ -1311,25 +1379,195 @@ export class DocxHandler implements FileHandler {
         );
         textElement.appendChild(paraElement.ownerDocument!.createTextNode(newText));
         firstRun.appendChild(textElement);
+      } else {
+        // No runs at all - create run and text node
+        const runElement = paraElement.ownerDocument!.createElementNS(
+          'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+          'r'
+        );
+        const textElement = paraElement.ownerDocument!.createElementNS(
+          'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+          't'
+        );
+        textElement.appendChild(paraElement.ownerDocument!.createTextNode(newText));
+        runElement.appendChild(textElement);
+        paraElement.appendChild(runElement);
       }
       return;
     }
 
-    // Replace text in first text node
-    const firstTextNode = textNodes[0];
-    // Remove all existing text children
-    while (firstTextNode.firstChild) {
-      firstTextNode.removeChild(firstTextNode.firstChild);
-    }
-    // Add new text
-    firstTextNode.appendChild(paraElement.ownerDocument!.createTextNode(newText));
-
-    // Clear other text nodes (keep structure but remove text)
-    for (let i = 1; i < textNodes.length; i++) {
-      const textNode = textNodes[i];
-      while (textNode.firstChild) {
-        textNode.removeChild(textNode.firstChild);
+    // Calculate total original text length for proportional distribution
+    // Only count runs that actually have text (not just formatting)
+    const runsWithText = runsWithFormatting.filter(r => r.text.length > 0);
+    const totalOriginalLength = runsWithFormatting.reduce((sum, run) => sum + run.text.length, 0);
+    
+    // CRITICAL: If no original text, distribute evenly across all runs
+    if (totalOriginalLength === 0) {
+      // All runs are empty but have formatting - distribute text across all runs
+      // This preserves the formatting structure
+      const textPerRun = Math.floor(newText.length / runsWithFormatting.length);
+      let remainingText = newText;
+      
+      for (let i = 0; i < runsWithFormatting.length; i++) {
+        const run = runsWithFormatting[i];
+        let textForThisRun: string;
+        
+        if (i === runsWithFormatting.length - 1) {
+          // Last run gets all remaining text
+          textForThisRun = remainingText;
+        } else {
+          textForThisRun = remainingText.substring(0, textPerRun);
+          remainingText = remainingText.substring(textPerRun);
+        }
+        
+        // Handle text node - create if it doesn't exist
+        let textNode = run.textNode;
+        if (!textNode) {
+          textNode = paraElement.ownerDocument!.createElementNS(
+            'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+            't'
+          );
+          const rPr = run.run.getElementsByTagNameNS(
+            'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+            'rPr'
+          );
+          if (rPr.length > 0) {
+            if (rPr[0].nextSibling) {
+              run.run.insertBefore(textNode, rPr[0].nextSibling);
+            } else {
+              run.run.appendChild(textNode);
+            }
+          } else {
+            run.run.appendChild(textNode);
+          }
+        }
+        
+        // Clear and set text
+        while (textNode.firstChild) {
+          textNode.removeChild(textNode.firstChild);
+        }
+        if (textForThisRun.length > 0) {
+          textNode.appendChild(paraElement.ownerDocument!.createTextNode(textForThisRun));
+        }
       }
+      return;
+    }
+
+    // Distribute new text proportionally across runs that had text
+    // CRITICAL: We preserve ALL runs (including those without text) to maintain formatting structure
+    // Only runs that had text originally will get new text distributed to them
+    let remainingText = newText;
+    
+    // Create a map to track text assignment: index in runsWithFormatting -> text to assign
+    const textAssignment = new Map<number, string>();
+    
+    // First pass: distribute text only to runs that had text originally
+    for (let i = 0; i < runsWithFormatting.length; i++) {
+      const run = runsWithFormatting[i];
+      
+      // Skip runs without original text (they keep formatting but stay empty)
+      if (run.text.length === 0) {
+        continue;
+      }
+      
+      let textForThisRun: string;
+      
+      // Check if this is the last run with text
+      const remainingRunsWithText = runsWithFormatting.slice(i + 1).filter(r => r.text.length > 0);
+      if (remainingRunsWithText.length === 0) {
+        // Last run with text gets all remaining text to avoid rounding errors
+        textForThisRun = remainingText;
+        remainingText = '';
+      } else {
+        // Calculate proportional length based on original text length
+        // CRITICAL: Ensure we don't divide by zero
+        if (totalOriginalLength > 0) {
+          const proportion = run.text.length / totalOriginalLength;
+          const targetLength = Math.max(1, Math.floor(newText.length * proportion));
+          textForThisRun = remainingText.substring(0, Math.min(targetLength, remainingText.length));
+          remainingText = remainingText.substring(textForThisRun.length);
+        } else {
+          // Fallback: distribute evenly (should not happen, but safety check)
+          // This should never execute because we check totalOriginalLength === 0 earlier
+          const runsWithTextCount = runsWithFormatting.filter(r => r.text.length > 0).length;
+          if (runsWithTextCount > 0) {
+            const textPerRun = Math.floor(newText.length / runsWithTextCount);
+            textForThisRun = remainingText.substring(0, textPerRun);
+            remainingText = remainingText.substring(textForThisRun.length);
+          } else {
+            // No runs with text - put all text in first run
+            textForThisRun = remainingText;
+            remainingText = '';
+          }
+        }
+      }
+      
+      textAssignment.set(i, textForThisRun);
+    }
+    
+    // CRITICAL: Ensure all remaining text goes to the last run with text
+    // This handles rounding errors and ensures no text is lost
+    if (remainingText.length > 0) {
+      // Find the last run with text and add remaining text to it
+      for (let i = runsWithFormatting.length - 1; i >= 0; i--) {
+        if (runsWithFormatting[i].text.length > 0) {
+          const existingText = textAssignment.get(i) || '';
+          textAssignment.set(i, existingText + remainingText);
+          remainingText = '';
+          break;
+        }
+      }
+    }
+    
+    // Second pass: process ALL runs to update their text nodes
+    // This ensures we preserve formatting for ALL runs, even those without text
+    for (let i = 0; i < runsWithFormatting.length; i++) {
+      const run = runsWithFormatting[i];
+      const textForThisRun = textAssignment.get(i) || '';
+      
+      // Replace text in this run's text node
+      // CRITICAL: We only modify the text content, NOT the run structure or w:rPr
+      // This ensures ALL formatting properties (bold, italic, underline, color, size, font, etc.) are preserved
+      
+      // Handle text node - create if it doesn't exist
+      let textNode = run.textNode;
+      if (!textNode && textForThisRun.length > 0) {
+        // Create text node if it doesn't exist and we have text to add
+        textNode = paraElement.ownerDocument!.createElementNS(
+          'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+          't'
+        );
+        // Insert text node after rPr if it exists, otherwise append
+        const rPr = run.run.getElementsByTagNameNS(
+          'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+          'rPr'
+        );
+        if (rPr.length > 0) {
+          // Insert after rPr element
+          if (rPr[0].nextSibling) {
+            run.run.insertBefore(textNode, rPr[0].nextSibling);
+          } else {
+            run.run.appendChild(textNode);
+          }
+        } else {
+          // No rPr, just append
+          run.run.appendChild(textNode);
+        }
+      }
+      
+      // Replace text content
+      if (textNode) {
+        // Clear existing text content and add new text
+        // This preserves the textNode element and all its attributes
+        while (textNode.firstChild) {
+          textNode.removeChild(textNode.firstChild);
+        }
+        // Add new text (even if empty, to maintain structure)
+        if (textForThisRun.length > 0) {
+          textNode.appendChild(paraElement.ownerDocument!.createTextNode(textForThisRun));
+        }
+      }
+      // If run has no text node and no text to add, leave it as is (preserves formatting-only runs)
     }
   }
 
@@ -1473,7 +1711,27 @@ export class DocxHandler implements FileHandler {
           
           // #region agent log
           if (segmentIndex < 3) {
-            fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:1430',message:'Export: processing paragraph DOM',data:{segmentIndex,extractedText:paraText.substring(0,50),hasTranslation:translatedText!==undefined&&translatedText!==null,translation:translatedText?.substring(0,50)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'DOM'})}).catch(()=>{});
+            // Check formatting before replacement
+            const runsBefore = element.getElementsByTagNameNS(
+              'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+              'r'
+            );
+            const formattingInfo = Array.from(runsBefore).map((run, idx) => {
+              const rPr = run.getElementsByTagNameNS(
+                'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+                'rPr'
+              );
+              if (rPr.length > 0) {
+                const rPrElement = rPr[0];
+                const children = Array.from(rPrElement.childNodes)
+                  .filter(n => n.nodeType === 1) // ELEMENT_NODE
+                  .map(n => (n as Element).localName || (n as Element).nodeName);
+                return { runIndex: idx, formatting: children };
+              }
+              return { runIndex: idx, formatting: [] };
+            }).filter(f => f.formatting.length > 0);
+            
+            fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:1430',message:'Export: processing paragraph DOM',data:{segmentIndex,extractedText:paraText.substring(0,50),hasTranslation:translatedText!==undefined&&translatedText!==null,translation:translatedText?.substring(0,50),runsCount:runsBefore.length,formattingInfo},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'DOM'})}).catch(()=>{});
           }
           // #endregion
           
@@ -1484,7 +1742,27 @@ export class DocxHandler implements FileHandler {
             // #region agent log
             if (segmentIndex < 3) {
               const verifyText = this.extractTextFromParagraphDOM(element);
-              fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:1440',message:'Export: paragraph DOM updated',data:{segmentIndex,originalText:paraText.substring(0,50),translation:translatedText.substring(0,50),verifiedText:verifyText.substring(0,50),matches:verifyText.includes(translatedText.trim().substring(0,30))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'DOM'})}).catch(()=>{});
+              // Check formatting after replacement
+              const runsAfter = element.getElementsByTagNameNS(
+                'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+                'r'
+              );
+              const formattingInfoAfter = Array.from(runsAfter).map((run, idx) => {
+                const rPr = run.getElementsByTagNameNS(
+                  'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+                  'rPr'
+                );
+                if (rPr.length > 0) {
+                  const rPrElement = rPr[0];
+                  const children = Array.from(rPrElement.childNodes)
+                    .filter(n => n.nodeType === 1) // ELEMENT_NODE
+                    .map(n => (n as Element).localName || (n as Element).nodeName);
+                  return { runIndex: idx, formatting: children };
+                }
+                return { runIndex: idx, formatting: [] };
+              }).filter(f => f.formatting.length > 0);
+              
+              fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:1440',message:'Export: paragraph DOM updated',data:{segmentIndex,originalText:paraText.substring(0,50),translation:translatedText.substring(0,50),verifiedText:verifyText.substring(0,50),matches:verifyText.includes(translatedText.trim().substring(0,30)),runsCountAfter:runsAfter.length,formattingInfoAfter},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'DOM'})}).catch(()=>{});
             }
             // #endregion
           }
@@ -1551,13 +1829,69 @@ export class DocxHandler implements FileHandler {
     }, 'Finished updating document with translations using DOM');
 
     // Serialize the modified DOM back to XML
+    // CRITICAL: XMLSerializer should preserve all attributes and structure
     const serializer = new XMLSerializer();
+    
+    // #region agent log - Check formatting before serialization
+    if (segmentIndex > 0) {
+      // Check a sample paragraph for formatting preservation
+      const samplePara = bodyElement.getElementsByTagNameNS(
+        'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+        'p'
+      )[0];
+      if (samplePara) {
+        const sampleRuns = samplePara.getElementsByTagNameNS(
+          'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+          'r'
+        );
+        const formattingCheck = Array.from(sampleRuns).slice(0, 3).map((run, idx) => {
+          const rPr = run.getElementsByTagNameNS(
+            'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+            'rPr'
+          );
+          if (rPr.length > 0) {
+            const rPrElement = rPr[0];
+            // Get all child elements with their attributes
+            const children = Array.from(rPrElement.childNodes)
+              .filter(n => n.nodeType === 1) // ELEMENT_NODE
+              .map(n => {
+                const el = n as Element;
+                const attrs: Record<string, string> = {};
+                if (el.attributes) {
+                  for (let i = 0; i < el.attributes.length; i++) {
+                    const attr = el.attributes[i];
+                    attrs[attr.name] = attr.value;
+                  }
+                }
+                return {
+                  name: el.localName || el.nodeName,
+                  attributes: attrs
+                };
+              });
+            return { runIndex: idx, formatting: children };
+          }
+          return { runIndex: idx, formatting: [] };
+        }).filter(f => f.formatting.length > 0);
+        
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:1837',message:'Export: Before serialization - formatting check',data:{formattingCheck},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'DOM'})}).catch(()=>{});
+      }
+    }
+    // #endregion
+    
     const updatedXml = serializer.serializeToString(doc);
     
     // #region agent log
     const firstTranslation = Array.from(segmentMap.entries())[0]?.[1] || '';
     const finalXmlHasTranslation = updatedXml.includes(firstTranslation.substring(0, 30));
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:1500',message:'Export: DOM serialization complete',data:{finalXmlHasTranslation,firstTranslation:firstTranslation.substring(0,30),finalXmlLength:updatedXml.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'DOM'})}).catch(()=>{});
+    
+    // Check if formatting is preserved in serialized XML
+    const hasBold = updatedXml.includes('<w:b') || updatedXml.includes('<w:b/>');
+    const hasItalic = updatedXml.includes('<w:i') || updatedXml.includes('<w:i/>');
+    const hasUnderline = updatedXml.includes('<w:u');
+    const hasColor = updatedXml.includes('<w:color');
+    const hasSize = updatedXml.includes('<w:sz');
+    
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:1870',message:'Export: DOM serialization complete',data:{finalXmlHasTranslation,firstTranslation:firstTranslation.substring(0,30),finalXmlLength:updatedXml.length,formattingPreserved:{hasBold,hasItalic,hasUnderline,hasColor,hasSize}},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'DOM'})}).catch(()=>{});
     // #endregion
 
     // PRESERVE all other files in the DOCX (styles.xml, settings.xml, etc.)

@@ -237,6 +237,14 @@ export const exportDocumentFile = async (documentId: string): Promise<Buffer> =>
     targetText: seg.targetFinal ?? seg.targetMt ?? seg.sourceText,
   }));
 
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'file.service.ts:233',message:'Export: fetched segments from database',data:{documentId,totalSegments:segments.segments.length,firstFewSegments:segments.segments.slice(0,3).map(s=>({index:s.segmentIndex,hasTargetFinal:!!s.targetFinal,hasTargetMt:!!s.targetMt,targetFinal:s.targetFinal?.substring(0,30),targetMt:s.targetMt?.substring(0,30),sourceText:s.sourceText.substring(0,30)})),segmentsWithTargetFinal:segments.segments.filter(s=>s.targetFinal).length,segmentsWithTargetMt:segments.segments.filter(s=>s.targetMt).length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
+
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'file.service.ts:235',message:'Export: created exportSegments array',data:{totalExportSegments:exportSegments.length,firstFewExportSegments:exportSegments.slice(0,3).map(s=>({index:s.index,targetText:s.targetText.substring(0,30),targetTextLength:s.targetText.length})),segmentsWithNonSourceText:exportSegments.filter(s=>s.targetText!==segments.segments.find(orig=>orig.segmentIndex===s.index)?.sourceText).length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+  // #endregion
+
   return handler.export({
     segments: exportSegments,
     originalBuffer,

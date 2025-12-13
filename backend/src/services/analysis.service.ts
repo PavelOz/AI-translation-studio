@@ -349,6 +349,43 @@ const parseJsonArray = (responseText: string, documentId: string): any[] => {
 /**
  * Helper function to translate a term using AI
  */
+/**
+ * Cleans targetTerm from JSON array format (for backward compatibility with old mock responses)
+ * If targetTerm is a JSON array, extracts target_mt from first item
+ * Otherwise returns the term as-is
+ */
+const cleanTargetTerm = (targetTerm: string): string => {
+  if (!targetTerm || typeof targetTerm !== 'string') {
+    return targetTerm;
+  }
+  
+  const trimmed = targetTerm.trim();
+  
+  // Check if it's a JSON array
+  if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        // Try to extract target_mt from first item
+        if (parsed[0].target_mt) {
+          const extracted = parsed[0].target_mt.trim();
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:352',message:'Cleaned targetTerm from JSON array',data:{originalLength:targetTerm.length,extractedLength:extracted.length,originalPreview:targetTerm.substring(0,50)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'N'})}).catch(()=>{});
+          // #endregion
+          return extracted;
+        }
+      }
+    } catch (e) {
+      // If JSON parsing fails, return original
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:365',message:'Failed to parse targetTerm as JSON, using original',data:{error:String(e)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'N'})}).catch(()=>{});
+      // #endregion
+    }
+  }
+  
+  return targetTerm;
+};
+
 const translateTermWithAI = async (
   sourceTerm: string,
   sourceLocale: string,
@@ -388,7 +425,26 @@ Term: ${sourceTerm}`;
     fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:376',message:'AI translation response received',data:{sourceTerm,rawResponse:response.outputText,rawResponseLength:response.outputText.length,trimmedResponse:response.outputText.trim(),trimmedLength:response.outputText.trim().length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
     // #endregion
 
-    const translated = response.outputText.trim();
+    let translated = response.outputText.trim();
+    
+    // Handle JSON response format (for backward compatibility with mock responses)
+    // If response is a JSON array, try to extract target_mt from first item
+    if (translated.startsWith('[') && translated.endsWith(']')) {
+      try {
+        const parsed = JSON.parse(translated);
+        if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].target_mt) {
+          translated = parsed[0].target_mt.trim();
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:391',message:'Extracted target_mt from JSON response',data:{sourceTerm,extractedTranslation:translated},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'M'})}).catch(()=>{});
+          // #endregion
+        }
+      } catch (e) {
+        // If JSON parsing fails, use original response
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:397',message:'JSON parsing failed, using original response',data:{sourceTerm,error:String(e)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'M'})}).catch(()=>{});
+        // #endregion
+      }
+    }
     
     // #region agent log
     const isNotTranslated = translated === sourceTerm || translated.trim() === sourceTerm.trim();
@@ -1264,14 +1320,36 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
       });
 
       if (globalEntry) {
+        // Clean targetTerm from JSON array format (for backward compatibility)
+        let targetTerm = cleanTargetTerm(globalEntry.targetTerm);
+        const wasCleaned = targetTerm !== globalEntry.targetTerm;
+        
+        // If we cleaned the term, update it in the database
+        if (wasCleaned) {
+          try {
+            await prisma.glossaryEntry.update({
+              where: { id: globalEntry.id },
+              data: { targetTerm },
+            });
+            logger.info(
+              { documentId, sourceTerm, oldTargetTerm: globalEntry.targetTerm, newTargetTerm: targetTerm },
+              'Cleaned and updated corrupted targetTerm in Global Glossary',
+            );
+          } catch (error: any) {
+            logger.warn(
+              { documentId, sourceTerm, error: error.message },
+              'Failed to update cleaned targetTerm in Global Glossary, using cleaned value anyway',
+            );
+          }
+        }
+        
         // #region agent log
-        const isNotTranslated = globalEntry.targetTerm.trim() === sourceTerm.trim();
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1193',message:'Found in Global Glossary',data:{sourceTerm,targetTerm:globalEntry.targetTerm,targetTermLength:globalEntry.targetTerm.length,isNotTranslated},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        const isNotTranslated = targetTerm.trim() === sourceTerm.trim();
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1193',message:'Found in Global Glossary',data:{sourceTerm,targetTerm,targetTermLength:targetTerm.length,isNotTranslated,wasCleaned},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
         // #endregion
         
         // If term is not translated (targetTerm === sourceTerm), translate it with AI
         // But first check if the term is already in the target language (e.g., English terms when target is English)
-        let targetTerm = globalEntry.targetTerm;
         if (isNotTranslated && document.sourceLocale !== document.targetLocale) {
           // Check if term is already in target language
           const hasCyrillic = /[А-Яа-яЁё]/.test(sourceTerm);
@@ -1620,9 +1698,12 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
       });
 
       if (globalEntry) {
+        // Clean targetTerm from JSON array format (for backward compatibility)
+        const cleanedTargetTerm = cleanTargetTerm(globalEntry.targetTerm);
+        
         confirmedFinalTerms.push({
           sourceTerm: globalEntry.sourceTerm,
-          targetTerm: globalEntry.targetTerm,
+          targetTerm: cleanedTargetTerm,
           frequency: term.frequency,
           status: 'APPROVED', // Always APPROVED for confirmed segments
           source: 'CONFIRMED',
@@ -1813,63 +1894,16 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
         'Updated CANDIDATE entry',
       );
       
-      // If the term is now APPROVED (from confirmed segments or global glossary),
-      // ensure GlossaryEntry exists with PREFERRED status
-      if (term.status === 'APPROVED') {
-        try {
-          // Determine if this should be a global entry (GLOBAL or CONFIRMED sources)
-          const isGlobalEntry = term.source === 'GLOBAL' || term.source === 'CONFIRMED';
-          
-          const existingGlossaryEntry = await prisma.glossaryEntry.findFirst({
-            where: {
-              OR: [
-                { projectId: null },
-                { projectId: document.projectId },
-              ],
-              sourceTerm: { equals: term.sourceTerm, mode: 'insensitive' },
-              sourceLocale: document.sourceLocale,
-              targetLocale: document.targetLocale,
-            },
-          });
-          
-          if (!existingGlossaryEntry) {
-            await prisma.glossaryEntry.create({
-              data: {
-                sourceTerm: term.sourceTerm,
-                targetTerm: term.targetTerm,
-                sourceLocale: document.sourceLocale,
-                targetLocale: document.targetLocale,
-                direction: `${document.sourceLocale}-${document.targetLocale}`,
-                projectId: isGlobalEntry ? null : document.projectId,
-                status: 'PREFERRED',
-              },
-            });
-            logger.info(
-              { 
-                documentId, 
-                sourceTerm: term.sourceTerm, 
-                source: term.source,
-                isGlobalEntry,
-              },
-              'Created GlossaryEntry with PREFERRED status for APPROVED term (during update)',
-            );
-          } else if (existingGlossaryEntry.status !== 'PREFERRED') {
-            await prisma.glossaryEntry.update({
-              where: { id: existingGlossaryEntry.id },
-              data: { status: 'PREFERRED' },
-            });
-            logger.info(
-              { documentId, sourceTerm: term.sourceTerm, entryId: existingGlossaryEntry.id },
-              'Updated GlossaryEntry to PREFERRED status for APPROVED term (during update)',
-            );
-          }
-        } catch (error: any) {
-          logger.warn(
-            { documentId, sourceTerm: term.sourceTerm, source: term.source, error: error.message },
-            'Failed to create/update GlossaryEntry for APPROVED term (non-critical)',
-          );
-        }
-      }
+      // CRITICAL: Do NOT automatically create/update GlossaryEntry for terms that already existed in document glossary
+      // This prevents automatic promotion to global glossary on repeated analysis runs
+      // Only create GlossaryEntry for NEW terms (not existing ones being updated from CANDIDATE to APPROVED)
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1897',message:'Skipping automatic GlossaryEntry creation for existing document glossary term being updated',data:{sourceTerm:term.sourceTerm,source:term.source,existingEntryId:existingEntry.id,termStatus:term.status},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'O'})}).catch(()=>{});
+      // #endregion
+      logger.debug(
+        { documentId, sourceTerm: term.sourceTerm, existingEntryId: existingEntry.id, termStatus: term.status },
+        'Skipping automatic GlossaryEntry creation/update for existing document glossary term (preventing auto-promotion on repeated analysis)',
+      );
       continue;
     }
 
@@ -1884,13 +1918,16 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
     });
     createdCount++;
     
-    // CRITICAL: If term is APPROVED (from confirmed segments or global glossary), 
-    // ensure a GlossaryEntry exists with status PREFERRED so listDocumentGlossary can find it
-    if (term.status === 'APPROVED') {
+    // CRITICAL: Do NOT automatically create/update GlossaryEntry for APPROVED terms on repeated analysis runs
+    // This prevents automatic promotion to global glossary when terms are found in global glossary during analysis
+    // Only create GlossaryEntry for CONFIRMED terms (from confirmed segments) - these should go to global glossary
+    // GLOBAL and AI terms should NOT be automatically promoted to global glossary on repeated runs
+    if (term.status === 'APPROVED' && term.source === 'CONFIRMED') {
+      // Only CONFIRMED terms (from confirmed segments) should automatically create GlossaryEntry
+      // This is the only case where we want automatic promotion to global glossary
       try {
-        // Determine if this should be a global entry (GLOBAL or CONFIRMED sources)
         // CONFIRMED terms come from confirmed segments and should be in global glossary
-        const isGlobalEntry = term.source === 'GLOBAL' || term.source === 'CONFIRMED';
+        const isGlobalEntry = true; // CONFIRMED terms always go to global glossary
         
         // Check if GlossaryEntry already exists
         const existingGlossaryEntry = await prisma.glossaryEntry.findFirst({
@@ -1907,7 +1944,7 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
         
         if (!existingGlossaryEntry) {
           // Create GlossaryEntry with PREFERRED status so it shows as APPROVED in the table
-          // CONFIRMED and GLOBAL terms go to global glossary (projectId: null)
+          // CONFIRMED terms go to global glossary (projectId: null)
           await prisma.glossaryEntry.create({
             data: {
               sourceTerm: term.sourceTerm,
@@ -1915,7 +1952,7 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
               sourceLocale: document.sourceLocale,
               targetLocale: document.targetLocale,
               direction: `${document.sourceLocale}-${document.targetLocale}`,
-              projectId: isGlobalEntry ? null : document.projectId,
+              projectId: null, // CONFIRMED terms go to global glossary
               status: 'PREFERRED', // This will make it show as APPROVED in listDocumentGlossary
             },
           });
@@ -1924,10 +1961,8 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
               documentId, 
               sourceTerm: term.sourceTerm, 
               source: term.source,
-              isGlobalEntry,
-              projectId: isGlobalEntry ? null : document.projectId,
             },
-            'Created GlossaryEntry with PREFERRED status for APPROVED term',
+            'Created GlossaryEntry with PREFERRED status for CONFIRMED term',
           );
         } else if (existingGlossaryEntry.status !== 'PREFERRED') {
           // Update existing entry to PREFERRED if it's not already
@@ -1937,21 +1972,29 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
           });
           logger.info(
             { documentId, sourceTerm: term.sourceTerm, entryId: existingGlossaryEntry.id },
-            'Updated GlossaryEntry to PREFERRED status for APPROVED term',
+            'Updated GlossaryEntry to PREFERRED status for CONFIRMED term',
           );
         } else {
           logger.debug(
             { documentId, sourceTerm: term.sourceTerm, entryId: existingGlossaryEntry.id },
-            'GlossaryEntry already has PREFERRED status for APPROVED term',
+            'GlossaryEntry already has PREFERRED status for CONFIRMED term',
           );
         }
       } catch (error: any) {
         // Non-critical: if GlossaryEntry creation fails, log but continue
         logger.warn(
           { documentId, sourceTerm: term.sourceTerm, source: term.source, error: error.message },
-          'Failed to create/update GlossaryEntry for APPROVED term (non-critical)',
+          'Failed to create/update GlossaryEntry for CONFIRMED term (non-critical)',
         );
       }
+    } else if (term.status === 'APPROVED' && (term.source === 'GLOBAL' || term.source === 'AI')) {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1923',message:'Skipping automatic GlossaryEntry creation for GLOBAL/AI term on repeated analysis',data:{sourceTerm:term.sourceTerm,source:term.source,termStatus:term.status},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'O'})}).catch(()=>{});
+      // #endregion
+      logger.debug(
+        { documentId, sourceTerm: term.sourceTerm, source: term.source, termStatus: term.status },
+        'Skipping automatic GlossaryEntry creation for GLOBAL/AI term (preventing auto-promotion on repeated analysis)',
+      );
     }
   }
 
