@@ -1,5 +1,6 @@
 import JSZip from 'jszip';
-import { XMLParser, XMLBuilder } from 'fast-xml-parser';
+import { XMLParser, XMLBuilder, XMLBuilderOptions } from 'fast-xml-parser';
+import { DOMParser, XMLSerializer } from '@xmldom/xmldom';
 import mammoth from 'mammoth';
 import { exec, spawn } from 'child_process';
 import { promisify } from 'util';
@@ -924,6 +925,25 @@ export class DocxHandler implements FileHandler {
   }
 
   /**
+   * Escape XML special characters for use in XML strings
+   */
+  private escapeXml(text: string): string {
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+  }
+
+  /**
+   * Escape special regex characters for use in regex patterns
+   */
+  private escapeRegex(text: string): string {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  /**
    * Extract text from a paragraph XML structure
    * Handles both standard structure and preserveOrder structure
    */
@@ -1248,6 +1268,139 @@ export class DocxHandler implements FileHandler {
     }
   }
 
+  /**
+   * Extract text from a paragraph DOM element
+   * Collects text from all <w:t> elements within the paragraph
+   */
+  private extractTextFromParagraphDOM(paraElement: Element): string {
+    const textNodes = paraElement.getElementsByTagNameNS(
+      'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+      't'
+    );
+    const texts: string[] = [];
+    for (let i = 0; i < textNodes.length; i++) {
+      const textNode = textNodes[i];
+      if (textNode.firstChild && textNode.firstChild.nodeType === 3) { // TEXT_NODE
+        texts.push(textNode.firstChild.nodeValue || '');
+      }
+    }
+    return texts.join('');
+  }
+
+  /**
+   * Replace text in a paragraph DOM element
+   * Replaces content of the first <w:t> element and clears others
+   */
+  private replaceTextInParagraphDOM(paraElement: Element, newText: string): void {
+    const textNodes = paraElement.getElementsByTagNameNS(
+      'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+      't'
+    );
+    
+    if (textNodes.length === 0) {
+      // No text node found - create one in the first run
+      const runs = paraElement.getElementsByTagNameNS(
+        'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+        'r'
+      );
+      if (runs.length > 0) {
+        const firstRun = runs[0];
+        const textElement = paraElement.ownerDocument!.createElementNS(
+          'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+          't'
+        );
+        textElement.appendChild(paraElement.ownerDocument!.createTextNode(newText));
+        firstRun.appendChild(textElement);
+      }
+      return;
+    }
+
+    // Replace text in first text node
+    const firstTextNode = textNodes[0];
+    // Remove all existing text children
+    while (firstTextNode.firstChild) {
+      firstTextNode.removeChild(firstTextNode.firstChild);
+    }
+    // Add new text
+    firstTextNode.appendChild(paraElement.ownerDocument!.createTextNode(newText));
+
+    // Clear other text nodes (keep structure but remove text)
+    for (let i = 1; i < textNodes.length; i++) {
+      const textNode = textNodes[i];
+      while (textNode.firstChild) {
+        textNode.removeChild(textNode.firstChild);
+      }
+    }
+  }
+
+  /**
+   * Extract text from a table cell DOM element
+   */
+  private extractTextFromTableCellDOM(cellElement: Element): string {
+    const paragraphs = cellElement.getElementsByTagNameNS(
+      'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+      'p'
+    );
+    const texts: string[] = [];
+    for (let i = 0; i < paragraphs.length; i++) {
+      const paraText = this.extractTextFromParagraphDOM(paragraphs[i]);
+      if (paraText.trim()) {
+        texts.push(paraText);
+      }
+    }
+    return texts.join(' ');
+  }
+
+  /**
+   * Replace text in a table cell DOM element
+   * Replaces text in the first paragraph of the cell
+   */
+  private replaceTextInTableCellDOM(cellElement: Element, newText: string): void {
+    const paragraphs = cellElement.getElementsByTagNameNS(
+      'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+      'p'
+    );
+    
+    if (paragraphs.length === 0) {
+      // No paragraph found - create one
+      const paraElement = cellElement.ownerDocument!.createElementNS(
+        'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+        'p'
+      );
+      const runElement = cellElement.ownerDocument!.createElementNS(
+        'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+        'r'
+      );
+      const textElement = cellElement.ownerDocument!.createElementNS(
+        'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+        't'
+      );
+      textElement.appendChild(cellElement.ownerDocument!.createTextNode(newText));
+      runElement.appendChild(textElement);
+      paraElement.appendChild(runElement);
+      cellElement.appendChild(paraElement);
+      return;
+    }
+
+    // Replace text in first paragraph
+    this.replaceTextInParagraphDOM(paragraphs[0], newText);
+    
+    // Clear other paragraphs (keep structure but remove text)
+    for (let i = 1; i < paragraphs.length; i++) {
+      const para = paragraphs[i];
+      const textNodes = para.getElementsByTagNameNS(
+        'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+        't'
+      );
+      for (let j = 0; j < textNodes.length; j++) {
+        const textNode = textNodes[j];
+        while (textNode.firstChild) {
+          textNode.removeChild(textNode.firstChild);
+        }
+      }
+    }
+  }
+
   async export(options: ExportOptions): Promise<Buffer> {
     if (!options.originalBuffer) {
       throw new Error('Original DOCX buffer required for export');
@@ -1259,415 +1412,153 @@ export class DocxHandler implements FileHandler {
       throw new Error('Invalid DOCX: missing word/document.xml');
     }
 
-    // Parse with preserveOrder: true to maintain element order
-    const parsed = this.parser.parse(documentXml);
+    // Parse XML using DOM parser (reliable for modifications)
+    const domParser = new DOMParser();
+    const doc = domParser.parseFromString(documentXml, 'text/xml');
     
-    // Access document structure
-    // With preserveOrder: true, the root can be an array: [{ 'w:document': [...] }]
-    // Or it can be an object: { 'w:document': [...] }
-    let document: any;
-    
-    if (Array.isArray(parsed)) {
-      // Root is an array - find w:document in the array elements
-      for (const item of parsed) {
-        if (item && typeof item === 'object' && 'w:document' in item) {
-          document = item['w:document'];
-          break;
-        }
-      }
-    } else if (parsed && typeof parsed === 'object') {
-      // Root is an object - access w:document directly
-      document = parsed['w:document'];
-    }
-    
-    if (!document || !Array.isArray(document) || document.length === 0) {
-      // Log for debugging
-      const parsedKeys = parsed && typeof parsed === 'object' 
-        ? (Array.isArray(parsed) ? parsed.map((_, i) => String(i)) : Object.keys(parsed))
-        : [];
-      logger.error({ 
-        parsedKeys,
-        parsedType: Array.isArray(parsed) ? 'array' : typeof parsed,
-        documentExists: !!document,
-        documentIsArray: Array.isArray(document),
-        documentLength: Array.isArray(document) ? document.length : 0,
-        firstElement: Array.isArray(parsed) && parsed[0] ? Object.keys(parsed[0]) : []
-      }, 'Failed to access w:document in export');
-      throw new Error('Invalid DOCX: missing w:document element');
+    // Check for parsing errors
+    const parserError = doc.getElementsByTagName('parsererror');
+    if (parserError.length > 0) {
+      throw new Error('Failed to parse DOCX XML: ' + parserError[0].textContent);
     }
 
-    // With preserveOrder, body is in an array preserving order
-    // Structure: [{ 'w:body': [{ 'w:p': {...} }, { 'w:tbl': {...} }, ...] }]
-    const bodyArray = document[0]['w:body'];
-    if (!bodyArray || !Array.isArray(bodyArray) || bodyArray.length === 0) {
-      throw new Error('Invalid DOCX: missing or empty w:body element');
+    // Find the document element
+    const documentElement = doc.documentElement;
+    if (!documentElement || documentElement.nodeName !== 'w:document') {
+      throw new Error('Invalid DOCX: missing or invalid w:document element');
     }
 
-    // With preserveOrder, bodyArray is an array: [{ 'w:body': [...] }]
-    // bodyArray[0] contains the body object, which has the children array
-    const bodyObj = bodyArray[0];
-    
-    // Extract the ordered children array from the body - same as parse method
-    // With preserveOrder, the body object contains 'w:body' key with the ordered children array
-    // Structure: { 'w:body': [{ 'w:p': {...} }, { 'w:tbl': {...} }, ...] }
-    let bodyChildren: any[] = [];
-    
-    if (bodyObj && typeof bodyObj === 'object') {
-      // The body object contains 'w:body' with the ordered children array
-      if (bodyObj['w:body'] && Array.isArray(bodyObj['w:body'])) {
-        bodyChildren = bodyObj['w:body'];
-      } else {
-        // Fallback: if structure is different, try to extract children directly
-        // Sometimes the body object itself might be the array
-        bodyChildren = bodyArray;
-      }
-    } else {
-      // If bodyObj is not an object, bodyArray itself might be the children array
-      bodyChildren = bodyArray;
+    // Find the body element
+    const bodyElements = documentElement.getElementsByTagNameNS(
+      'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+      'body'
+    );
+    if (bodyElements.length === 0) {
+      throw new Error('Invalid DOCX: missing w:body element');
     }
+    const bodyElement = bodyElements[0];
 
+    // Create segment map for quick lookup
     const segmentMap = new Map(options.segments.map((seg) => [seg.index, seg.targetText]));
     
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:1404',message:'Export: DOM-based export started',data:{totalSegments:options.segments.length,segmentMapSize:segmentMap.size,segmentIndices:Array.from(segmentMap.keys()).slice(0,10),firstFewTranslations:Array.from(segmentMap.entries()).slice(0,3).map(([idx,text])=>({idx,text:text.substring(0,30),textLength:text.length}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'DOM'})}).catch(()=>{});
+    // #endregion
+
     logger.debug({ 
       totalSegments: options.segments.length,
       segmentIndices: Array.from(segmentMap.keys()).slice(0, 10),
-      firstFewTranslations: Array.from(segmentMap.entries()).slice(0, 3).map(([idx, text]) => ({ idx, text: text.substring(0, 30) })),
-      bodyChildrenLength: bodyChildren.length,
-      bodyChildrenTypes: bodyChildren.slice(0, 5).map(el => Object.keys(el))
-    }, 'Starting export with translations');
-    
-    // Helper function to update text in runs while preserving ALL formatting
-    // Modifies the runs array in place to ensure changes are reflected in the parsed structure
-    const updateRunsWithText = (runs: any[], translatedText: string): void => {
-      const runArray = Array.isArray(runs) ? runs : runs ? [runs] : [];
-      
-      // Find the first text run (run that contains w:t element)
-      const firstTextRun = runArray.find((run: any) => {
-        const textNode = run['w:t'];
-        return textNode && (
-          typeof textNode === 'string' ||
-          (typeof textNode === 'object' && (textNode['#text'] !== undefined || Array.isArray(textNode)))
-        );
-      });
-      
-      if (!firstTextRun) {
-        return; // No text run found, nothing to update
-      }
-      
-      // Modify the text node in place to preserve the exact structure
-      const textNode = firstTextRun['w:t'];
-      
-      if (typeof textNode === 'string') {
-        // If it's a string, convert to object with #text (preserveOrder format)
-        firstTextRun['w:t'] = { '#text': translatedText };
-      } else if (typeof textNode === 'object' && textNode !== null) {
-        // Modify the existing object in place
-        if (textNode['#text'] !== undefined) {
-          textNode['#text'] = translatedText;
-        } else {
-          // Create new structure preserving attributes
-          const newTextNode: any = { '#text': translatedText };
-          // Copy any attributes
-          for (const key in textNode) {
-            if (key.startsWith('@_')) {
-              newTextNode[key] = textNode[key];
-            }
-          }
-          firstTextRun['w:t'] = newTextNode;
-        }
-      }
-      
-      // Remove other text runs (we only keep the first one with translated text)
-      // This simplifies the structure while preserving formatting
-      const textRunIndices: number[] = [];
-      for (let i = 0; i < runArray.length; i++) {
-        const run = runArray[i];
-        if (run !== firstTextRun && run['w:t']) {
-          const nodeText = run['w:t'];
-          const hasText = typeof nodeText === 'string' || 
-            (typeof nodeText === 'object' && nodeText?.['#text']);
-          if (hasText) {
-            textRunIndices.push(i);
-          }
-        }
-      }
-      
-      // Remove text runs after the first one (in reverse order to maintain indices)
-      for (let i = textRunIndices.length - 1; i >= 0; i--) {
-        runArray.splice(textRunIndices[i], 1);
-      }
-    };
-    
-    // Update elements in the correct order (as they appear in bodyChildren)
-    // IMPORTANT: bodyChildren contains references to objects in the parsed structure,
-    // so modifications here will be reflected in the parsed structure
+      firstFewTranslations: Array.from(segmentMap.entries()).slice(0, 3).map(([idx, text]) => ({ idx, text: text.substring(0, 30) }))
+    }, 'Starting DOM-based export with translations');
+
+    // Process elements in document order (same as parse method)
     let segmentIndex = 0;
     let processedParagraphs = 0;
     let processedTables = 0;
     let skippedNoText = 0;
-    
-    logger.debug({ bodyChildrenCount: bodyChildren.length }, 'Processing body children');
-    
+
+    // Get all child nodes of body (paragraphs, tables, etc.)
+    const bodyChildren = Array.from(bodyElement.childNodes).filter(
+      (node) => node.nodeType === 1 // ELEMENT_NODE
+    ) as Element[];
+
     for (const element of bodyChildren) {
-      const elementKeys = Object.keys(element);
-      logger.debug({ elementKeys, hasWp: !!element['w:p'], hasWtbl: !!element['w:tbl'] }, 'Processing element');
+      const localName = element.localName || element.nodeName.split(':').pop();
       
-      // Check if this is a paragraph
-      if (element['w:p']) {
-        processedParagraphs++;
-        const para = element['w:p'];
-        
-        // Use the same extraction logic as parse method
-        // This ensures we match segments correctly
-        const text = this.extractTextFromParagraph(para);
-        
-        // Only process paragraphs that have text (same as parse method)
-        if (text && text.trim()) {
+      // Process paragraphs
+      if (localName === 'p') {
+        const paraText = this.extractTextFromParagraphDOM(element);
+        if (paraText && paraText.trim()) {
           const translatedText = segmentMap.get(segmentIndex);
           
-          // Use translation if available and not empty, otherwise keep original
-          // Empty string means keep original, undefined/null means no translation provided
-          const shouldUpdate = translatedText !== undefined && 
-                              translatedText !== null && 
-                              translatedText.trim().length > 0;
-          
+          // #region agent log
           if (segmentIndex < 3) {
-            logger.debug({ 
-              segmentIndex, 
-              hasTranslation: translatedText !== undefined && translatedText !== null,
-              translationEmpty: translatedText !== undefined && translatedText !== null && translatedText.trim().length === 0,
-              shouldUpdate,
-              translation: translatedText?.substring(0, 50),
-              extractedText: text.substring(0, 50),
-              paraIsArray: Array.isArray(para),
-              paraKeys: Array.isArray(para) ? para.map((p: any) => p && typeof p === 'object' ? Object.keys(p) : typeof p) : Object.keys(para)
-            }, 'Processing paragraph segment');
+            fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:1430',message:'Export: processing paragraph DOM',data:{segmentIndex,extractedText:paraText.substring(0,50),hasTranslation:translatedText!==undefined&&translatedText!==null,translation:translatedText?.substring(0,50)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'DOM'})}).catch(()=>{});
           }
+          // #endregion
           
-          if (shouldUpdate) {
-            // With preserveOrder, para structure can vary
-            // We need to find and update the runs directly in the structure
-            let updated = false;
-            let runsFound = false;
+          if (translatedText !== undefined && translatedText !== null && translatedText.trim().length > 0) {
+            this.replaceTextInParagraphDOM(element, translatedText.trim());
+            processedParagraphs++;
             
-            if (Array.isArray(para)) {
-              // Para is an array: [{ 'w:r': {...} }, { 'w:pPr': {...} }]
-              // Find the first item that has runs
-              for (const paraItem of para) {
-                if (paraItem && typeof paraItem === 'object' && 'w:r' in paraItem) {
-                  runsFound = true;
-                  const runs = paraItem['w:r'];
-                  const runArray = Array.isArray(runs) ? runs : runs ? [runs] : [];
-                  
-                  if (segmentIndex < 3) {
-                    logger.debug({ 
-                      segmentIndex,
-                      runCount: runArray.length,
-                      firstRunText: runArray[0]?.['w:t'] ? (typeof runArray[0]['w:t'] === 'string' ? runArray[0]['w:t'].substring(0, 30) : runArray[0]['w:t']?.['#text']?.substring(0, 30)) : 'none'
-                    }, 'Found runs in array structure');
-                  }
-                  
-                  // Update runs with translated text
-                  updateRunsWithText(runArray, translatedText.trim());
-                  
-                  // Ensure the runs are stored back correctly
-                  if (!Array.isArray(runs)) {
-                    paraItem['w:r'] = runArray;
-                  }
-                  
-                  // Verify update was applied
-                  const verifyRuns = paraItem['w:r'];
-                  const verifyRunArray = Array.isArray(verifyRuns) ? verifyRuns : verifyRuns ? [verifyRuns] : [];
-                  const verifyTextNode = verifyRunArray.find((r: any) => r?.['w:t'])?.['w:t'];
-                  const verifyText = typeof verifyTextNode === 'string' 
-                    ? verifyTextNode 
-                    : verifyTextNode?.['#text'] || '';
-                  
-                  if (segmentIndex < 3) {
-                    logger.debug({ 
-                      segmentIndex,
-                      originalText: text.substring(0, 50),
-                      translation: translatedText.substring(0, 50),
-                      verifiedText: verifyText.substring(0, 50),
-                      match: verifyText === translatedText.trim() || verifyText.includes(translatedText.trim().substring(0, 30))
-                    }, 'Updated runs in array structure');
-                  }
-                  
-                  updated = true;
-                  break;
-                }
-              }
-            } else if (para && typeof para === 'object') {
-              // Para is an object: { 'w:r': [...], 'w:pPr': {...} }
-              const runs = para['w:r'];
-              if (runs !== undefined) {
-                runsFound = true;
-                const runArray = Array.isArray(runs) ? runs : runs ? [runs] : [];
-                
-                if (segmentIndex < 3) {
-                  logger.debug({ 
-                    segmentIndex,
-                    runCount: runArray.length,
-                    firstRunText: runArray[0]?.['w:t'] ? (typeof runArray[0]['w:t'] === 'string' ? runArray[0]['w:t'].substring(0, 30) : runArray[0]['w:t']?.['#text']?.substring(0, 30)) : 'none'
-                  }, 'Found runs in object structure');
-                }
-                
-                updateRunsWithText(runArray, translatedText.trim());
-                if (!Array.isArray(runs)) {
-                  para['w:r'] = runArray;
-                }
-                
-                // Verify update was applied
-                const verifyRuns = para['w:r'];
-                const verifyRunArray = Array.isArray(verifyRuns) ? verifyRuns : verifyRuns ? [verifyRuns] : [];
-                const verifyTextNode = verifyRunArray.find((r: any) => r?.['w:t'])?.['w:t'];
-                const verifyText = typeof verifyTextNode === 'string' 
-                  ? verifyTextNode 
-                  : verifyTextNode?.['#text'] || '';
-                
-                if (segmentIndex < 3) {
-                  logger.debug({ 
-                    segmentIndex,
-                    originalText: text.substring(0, 50),
-                    translation: translatedText.substring(0, 50),
-                    verifiedText: verifyText.substring(0, 50),
-                    match: verifyText === translatedText.trim() || verifyText.includes(translatedText.trim().substring(0, 30))
-                  }, 'Updated runs in object structure');
-                }
-                
-                updated = true;
-              }
-            }
-            
-            if (!runsFound && segmentIndex < 3) {
-              logger.warn({ 
-                segmentIndex, 
-                paraStructure: Array.isArray(para) ? 'array' : typeof para,
-                paraKeys: Array.isArray(para) 
-                  ? para.map((p: any) => p && typeof p === 'object' ? Object.keys(p) : typeof p)
-                  : Object.keys(para || {})
-              }, 'Could not find runs in paragraph structure');
-            } else if (!updated && segmentIndex < 3) {
-              logger.warn({ segmentIndex, runsFound }, 'Found runs but update failed');
-            }
-          } else {
-            // No translation or empty translation - keep original text
+            // #region agent log
             if (segmentIndex < 3) {
-              logger.debug({ 
-                segmentIndex, 
-                reason: translatedText === undefined || translatedText === null 
-                  ? 'no translation provided' 
-                  : 'translation is empty - keeping original',
-                translationValue: translatedText
-              }, 'Keeping original text');
+              const verifyText = this.extractTextFromParagraphDOM(element);
+              fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:1440',message:'Export: paragraph DOM updated',data:{segmentIndex,originalText:paraText.substring(0,50),translation:translatedText.substring(0,50),verifiedText:verifyText.substring(0,50),matches:verifyText.includes(translatedText.trim().substring(0,30))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'DOM'})}).catch(()=>{});
             }
+            // #endregion
           }
-          
-          // Always increment segmentIndex for paragraphs with text
           segmentIndex++;
         } else {
-          // Skip empty paragraphs (same as parse method)
           skippedNoText++;
         }
-        
-        continue; // Move to next element
-
       }
-      // Check if this is a table
-      else if (element['w:tbl']) {
+      // Process tables
+      else if (localName === 'tbl') {
         processedTables++;
-        const table = element['w:tbl'];
-        const rows = table['w:tr'] ?? [];
-        const rowArray = Array.isArray(rows) ? rows : rows ? [rows] : [];
+        const rows = element.getElementsByTagNameNS(
+          'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+          'tr'
+        );
         
-        for (const row of rowArray) {
-          if (!row) continue;
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:1455',message:'Export: found table DOM',data:{tableFound:true,rowCount:rows.length,segmentIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'DOM'})}).catch(()=>{});
+        // #endregion
+        
+        for (let rowIdx = 0; rowIdx < rows.length; rowIdx++) {
+          const row = rows[rowIdx];
+          const cells = row.getElementsByTagNameNS(
+            'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+            'tc'
+          );
           
-          const cells = row['w:tc'] ?? [];
-          const cellArray = Array.isArray(cells) ? cells : cells ? [cells] : [];
-          
-          for (const cell of cellArray) {
-            if (!cell) continue;
+          for (let cellIdx = 0; cellIdx < cells.length; cellIdx++) {
+            const cell = cells[cellIdx];
+            const cellText = this.extractTextFromTableCellDOM(cell);
             
-            const cellParagraphs = cell['w:p'] ?? [];
-            const cellParaArray = Array.isArray(cellParagraphs) ? cellParagraphs : cellParagraphs ? [cellParagraphs] : [];
-            
-            for (const cellPara of cellParaArray) {
-              if (!cellPara) continue;
+            if (cellText && cellText.trim()) {
+              const translatedText = segmentMap.get(segmentIndex);
               
-              // Use the same extraction logic as parse method
-              const cellText = this.extractTextFromParagraph(cellPara);
-              
-              // Only process cell paragraphs that have text (same as parse method)
-              if (cellText && cellText.trim()) {
-                const translatedText = segmentMap.get(segmentIndex);
-                
-                // Use translation if available and not empty, otherwise keep original
-                const shouldUpdate = translatedText !== undefined && 
-                                    translatedText !== null && 
-                                    translatedText.trim().length > 0;
-                
-                if (shouldUpdate) {
-                  // Get the actual runs array from the cell paragraph
-                  const actualCellRuns = cellPara['w:r'] ?? [];
-                  const actualCellRunArray = Array.isArray(actualCellRuns) ? actualCellRuns : actualCellRuns ? [actualCellRuns] : [];
-                  
-                  // Update runs with translated text
-                  updateRunsWithText(actualCellRunArray, translatedText.trim());
-                  
-                  // Ensure cellPara['w:r'] points to the array
-                  if (!Array.isArray(actualCellRuns)) {
-                    cellPara['w:r'] = actualCellRunArray;
-                  }
-                }
-                // If translation is empty or not provided, keep original text (do nothing)
-                
-                // Always increment segmentIndex for cell paragraphs with text
-                segmentIndex++;
+              // #region agent log
+              if (segmentIndex < 5) {
+                fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:1470',message:'Export: processing table cell DOM',data:{segmentIndex,cellText:cellText.substring(0,30),hasTranslation:translatedText!==undefined&&translatedText!==null,translation:translatedText?.substring(0,30)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'DOM'})}).catch(()=>{});
               }
+              // #endregion
+              
+              if (translatedText !== undefined && translatedText !== null && translatedText.trim().length > 0) {
+                this.replaceTextInTableCellDOM(cell, translatedText.trim());
+                
+                // #region agent log
+                if (segmentIndex < 5) {
+                  const verifyText = this.extractTextFromTableCellDOM(cell);
+                  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:1480',message:'Export: table cell DOM updated',data:{segmentIndex,originalText:cellText.substring(0,30),translation:translatedText.substring(0,30),verifiedText:verifyText.substring(0,30),matches:verifyText.includes(translatedText.trim().substring(0,20))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'DOM'})}).catch(()=>{});
+                }
+                // #endregion
+              }
+              segmentIndex++;
             }
           }
         }
       }
     }
-    
+
     logger.info({ 
       totalSegments: segmentIndex, 
       translatedSegments: Array.from(segmentMap.keys()).length,
       processedParagraphs,
       processedTables,
-      skippedNoText,
-      bodyChildrenCount: bodyChildren.length,
-      segmentsWithTranslations: Array.from(segmentMap.entries())
-        .filter(([idx, text]) => text && text.trim().length > 0)
-        .length
-    }, 'Finished updating document with translations');
+      skippedNoText
+    }, 'Finished updating document with translations using DOM');
 
-    // Rebuild XML maintaining the ordered structure
-    // The parsed structure already has preserveOrder enabled, so we just rebuild it
-    const updatedXml = this.builder.build(parsed);
+    // Serialize the modified DOM back to XML
+    const serializer = new XMLSerializer();
+    const updatedXml = serializer.serializeToString(doc);
     
-    // Verify translations were applied by checking the XML
-    if (segmentIndex > 0 && segmentMap.size > 0) {
-      const firstTranslation = Array.from(segmentMap.entries()).find(([idx, text]) => text && text.trim().length > 0);
-      if (firstTranslation) {
-        const [idx, text] = firstTranslation;
-        const textInXml = updatedXml.includes(text.substring(0, 30));
-        logger.debug({ 
-          segmentIndex: idx,
-          translation: text.substring(0, 50),
-          foundInXml: textInXml
-        }, 'Verifying translation in rebuilt XML');
-        
-        if (!textInXml && idx < 3) {
-          logger.warn({ 
-            segmentIndex: idx,
-            translation: text.substring(0, 50),
-            xmlSample: updatedXml.substring(0, 500)
-          }, 'Translation not found in rebuilt XML - possible structure issue');
-        }
-      }
-    }
+    // #region agent log
+    const firstTranslation = Array.from(segmentMap.entries())[0]?.[1] || '';
+    const finalXmlHasTranslation = updatedXml.includes(firstTranslation.substring(0, 30));
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:1500',message:'Export: DOM serialization complete',data:{finalXmlHasTranslation,firstTranslation:firstTranslation.substring(0,30),finalXmlLength:updatedXml.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'DOM'})}).catch(()=>{});
+    // #endregion
 
     // PRESERVE all other files in the DOCX (styles.xml, settings.xml, etc.)
     // The zip already contains all original files, we only update document.xml
