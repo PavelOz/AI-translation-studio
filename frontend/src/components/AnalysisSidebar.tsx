@@ -22,25 +22,55 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
     queryFn: () => analysisApi.getAnalysis(documentId),
     enabled: !!documentId,
     refetchInterval: (data) => {
-      // Poll every 2 seconds if analysis is running
-      if (data?.status === 'RUNNING') {
-        hasSeenCompletionRef.current = false;
-        return 2000;
+      try {
+        const currentStatus = data?.status;
+        
+        // Poll every 2 seconds if analysis is running
+        if (currentStatus === 'RUNNING') {
+          hasSeenCompletionRef.current = false;
+          failedPollCountRef.current = 0;
+          return 2000;
+        }
+        
+        // CRITICAL: Continue polling even if status is FAILED
+        // Analysis might continue in background and complete successfully
+        // This handles the case where an error occurs mid-process but analysis continues
+        if (currentStatus === 'FAILED') {
+          failedPollCountRef.current += 1;
+          // Continue polling for up to 60 seconds (30 polls) in case analysis recovers
+          // This gives enough time for background processing to complete
+          if (failedPollCountRef.current > 30) {
+            // Stop polling after 60 seconds of FAILED status
+            return false;
+          }
+          return 2000;
+        }
+        
+        // Reset failed poll count when status is not FAILED
+        if (currentStatus !== 'FAILED') {
+          failedPollCountRef.current = 0;
+        }
+        
+        // If just completed, poll a few more times to get final counts
+        if (currentStatus === 'COMPLETED' && !hasSeenCompletionRef.current) {
+          hasSeenCompletionRef.current = true;
+          failedPollCountRef.current = 0;
+          // Poll 3 more times (6 seconds total) to ensure we get final counts
+          return 2000;
+        }
+        // If completed but counts are still 0, keep polling briefly
+        if (currentStatus === 'COMPLETED' && hasSeenCompletionRef.current && 
+            (data?.glossaryCount === 0 && data?.styleRulesCount === 0)) {
+          // Poll a few more times to catch delayed updates
+          return 2000;
+        }
+        // Stop polling otherwise
+        return false;
+      } catch (error) {
+        // If there's an error in refetchInterval, stop polling to prevent infinite loops
+        console.error('Error in refetchInterval:', error);
+        return false;
       }
-      // If just completed, poll a few more times to get final counts
-      if (data?.status === 'COMPLETED' && !hasSeenCompletionRef.current) {
-        hasSeenCompletionRef.current = true;
-        // Poll 3 more times (6 seconds total) to ensure we get final counts
-        return 2000;
-      }
-      // If completed but counts are still 0, keep polling briefly
-      if (data?.status === 'COMPLETED' && hasSeenCompletionRef.current && 
-          (data?.glossaryCount === 0 && data?.styleRulesCount === 0)) {
-        // Poll a few more times to catch delayed updates
-        return 2000;
-      }
-      // Stop polling otherwise
-      return false;
     },
     // Refetch on window focus to ensure data is fresh
     refetchOnWindowFocus: true,
@@ -93,6 +123,13 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
       }, 2000);
     }
 
+    // Reset failed poll count when status changes from FAILED to something else
+    // Do this BEFORE updating previousStatusRef
+    if (previousStatusRef.current === 'FAILED' && currentStatus !== 'FAILED') {
+      // Status changed from FAILED to something else - reset counter
+      failedPollCountRef.current = 0;
+    }
+    
     // Update ref for next render
     previousStatusRef.current = currentStatus;
   }, [analysis?.status, analysis?.glossaryCount, analysis?.styleRulesCount, documentId, queryClient, refetch]);
@@ -230,17 +267,34 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
   };
 
   if (error) {
+    // Don't show error if we're still loading or if it's a transient error
+    // This prevents white screen during normal operation
+    if (isLoading) {
+      return (
+        <div className="bg-white rounded-lg shadow p-4">
+          <h3 className="text-lg font-semibold text-gray-900 mb-2">Document Analysis</h3>
+          <div className="text-sm text-gray-500">Loading...</div>
+        </div>
+      );
+    }
     return (
       <div className="bg-white rounded-lg shadow p-4">
         <h3 className="text-lg font-semibold text-gray-900 mb-2">Document Analysis</h3>
         <div className="text-sm text-red-600">
           Failed to load analysis: {(error as Error).message}
         </div>
+        <button
+          onClick={() => refetch()}
+          className="mt-2 btn btn-secondary text-sm"
+        >
+          Retry
+        </button>
       </div>
     );
   }
 
-  const status = analysis?.status || 'PENDING';
+  // Safely get status with fallback
+  const status = (analysis?.status || 'PENDING') as AnalysisStatus;
   // Show running state if: status is RUNNING, or mutation is pending (button just clicked)
   const isRunning = status === 'RUNNING' || triggerAnalysisMutation.isPending || forceResetMutation.isPending;
   // Get progress values from analysis data, with fallbacks
@@ -365,19 +419,71 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
                 { stage: 'completed', label: 'Completed' },
               ].map(({ stage, label }) => {
                 const isActive = currentStage === stage;
-                const isCompleted = progressPercentage === 100 || 
-                  (stage === 'completed' && status === 'COMPLETED');
+                
+                // Define stage groups for parallel execution
+                // Glossary stages: fetching, frequency_analysis, ai_glossary, parsing_glossary, lookup_glossary, saving_glossary
+                // Style stages: fetching (shared), ai_style, saving_style
+                const glossaryStages = ['fetching', 'frequency_analysis', 'ai_glossary', 'parsing_glossary', 'lookup_glossary', 'saving_glossary'];
+                const styleStages = ['ai_style', 'saving_style'];
+                
+                // Determine if stage is completed
+                // Use glossaryExtracted and styleRulesExtracted flags for accurate completion detection
+                let isCompleted = false;
+                if (status === 'COMPLETED') {
+                  // All stages are completed
+                  isCompleted = true;
+                } else if (stage === 'completed') {
+                  isCompleted = status === 'COMPLETED';
+                } else {
+                  // Check completion based on stage group and extraction flags
+                  if (glossaryStages.includes(stage)) {
+                    // Glossary stages are completed if glossaryExtracted is true
+                    // OR if we've moved past this stage in the glossary pipeline
+                    const stageIndex = glossaryStages.indexOf(stage);
+                    const currentIndex = currentStage ? glossaryStages.indexOf(currentStage) : -1;
+                    const isInStyleStages = currentStage && styleStages.includes(currentStage);
+                    isCompleted = analysis?.glossaryExtracted || 
+                      (currentIndex > stageIndex && currentIndex !== -1) || 
+                      isInStyleStages;
+                  } else if (styleStages.includes(stage)) {
+                    // Style stages are completed if styleRulesExtracted is true
+                    // OR if we've moved past this stage in the style pipeline
+                    const stageIndex = styleStages.indexOf(stage);
+                    const currentIndex = currentStage ? styleStages.indexOf(currentStage) : -1;
+                    const isInGlossaryStages = currentStage && glossaryStages.includes(currentStage);
+                    isCompleted = analysis?.styleRulesExtracted || 
+                      (currentIndex > stageIndex && currentIndex !== -1) || 
+                      isInGlossaryStages;
+                  } else if (stage === 'fetching') {
+                    // Fetching is shared - completed if either extraction has started
+                    isCompleted = analysis?.glossaryExtracted || analysis?.styleRulesExtracted ||
+                      (currentStage && currentStage !== 'fetching' && currentStage !== 'initializing');
+                  }
+                }
+                
+                // Check if we're waiting for AI API (indicated by "Waiting for" or "Calling" in message)
+                const isWaitingForAI = isActive && 
+                  (currentMessage?.toLowerCase().includes('waiting for') || 
+                   currentMessage?.toLowerCase().includes('calling') ||
+                   currentMessage?.toLowerCase().includes('elapsed') ||
+                   (currentMessage?.toLowerCase().includes('this may take') && (stage === 'ai_glossary' || stage === 'ai_style')));
+                
                 return (
                   <span
                     key={stage}
                     className={`px-2 py-1 rounded text-xs ${
                       isActive
-                        ? 'bg-primary-100 text-primary-800 font-medium'
+                        ? isWaitingForAI
+                          ? 'bg-yellow-100 text-yellow-800 font-medium border-2 border-yellow-400'
+                          : 'bg-primary-100 text-primary-800 font-medium'
                         : isCompleted
-                        ? 'bg-green-100 text-green-800'
+                        ? 'bg-green-100 text-green-800 line-through'
                         : 'bg-gray-100 text-gray-600'
                     }`}
                   >
+                    {isWaitingForAI && (
+                      <span className="inline-block animate-pulse mr-1">⏳</span>
+                    )}
                     {label}
                   </span>
                 );
@@ -415,14 +521,24 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
           </button>
         </div>
       ) : status === 'FAILED' ? (
-        /* Failed View */
+        /* Failed View - but continue checking in case analysis recovers */
         <div className="text-center py-6">
           <div className="text-red-600 mb-4">
             <svg className="mx-auto h-12 w-12" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
           </div>
-          <p className="text-sm text-gray-700 mb-4">Analysis failed. Please try again.</p>
+          <p className="text-sm text-gray-700 mb-2">Analysis encountered an error.</p>
+          {analysis?.currentMessage && (
+            <p className="text-xs text-gray-500 mb-4">{analysis.currentMessage}</p>
+          )}
+          <p className="text-xs text-gray-500 mb-4">
+            Checking if analysis continues in background...
+          </p>
+          <div className="flex items-center justify-center gap-2 mb-4">
+            <div className="inline-block animate-spin rounded-full h-4 w-4 border-2 border-primary-300 border-t-primary-600"></div>
+            <span className="text-xs text-gray-500">Monitoring...</span>
+          </div>
           <button
             onClick={handleStartAnalysis}
             disabled={isRunning}
@@ -438,8 +554,8 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
           <div className="grid grid-cols-2 gap-3">
             <div className="bg-blue-50 rounded-lg p-3">
               <div className="text-xs text-blue-600 font-medium mb-1">Glossary Terms</div>
-              <div className="text-2xl font-bold text-blue-900">{analysis.glossaryCount}</div>
-              {(analysis.approvedCount !== undefined || analysis.candidateCount !== undefined) && (
+              <div className="text-2xl font-bold text-blue-900">{analysis?.glossaryCount ?? 0}</div>
+              {(analysis?.approvedCount !== undefined || analysis?.candidateCount !== undefined) && (
                 <div className="text-xs text-blue-600 mt-1 space-y-0.5">
                   <div className="flex items-center gap-1">
                     <span className="inline-block w-2 h-2 rounded-full bg-green-500"></span>
@@ -454,7 +570,7 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
             </div>
             <div className="bg-purple-50 rounded-lg p-3">
               <div className="text-xs text-purple-600 font-medium mb-1">Style Rules</div>
-              <div className="text-2xl font-bold text-purple-900">{analysis.styleRulesCount}</div>
+              <div className="text-2xl font-bold text-purple-900">{analysis?.styleRulesCount ?? 0}</div>
             </div>
           </div>
 
@@ -463,30 +579,30 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
             <div>
               <h4 className="text-sm font-semibold text-gray-900 mb-2">Style Rules</h4>
               <div className="space-y-2 max-h-96 overflow-y-auto">
-                {analysis.styleRules.map((rule) => (
+                {analysis.styleRules.map((rule, index) => (
                   <div
-                    key={rule.id}
+                    key={rule?.id || `rule-${index}`}
                     className="border border-gray-200 rounded-lg p-3 hover:bg-gray-50 transition-colors"
                   >
                     <div className="flex items-start justify-between mb-1">
                       <div className="flex-1">
                         <div className="text-xs font-medium text-gray-500 uppercase tracking-wide">
-                          {rule.ruleType.replace(/_/g, ' ')}
+                          {rule?.ruleType ? rule.ruleType.replace(/_/g, ' ') : 'Unknown'}
                         </div>
                         <div className="text-sm font-semibold text-gray-900 mt-1">
-                          {rule.pattern}
+                          {rule?.pattern || 'N/A'}
                         </div>
                       </div>
-                      {rule.priority > 50 && (
+                      {rule?.priority && rule.priority > 50 && (
                         <span className="text-xs bg-yellow-100 text-yellow-800 px-2 py-1 rounded">
                           High Priority
                         </span>
                       )}
                     </div>
-                    {rule.description && (
+                    {rule?.description && (
                       <p className="text-xs text-gray-600 mt-2">{rule.description}</p>
                     )}
-                    {rule.examples && Array.isArray(rule.examples) && rule.examples.length > 0 && (
+                    {rule?.examples && Array.isArray(rule.examples) && rule.examples.length > 0 && (
                       <div className="mt-2">
                         <div className="text-xs font-medium text-gray-500 mb-1">Examples:</div>
                         <div className="flex flex-wrap gap-1">
@@ -508,7 +624,7 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
           )}
 
           {/* Empty State for Style Rules */}
-          {analysis.styleRulesCount === 0 && analysis.styleRulesExtracted && (
+          {analysis && (analysis.styleRulesCount ?? 0) === 0 && analysis.styleRulesExtracted && (
             <div className="text-center py-4 text-sm text-gray-500">
               No style rules detected in this document.
             </div>

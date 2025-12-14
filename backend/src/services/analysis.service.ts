@@ -2940,12 +2940,67 @@ export const runFullAnalysis = async (documentId: string, forceReset: boolean = 
     }
 
     // Run both extractions in parallel
-    // CRITICAL: Do NOT catch errors here - let them propagate so the analysis fails properly
-    // This ensures rate limits, API errors, etc. are reported to the user instead of silently returning 0
-    const [glossaryResult, styleRulesResult] = await Promise.all([
+    // CRITICAL: Use Promise.allSettled to allow one to fail while the other continues
+    // This ensures that if one extraction fails (e.g., rate limit), the other can still complete
+    // We'll handle partial failures gracefully and report what succeeded
+    const [glossarySettlement, styleRulesSettlement] = await Promise.allSettled([
       extractGlossary(documentId),
       extractStyleRules(documentId),
     ]);
+    
+    // Extract results from settlements
+    let glossaryResult: { count: number } | null = null;
+    let styleRulesResult: { count: number } | null = null;
+    let hasErrors = false;
+    const errorMessages: string[] = [];
+    
+    if (glossarySettlement.status === 'fulfilled') {
+      glossaryResult = glossarySettlement.value;
+    } else {
+      hasErrors = true;
+      const error = glossarySettlement.reason;
+      const errorMsg = error?.message || 'Unknown error during glossary extraction';
+      errorMessages.push(`Glossary extraction failed: ${errorMsg}`);
+      logger.error(
+        { documentId, error: errorMsg, errorStack: error?.stack },
+        'Glossary extraction failed during full analysis',
+      );
+    }
+    
+    if (styleRulesSettlement.status === 'fulfilled') {
+      styleRulesResult = styleRulesSettlement.value;
+    } else {
+      hasErrors = true;
+      const error = styleRulesSettlement.reason;
+      const errorMsg = error?.message || 'Unknown error during style rules extraction';
+      errorMessages.push(`Style rules extraction failed: ${errorMsg}`);
+      logger.error(
+        { documentId, error: errorMsg, errorStack: error?.stack },
+        'Style rules extraction failed during full analysis',
+      );
+    }
+    
+    // If both failed, throw an error
+    if (!glossaryResult && !styleRulesResult) {
+      throw new Error(`Both extractions failed: ${errorMessages.join('; ')}`);
+    }
+    
+    // If one succeeded and one failed, log warning but continue
+    if (hasErrors) {
+      logger.warn(
+        {
+          documentId,
+          glossarySucceeded: !!glossaryResult,
+          styleRulesSucceeded: !!styleRulesResult,
+          errors: errorMessages,
+        },
+        'Partial analysis completion - one extraction failed but analysis continues',
+      );
+    }
+    
+    // Use results or default to 0 if failed
+    const finalGlossaryResult = glossaryResult || { count: 0 };
+    const finalStyleRulesResult = styleRulesResult || { count: 0 };
 
     // Check for cancellation after parallel execution
     if (isAnalysisCancelled(documentId)) {
@@ -3017,6 +3072,11 @@ export const runFullAnalysis = async (documentId: string, forceReset: boolean = 
     }
 
     // Update status to COMPLETED with actual counts
+    // Include warning about partial failures if any occurred
+    const completionMessage = hasErrors
+      ? `Analysis completed with partial failures: ${finalGlossaryCount} terms (${approvedFinalCount} approved, ${candidateFinalCount} candidate), ${finalStyleRulesCount} style rules. Some extractions may have failed.`
+      : `Analysis completed: ${finalGlossaryCount} terms (${approvedFinalCount} approved, ${candidateFinalCount} candidate), ${finalStyleRulesCount} style rules`;
+    
     await prisma.documentAnalysis.update({
       where: { documentId },
       data: {
@@ -3024,7 +3084,7 @@ export const runFullAnalysis = async (documentId: string, forceReset: boolean = 
         completedAt: new Date(),
         currentStage: 'completed',
         progressPercentage: 100,
-        currentMessage: `Analysis completed: ${finalGlossaryCount} terms (${approvedFinalCount} approved, ${candidateFinalCount} candidate), ${finalStyleRulesCount} style rules`,
+        currentMessage: completionMessage,
       },
     });
 
@@ -3033,10 +3093,14 @@ export const runFullAnalysis = async (documentId: string, forceReset: boolean = 
         documentId,
         glossaryCount: finalGlossaryCount,
         styleRulesCount: finalStyleRulesCount,
-        glossaryCreatedUpdated: glossaryResult.count,
-        styleRulesCreatedUpdated: styleRulesResult.count,
+        glossaryCreatedUpdated: finalGlossaryResult.count,
+        styleRulesCreatedUpdated: finalStyleRulesResult.count,
+        hadErrors: hasErrors,
+        errorMessages: hasErrors ? errorMessages : undefined,
       },
-      'Full document analysis completed',
+      hasErrors 
+        ? 'Full document analysis completed with partial failures' 
+        : 'Full document analysis completed',
     );
 
     return {
