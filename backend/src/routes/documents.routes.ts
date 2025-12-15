@@ -252,7 +252,7 @@ documentRoutes.get(
 documentRoutes.delete(
   '/:documentId/analysis',
   asyncHandler(async (req, res) => {
-    cancelAnalysis(req.params.documentId);
+    await cancelAnalysis(req.params.documentId);
     res.json({ message: 'Analysis cancellation requested' });
   }),
 );

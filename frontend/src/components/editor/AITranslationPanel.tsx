@@ -89,6 +89,7 @@ export default function AITranslationPanel({
   const [isTranslating, setIsTranslating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [translationMetadata, setTranslationMetadata] = useState<any[]>([]);
+  const [modelInfo, setModelInfo] = useState<{ provider?: string; model?: string } | null>(null);
   const [showGlassBox, setShowGlassBox] = useState<boolean>(false);
   const [useCritic, setUseCritic] = useState(false);
   // Blind translation state (control test)
@@ -458,6 +459,14 @@ export default function AITranslationPanel({
                       } else {
                         console.log('No translation metadata in result');
                       }
+                      // Store model information if available
+                      if (data.result._metadata) {
+                        setModelInfo({
+                          provider: data.result._metadata.provider,
+                          model: data.result._metadata.model,
+                        });
+                        console.log('Model used (SSE):', data.result._metadata.provider, data.result._metadata.model);
+                      }
                     }
                     return;
                   }
@@ -516,6 +525,14 @@ export default function AITranslationPanel({
           } else {
             console.log('No translation metadata in result');
           }
+          // Store model information if available
+          if ((result as any)._metadata) {
+            setModelInfo({
+              provider: (result as any)._metadata.provider,
+              model: (result as any)._metadata.model,
+            });
+            console.log('Model used:', (result as any)._metadata.provider, (result as any)._metadata.model);
+          }
         } else {
           // Fallback to direct AI translation if no segmentId
       const result = await aiApi.translate({
@@ -540,6 +557,12 @@ export default function AITranslationPanel({
 
       setTranslation(result.targetText);
           setIsTranslating(false);
+          // Store model information from direct AI translation
+          setModelInfo({
+            provider: result.provider,
+            model: result.model,
+          });
+          console.log('Model used (direct AI):', result.provider, result.model);
         }
       }
     } catch (error: any) {
@@ -1163,7 +1186,14 @@ export default function AITranslationPanel({
       {/* Translation Result */}
       {translation && (
         <div className="mb-4">
-          <label className="block text-sm font-medium text-gray-700 mb-1">Translation:</label>
+          <div className="flex items-center justify-between mb-1">
+            <label className="block text-sm font-medium text-gray-700">Translation:</label>
+            {modelInfo && (
+              <span className="text-xs text-gray-500 font-medium bg-gray-100 px-2 py-1 rounded">
+                {getProviderDisplayName(modelInfo.provider as AIProvider)} • {modelInfo.model}
+              </span>
+            )}
+          </div>
           <div className="bg-blue-50 border border-blue-200 rounded p-3 text-sm text-gray-900 whitespace-pre-wrap">
             {translation}
           </div>

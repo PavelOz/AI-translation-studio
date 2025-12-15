@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { glossaryApi } from '../../api/glossary.api';
 import toast from 'react-hot-toast';
@@ -13,6 +13,7 @@ type GlossaryEntry = {
   targetTerm: string;
   frequency: number;
   status: 'CANDIDATE' | 'APPROVED' | 'DEPRECATED';
+  source: 'global' | 'project' | 'new';
 };
 
 export default function GlossaryReviewTable({ documentId }: GlossaryReviewTableProps) {
@@ -154,7 +155,7 @@ export default function GlossaryReviewTable({ documentId }: GlossaryReviewTableP
           <thead className="bg-gray-50 sticky top-0 z-10">
             <tr>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                Term (Source)
+                Source Term
               </th>
               <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                 Translation (Target)
@@ -185,8 +186,32 @@ export default function GlossaryReviewTable({ documentId }: GlossaryReviewTableP
                   entryStatus === 'APPROVED' ? 'bg-green-50' : ''
                 } ${entryStatus === 'DEPRECATED' ? 'opacity-50' : ''}`}
               >
-                <td className="px-6 py-4 whitespace-nowrap">
-                  <div className="text-sm font-medium text-gray-900">{entry.sourceTerm}</div>
+                <td className="px-6 py-4">
+                  <div className="flex flex-col">
+                    <div className="text-sm font-medium text-gray-900">{entry.sourceTerm}</div>
+                    <div className="text-xs mt-1">
+                      {entry.source === 'global' && (
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-blue-700 bg-blue-100 font-medium">
+                          Global
+                        </span>
+                      )}
+                      {entry.source === 'project' && (
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-purple-700 bg-purple-100 font-medium">
+                          Project
+                        </span>
+                      )}
+                      {entry.source === 'new' && (
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-gray-600 bg-gray-100">
+                          New
+                        </span>
+                      )}
+                      {!entry.source && (
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded text-gray-400 bg-gray-50 italic">
+                          Unknown
+                        </span>
+                      )}
+                    </div>
+                  </div>
                 </td>
                 <td className="px-6 py-4">
                   {editingId === entry.id ? (

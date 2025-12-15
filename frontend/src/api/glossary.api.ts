@@ -90,6 +90,7 @@ export const glossaryApi = {
     targetTerm: string;
     frequency: number;
     status: 'CANDIDATE' | 'APPROVED' | 'DEPRECATED';
+    source: 'global' | 'project' | 'new';
   }>> => {
     const response = await apiClient.get(`/documents/${documentId}/glossary`);
     return response.data;

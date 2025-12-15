@@ -184,7 +184,7 @@ segmentRoutes.post(
             sendProgress,
           );
           
-          // Send final result
+          // Send final result with model information
           res.write(`data: ${JSON.stringify({ 
             stage: 'complete', 
             result: {
@@ -193,6 +193,7 @@ segmentRoutes.post(
               targetFinal: result.targetFinal,
               status: result.status,
               fuzzyScore: result.fuzzyScore,
+              _metadata: (result as any)._metadata, // Include model info if available
             },
             timestamp: new Date().toISOString() 
           })}\n\n`);

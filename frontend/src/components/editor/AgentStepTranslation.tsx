@@ -161,6 +161,8 @@ export default function AgentStepTranslation({
   const [isLoading, setIsLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState('');
   const [modelUsed, setModelUsed] = useState<string>('');
+  const [criticModelUsed, setCriticModelUsed] = useState<string>('');
+  const [fixModelUsed, setFixModelUsed] = useState<string>('');
   const [glossaryCompliance, setGlossaryCompliance] = useState<GlossaryCompliance[]>([]);
 
   // Step 1: Generate Draft
@@ -645,6 +647,7 @@ export default function AgentStepTranslation({
       });
       setCritiqueErrors(result.errors);
       setCritiqueReasoning(result.reasoning);
+      setCriticModelUsed(result.modelUsed || '');
       setStep('critique-analysis');
       if (result.errors.length === 0) {
         toast.success('No errors found!');
@@ -701,6 +704,7 @@ export default function AgentStepTranslation({
         model: aiSettings?.model, // Pass model from project settings
       });
       setFinalText(result.finalText);
+      setFixModelUsed(result.modelUsed || '');
       setStep('final-review');
       toast.success('Translation fixed successfully');
     } catch (error: any) {
@@ -953,15 +957,22 @@ export default function AgentStepTranslation({
                 )}
               </div>
               <div className="ml-3 flex-1">
-                <h3 className={`text-sm font-semibold ${
-                  critiqueErrors.length === 0
-                    ? 'text-green-800'
-                    : critiqueErrors.some(e => e.severity === 'error')
-                    ? 'text-red-800'
-                    : 'text-yellow-800'
-                }`}>
-                  AI Critic's Analysis
-                </h3>
+                <div className="flex items-center justify-between">
+                  <h3 className={`text-sm font-semibold ${
+                    critiqueErrors.length === 0
+                      ? 'text-green-800'
+                      : critiqueErrors.some(e => e.severity === 'error')
+                      ? 'text-red-800'
+                      : 'text-yellow-800'
+                  }`}>
+                    AI Critic's Analysis
+                  </h3>
+                  {criticModelUsed && (
+                    <span className="text-xs text-gray-500 font-medium bg-gray-100 px-2 py-1 rounded">
+                      {criticModelUsed}
+                    </span>
+                  )}
+                </div>
                 {critiqueReasoning && (
                   <p className={`mt-1 text-sm whitespace-pre-wrap ${
                     critiqueErrors.length === 0
@@ -1128,7 +1139,26 @@ export default function AgentStepTranslation({
             </p>
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Final Translation:</label>
+            <div className="flex items-center justify-between mb-2">
+              <label className="block text-sm font-medium text-gray-700">Final Translation:</label>
+              <div className="flex items-center gap-2">
+                {modelUsed && (
+                  <span className="text-xs text-gray-500 font-medium bg-gray-100 px-2 py-1 rounded">
+                    Draft: {modelUsed}
+                  </span>
+                )}
+                {criticModelUsed && (
+                  <span className="text-xs text-gray-500 font-medium bg-gray-100 px-2 py-1 rounded">
+                    Critic: {criticModelUsed}
+                  </span>
+                )}
+                {fixModelUsed && (
+                  <span className="text-xs text-gray-500 font-medium bg-gray-100 px-2 py-1 rounded">
+                    Fix: {fixModelUsed}
+                  </span>
+                )}
+              </div>
+            </div>
             <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-gray-900 whitespace-pre-wrap min-h-[100px]">
               {finalText}
             </div>

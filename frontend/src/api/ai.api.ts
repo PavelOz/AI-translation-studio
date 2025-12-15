@@ -137,7 +137,7 @@ export const aiApi = {
     provider?: string;
     model?: string;
     apiKey?: string;
-  }): Promise<{ errors: Array<{ term: string; expected: string; found: string; severity: string }>; reasoning: string; usage?: any }> => {
+  }): Promise<{ errors: Array<{ term: string; expected: string; found: string; severity: string }>; reasoning: string; modelUsed: string; usage?: any }> => {
     const response = await apiClient.post('/ai/step2-critique', data);
     return response.data;
   },
@@ -155,7 +155,7 @@ export const aiApi = {
     apiKey?: string;
     temperature?: number;
     maxTokens?: number;
-  }): Promise<{ finalText: string; usage?: any }> => {
+  }): Promise<{ finalText: string; modelUsed: string; usage?: any }> => {
     const response = await apiClient.post('/ai/step3-fix', data);
     return response.data;
   },

@@ -56,6 +56,14 @@ export class GeminiProvider extends BaseProvider {
             }
           });
         }
+      } else {
+        // Log non-OK response for debugging
+        const errorText = await v1Response.text().catch(() => 'Could not read error response');
+        logger.debug({
+          status: v1Response.status,
+          statusText: v1Response.statusText,
+          errorText: errorText.substring(0, 200),
+        }, 'v1 API models list request failed (non-critical)');
       }
 
       // Also try v1beta
@@ -75,6 +83,14 @@ export class GeminiProvider extends BaseProvider {
             }
           });
         }
+      } else {
+        // Log non-OK response for debugging
+        const errorText = await v1betaResponse.text().catch(() => 'Could not read error response');
+        logger.debug({
+          status: v1betaResponse.status,
+          statusText: v1betaResponse.statusText,
+          errorText: errorText.substring(0, 200),
+        }, 'v1beta API models list request failed (non-critical)');
       }
 
       logger.info({
@@ -86,8 +102,13 @@ export class GeminiProvider extends BaseProvider {
       }, 'Listed available Gemini models');
 
       return availableModels;
-    } catch (error) {
-      logger.error({ error }, 'Failed to list Gemini models');
+    } catch (error: any) {
+      // Log error details for debugging
+      logger.warn({ 
+        error: error?.message || String(error),
+        errorName: error?.name,
+        errorStack: error?.stack?.substring(0, 500),
+      }, 'Failed to list Gemini models (non-critical, will use fallback models)');
       return [];
     }
   }
@@ -105,8 +126,16 @@ export class GeminiProvider extends BaseProvider {
     let availableModels: Array<{ name: string; supportedMethods: string[] }> = [];
     try {
       availableModels = await this.listAvailableModels();
-    } catch (error) {
-      logger.debug({ error }, 'Could not fetch available models list, will try default attempts');
+      if (availableModels.length === 0) {
+        logger.warn('No models found in available models list, will use fallback models');
+      }
+    } catch (error: any) {
+      // Log error details for debugging
+      logger.warn({ 
+        error: error?.message || error,
+        errorStack: error?.stack,
+      }, 'Could not fetch available models list, will try default attempts');
+      // Continue with fallback models - this is not critical
     }
     
     // Find models that support generateContent
@@ -129,6 +158,14 @@ export class GeminiProvider extends BaseProvider {
     if (model.includes('gemini-1.5-pro')) {
       modelAttempts.push('gemini-1.5-pro-001', 'gemini-1.5-pro-latest');
     }
+    // Add fallbacks for gemini-2.5-pro (may not be available in all regions/API versions)
+    if (model.includes('gemini-2.5-pro') || model.includes('gemini-2.5')) {
+      modelAttempts.push('gemini-1.5-pro', 'gemini-1.5-pro-001', 'gemini-pro');
+    }
+    // Add fallbacks for gemini-2.0 models
+    if (model.includes('gemini-2.0')) {
+      modelAttempts.push('gemini-1.5-pro', 'gemini-1.5-pro-001', 'gemini-pro');
+    }
     
     // 2. Try models from the available list
     supportedModels.forEach(m => {
@@ -137,7 +174,10 @@ export class GeminiProvider extends BaseProvider {
       }
     });
     
-    // 3. Fallback defaults
+    // 3. Fallback defaults (ensure we always have at least one working model)
+    if (!modelAttempts.includes('gemini-1.5-pro')) {
+      modelAttempts.push('gemini-1.5-pro');
+    }
     if (!modelAttempts.includes('gemini-pro')) {
       modelAttempts.push('gemini-pro');
     }
@@ -165,12 +205,25 @@ export class GeminiProvider extends BaseProvider {
         // Determine endpoint based on model
         // All newer models (2.0, 2.5, 3.0) use v1 API
         // Older models use v1beta
+        // Note: gemini-2.5-pro may not be available in all regions/API versions
         let attemptEndpoint = endpoint;
         if (modelAttempt === 'gemini-pro' || (!modelAttempt.includes('2.') && !modelAttempt.includes('3.'))) {
           attemptEndpoint = 'https://generativelanguage.googleapis.com/v1beta/models';
         } else {
           // Newer models (2.0+, 2.5+, 3.0+) use v1 API
           attemptEndpoint = 'https://generativelanguage.googleapis.com/v1/models';
+        }
+        
+        // Special handling: if trying gemini-2.5-pro and it's not in available models, prefer v1 API
+        // but be ready to fallback to gemini-1.5-pro if it fails
+        if (modelAttempt.includes('2.5') && supportedModels.length > 0) {
+          const isAvailable = supportedModels.some(m => m.shortName.includes('2.5'));
+          if (!isAvailable) {
+            logger.debug({
+              modelAttempt,
+              availableModels: supportedModels.map(m => m.shortName),
+            }, 'gemini-2.5-pro not in available models list, will try but may fallback');
+          }
         }
         
         // Use short model name (without models/ prefix) since endpoint already has /models

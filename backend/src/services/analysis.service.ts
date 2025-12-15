@@ -16,9 +16,25 @@ export const isAnalysisCancelled = (documentId: string): boolean => {
 /**
  * Cancel analysis for a document
  */
-export const cancelAnalysis = (documentId: string): void => {
+export const cancelAnalysis = async (documentId: string): Promise<void> => {
   analysisCancellationFlags.add(documentId);
   logger.info({ documentId }, 'Analysis cancellation requested');
+  
+  // Immediately update status in database to reflect cancellation
+  try {
+    await prisma.documentAnalysis.update({
+      where: { documentId },
+      data: {
+        status: 'CANCELLED',
+        currentMessage: 'Analysis cancelled by user',
+        completedAt: new Date(),
+      },
+    });
+    logger.info({ documentId }, 'Analysis status updated to CANCELLED in database');
+  } catch (error: any) {
+    // If analysis doesn't exist yet, that's okay - flag is still set
+    logger.debug({ documentId, error: error.message }, 'Could not update analysis status (may not exist yet)');
+  }
 };
 
 /**
@@ -48,30 +64,33 @@ const cleanJsonOutput = (text: string): string => {
   return cleaned.trim();
 };
 
-/**
- * Helper function to extract frequent terms from text using n-gram analysis
- * Returns phrases (unigrams, bigrams, trigrams) that appear 2+ times
- */
-const extractFrequentTerms = (text: string): string[] => {
-  // Common stop words to filter out
-  const stopWords = new Set([
-    'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
-    'from', 'as', 'is', 'was', 'are', 'were', 'been', 'be', 'have', 'has', 'had', 'do', 'does', 'did',
-    'will', 'would', 'should', 'could', 'may', 'might', 'must', 'can', 'this', 'that', 'these', 'those',
-    'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them',
-    'what', 'which', 'who', 'whom', 'whose', 'where', 'when', 'why', 'how',
-    'if', 'then', 'else', 'because', 'since', 'although', 'though', 'while', 'until', 'unless',
-    'not', 'no', 'yes', 'all', 'each', 'every', 'some', 'any', 'many', 'much', 'more', 'most', 'few', 'little',
-    'very', 'too', 'so', 'such', 'just', 'only', 'also', 'even', 'still', 'yet', 'already',
-    'here', 'there', 'where', 'when', 'why', 'how', 'now', 'then', 'today', 'yesterday', 'tomorrow',
-    'up', 'down', 'out', 'off', 'over', 'under', 'above', 'below', 'through', 'across', 'between', 'among',
-    'about', 'into', 'onto', 'upon', 'within', 'without', 'during', 'before', 'after', 'during',
-    'table', 'of', 'contents', 'page', 'section', 'chapter', 'figure', 'table', 'list', 'item',
-    'report', 'document', 'page', 'section', 'chapter', 'paragraph', 'sentence', 'word',
-  ]);
+// Common stop words to filter out (shared between functions)
+const stopWords = new Set([
+  'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
+  'from', 'as', 'is', 'was', 'are', 'were', 'been', 'be', 'have', 'has', 'had', 'do', 'does', 'did',
+  'will', 'would', 'should', 'could', 'may', 'might', 'must', 'can', 'this', 'that', 'these', 'those',
+  'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them',
+  'what', 'which', 'who', 'whom', 'whose', 'where', 'when', 'why', 'how',
+  'if', 'then', 'else', 'because', 'since', 'although', 'though', 'while', 'until', 'unless',
+  'not', 'no', 'yes', 'all', 'each', 'every', 'some', 'any', 'many', 'much', 'more', 'most', 'few', 'little',
+  'very', 'too', 'so', 'such', 'just', 'only', 'also', 'even', 'still', 'yet', 'already',
+  'here', 'there', 'where', 'when', 'why', 'how', 'now', 'then', 'today', 'yesterday', 'tomorrow',
+  'up', 'down', 'out', 'off', 'over', 'under', 'above', 'below', 'through', 'across', 'between', 'among',
+  'about', 'into', 'onto', 'upon', 'within', 'without', 'during', 'before', 'after', 'during',
+  'table', 'of', 'contents', 'page', 'section', 'chapter', 'figure', 'table', 'list', 'item',
+  'report', 'document', 'page', 'section', 'chapter', 'paragraph', 'sentence', 'word',
+]);
 
-  // Helper function to check if a phrase is relevant
-  const isRelevant = (phrase: string) => {
+/**
+ * Helper function to check if a phrase is relevant for glossary extraction
+ * 
+ * This function filters out garbage terms like "User 4 1" (table artifacts) and "Page 15",
+ * while preserving important acronyms like "HV" (High Voltage) and standard technical terms.
+ * 
+ * @param phrase - The phrase to check
+ * @returns true if the phrase should be included in glossary extraction, false otherwise
+ */
+export const isRelevant = (phrase: string): boolean => {
     // 1. Length check & Acronym Rescue
     if (phrase.length < 3) {
       // RESCUE: Allow if it's a 2-character, all-uppercase acronym
@@ -110,8 +129,13 @@ const extractFrequentTerms = (text: string): string[] => {
     if (/^(user|document|table|row|column|item|entry)\s+\d+/.test(lowerPhrase)) return false;
 
     return true;
-  };
+};
 
+/**
+ * Helper function to extract frequent terms from text using n-gram analysis
+ * Returns phrases (unigrams, bigrams, trigrams) that appear 2+ times
+ */
+const extractFrequentTerms = (text: string): string[] => {
   // Normalize text: lowercase, remove punctuation (keep spaces and alphanumeric)
   const normalized = text
     .toLowerCase()
@@ -508,8 +532,11 @@ const updateProgress = async (
       },
     });
   } catch (error: any) {
-    // Silently fail progress updates - don't break the analysis
-    logger.debug({ documentId, error: error.message }, 'Failed to update progress');
+    // Log progress update failures but don't break the analysis
+    logger.warn(
+      { documentId, stage, percentage, message, error: error.message, stack: error.stack },
+      'Failed to update progress - continuing analysis',
+    );
   }
 };
 
@@ -882,6 +909,11 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
   
   while (attempt < maxRetries) {
     try {
+      // Check for cancellation before each attempt
+      if (isAnalysisCancelled(documentId)) {
+        throw new Error('Analysis cancelled by user');
+      }
+
       attempt++;
       logger.info(
         {
@@ -926,6 +958,20 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
         }, 90000); // 90 second timeout for large documents
       });
 
+      // Cancellation promise - rejects if analysis is cancelled
+      const cancellationPromise = new Promise<never>((_, reject) => {
+        const checkCancellation = setInterval(() => {
+          if (isAnalysisCancelled(documentId)) {
+            clearInterval(checkCancellation);
+            reject(new Error('Analysis cancelled by user'));
+          }
+        }, 1000); // Check every second
+        
+        // Clean up interval when promise resolves/rejects
+        timeoutPromise.catch(() => clearInterval(checkCancellation));
+        aiCallPromise.catch(() => clearInterval(checkCancellation));
+      });
+
       logger.info(
         {
           documentId,
@@ -935,11 +981,18 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
           promptLength: userPrompt.length,
           candidatesCount: termsToSendToAI.length,
         },
-        `Starting AI call for glossary extraction (with 90s timeout)`,
+        `Starting AI call for glossary extraction (with 90s timeout and cancellation check)`,
       );
 
       // Start heartbeat progress updates during AI call
-      const heartbeatInterval = setInterval(async () => {
+      let heartbeatInterval: NodeJS.Timeout | null = null;
+      heartbeatInterval = setInterval(async () => {
+        // Check for cancellation in heartbeat
+        if (isAnalysisCancelled(documentId)) {
+          if (heartbeatInterval) clearInterval(heartbeatInterval);
+          return;
+        }
+        
         const elapsed = Date.now() - aiCallStartTime;
         const elapsedSeconds = Math.floor(elapsed / 1000);
         // Progress from 35% to 40% during AI call (5% range over 90 seconds)
@@ -954,7 +1007,8 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
       }, 2000); // Update every 2 seconds for more frequent feedback
 
       try {
-        aiResponse = await Promise.race([aiCallPromise, timeoutPromise]) as any;
+        // Race between AI call, timeout, and cancellation
+        aiResponse = await Promise.race([aiCallPromise, timeoutPromise, cancellationPromise]) as any;
         clearInterval(heartbeatInterval); // Stop heartbeat when done
         const aiCallDuration = Date.now() - aiCallStartTime;
         
@@ -975,19 +1029,33 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
           },
           `AI call completed successfully`,
         );
-      } catch (timeoutError: any) {
-        clearInterval(heartbeatInterval); // Stop heartbeat on error
+      } catch (error: any) {
+        if (heartbeatInterval) clearInterval(heartbeatInterval); // Stop heartbeat on error
         const aiCallDuration = Date.now() - aiCallStartTime;
+        
+        // If cancelled, throw cancellation error immediately
+        if (error.message?.includes('cancelled')) {
+          logger.info(
+            {
+              documentId,
+              attempt,
+              durationMs: aiCallDuration,
+            },
+            `AI call cancelled by user`,
+          );
+          throw error;
+        }
+        
         logger.error(
           {
             documentId,
             attempt,
             durationMs: aiCallDuration,
-            error: timeoutError.message,
+            error: error.message,
           },
           `AI call failed or timed out`,
         );
-        throw timeoutError;
+        throw error;
       }
 
       responseText = aiResponse.outputText.trim();
@@ -1405,14 +1473,13 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
           }
         }
         
-        // If term is in Global Glossary, treat it as APPROVED regardless of DB status
-        // CANDIDATE status in DB is for internal tracking (newly extracted terms),
-        // but once in global glossary, it should be trusted for document translation
+        // Determine status based on globalEntry.status: PREFERRED -> APPROVED, others -> CANDIDATE
+        const termStatus = globalEntry.status === 'PREFERRED' ? 'APPROVED' : 'CANDIDATE';
         finalTerms.push({
           sourceTerm: globalEntry.sourceTerm,
           targetTerm,
           frequency,
-          status: 'APPROVED', // All terms from global glossary are APPROVED
+          status: termStatus,
           source: 'GLOBAL',
         });
         logger.debug(
@@ -1571,67 +1638,13 @@ Analyze the source text thoroughly and return a JSON array of terms with their f
         continue;
       }
 
-      // Save to Global Glossary as CANDIDATE
-      try {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1335',message:'Before DB save',data:{sourceTerm,targetTerm,targetTermLength:targetTerm.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
-        
-        await prisma.glossaryEntry.create({
-          data: {
-            sourceTerm,
-            targetTerm,
-            sourceLocale: document.sourceLocale,
-            targetLocale: document.targetLocale,
-            direction: `${document.sourceLocale}-${document.targetLocale}`,
-            projectId: null, // Global entry
-            status: 'CANDIDATE',
-          },
-        });
-        
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1260',message:'After DB save',data:{sourceTerm,targetTerm,targetTermLength:targetTerm.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
-        
-        logger.info(
-          { documentId, sourceTerm, targetTerm },
-          'Saved new term to Global Glossary as CANDIDATE',
-        );
-      } catch (createError: any) {
-        // Handle duplicate key error (term might have been added by another process)
-        if (createError.code === 'P2002') {
-          logger.debug(
-            { documentId, sourceTerm },
-            'Term already exists in Global Glossary (race condition)',
-          );
-          // Try to fetch it
-          const existingEntry = await prisma.glossaryEntry.findFirst({
-            where: {
-              projectId: null,
-              sourceTerm: { equals: sourceTerm, mode: 'insensitive' },
-              sourceLocale: document.sourceLocale,
-              targetLocale: document.targetLocale,
-            },
-          });
-          if (existingEntry) {
-            finalTerms.push({
-              sourceTerm: existingEntry.sourceTerm,
-              targetTerm: existingEntry.targetTerm,
-              frequency,
-              status: existingEntry.status === 'PREFERRED' ? 'APPROVED' : 'CANDIDATE',
-              source: 'GLOBAL',
-            });
-            continue;
-          }
-        }
-        logger.warn(
-          { documentId, sourceTerm, error: createError.message },
-          'Failed to save term to Global Glossary, continuing anyway',
-        );
-      }
-
+      // IMPORTANT: Do NOT save to Global Glossary here
+      // Terms should only be saved to Global Glossary when approved in Glossary Review
+      // They are saved to DocumentGlossaryEntry in the merge step below, which is correct
+      // This ensures candidate terms from analysis don't automatically appear in global glossary
+      
       // Note: isNotTranslated check already done above, term already added to finalTerms if not translated
-      // This code path is only reached if translation was successful and saved to DB
+      // This code path is only reached if translation was successful
       // #region agent log
       fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1375',message:'Adding successfully translated term to finalTerms',data:{sourceTerm,targetTerm,source:'AI'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
       // #endregion
@@ -2272,8 +2285,16 @@ Analyze this text and extract all formatting and style rules. Return a JSON arra
   // Call AI with custom systemPrompt and low temperature
   let aiResponse;
   let responseText: string;
+  let heartbeatInterval: NodeJS.Timeout | null = null;
+  
   try {
-    aiResponse = await provider.callModel({
+    // Check for cancellation before AI call
+    if (isAnalysisCancelled(documentId)) {
+      throw new Error('Analysis cancelled by user');
+    }
+
+    const aiCallStartTime = Date.now();
+    const aiCallPromise = provider.callModel({
       prompt: userPrompt,
       systemPrompt,
       model,
@@ -2281,6 +2302,59 @@ Analyze this text and extract all formatting and style rules. Return a JSON arra
       maxTokens: 4096, // Allow for large rule sets
       segments: [], // Not needed for style rule extraction
     });
+
+    // Add timeout for style rules extraction (60 seconds)
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => {
+        reject(new Error('AI call timeout after 60 seconds'));
+      }, 60000);
+    });
+
+    // Cancellation promise - rejects if analysis is cancelled
+    const cancellationPromise = new Promise<never>((_, reject) => {
+      const checkCancellation = setInterval(() => {
+        if (isAnalysisCancelled(documentId)) {
+          clearInterval(checkCancellation);
+          reject(new Error('Analysis cancelled by user'));
+        }
+      }, 1000); // Check every second
+      
+      // Clean up interval when promise resolves/rejects
+      timeoutPromise.catch(() => clearInterval(checkCancellation));
+      aiCallPromise.catch(() => clearInterval(checkCancellation));
+    });
+
+    // Start heartbeat progress updates during AI call
+    heartbeatInterval = setInterval(async () => {
+      // Check for cancellation in heartbeat
+      if (isAnalysisCancelled(documentId)) {
+        if (heartbeatInterval) clearInterval(heartbeatInterval);
+        return;
+      }
+      
+      const elapsed = Date.now() - aiCallStartTime;
+      const elapsedSeconds = Math.floor(elapsed / 1000);
+      await updateProgress(
+        documentId,
+        'ai_style',
+        35,
+        `Waiting for ${provider.name} response... (${elapsedSeconds}s elapsed)`,
+        false,
+      );
+    }, 2000); // Update every 2 seconds
+
+    // Race between AI call, timeout, and cancellation
+    aiResponse = await Promise.race([aiCallPromise, timeoutPromise, cancellationPromise]) as any;
+    
+    if (heartbeatInterval) clearInterval(heartbeatInterval);
+    const aiCallDuration = Date.now() - aiCallStartTime;
+    logger.info(
+      {
+        documentId,
+        durationMs: aiCallDuration,
+      },
+      `AI call for style rules completed successfully`,
+    );
 
     responseText = aiResponse.outputText.trim();
 
@@ -2296,6 +2370,22 @@ Analyze this text and extract all formatting and style rules. Return a JSON arra
     console.log('RAW AI RESPONSE (Style Rules):', responseText);
     console.log('RAW AI RESPONSE LENGTH:', responseText.length);
   } catch (error: any) {
+    // Clean up heartbeat if it exists
+    if (heartbeatInterval) {
+      clearInterval(heartbeatInterval);
+    }
+    
+    // If cancelled, throw cancellation error immediately
+    if (error.message?.includes('cancelled')) {
+      logger.info(
+        {
+          documentId,
+        },
+        `Style rule extraction cancelled by user`,
+      );
+      throw error;
+    }
+    
     logger.error(
       {
         documentId,
@@ -2748,7 +2838,35 @@ Analyze this text and extract all formatting and style rules. Return a JSON arra
     createdCount = rulesToCreate.length;
   }
 
-  // Query actual database count (includes preserved existing rules)
+  // CRITICAL: Delete rules that were not found in the new extraction
+  // This prevents accumulation of old rules that AI no longer extracts
+  const newRuleKeys = new Set(
+    uniqueRules.map((rule) => `${rule.ruleType.toLowerCase()}|${rule.pattern.toLowerCase()}`)
+  );
+  const rulesToDelete = Array.from(existingRulesMap.entries())
+    .filter(([key]) => !newRuleKeys.has(key))
+    .map(([_, rule]) => rule.id);
+
+  let deletedCount = 0;
+  if (rulesToDelete.length > 0) {
+    const deleteResult = await prisma.documentStyleRule.deleteMany({
+      where: {
+        documentId,
+        id: { in: rulesToDelete },
+      },
+    });
+    deletedCount = deleteResult.count;
+    logger.info(
+      {
+        documentId,
+        deletedRulesCount: deletedCount,
+        deletedRuleIds: rulesToDelete,
+      },
+      'Deleted style rules that were not found in new extraction',
+    );
+  }
+
+  // Query actual database count (after merge and cleanup)
   const actualDbCount = await prisma.documentStyleRule.count({
     where: { documentId },
   });
@@ -2756,7 +2874,13 @@ Analyze this text and extract all formatting and style rules. Return a JSON arra
   const result = { count: actualDbCount }; // Return actual DB count
 
   // Update or create DocumentAnalysis record
-  await updateProgress(documentId, 'completed', 100, `Style rule extraction completed: ${actualDbCount} rules (${createdCount} created, ${updatedCount} updated)`, false);
+  await updateProgress(
+    documentId,
+    'completed',
+    100,
+    `Style rule extraction completed: ${actualDbCount} rules (${createdCount} created, ${updatedCount} updated${deletedCount > 0 ? `, ${deletedCount} deleted` : ''})`,
+    false,
+  );
   // CRITICAL: Do NOT set status to COMPLETED here - glossary extraction may still be running in parallel
   // Only update styleRulesExtracted flag and progress, but keep status as RUNNING
   // The final status update will happen in runFullAnalysis after both tasks complete
@@ -2768,14 +2892,14 @@ Analyze this text and extract all formatting and style rules. Return a JSON arra
       styleRulesExtracted: true,
       currentStage: 'saving_style',
       progressPercentage: 85, // Style rules are 50% of the work, so 85% when style rules done
-      currentMessage: `Style rule extraction completed: ${actualDbCount} rules (${createdCount} created, ${updatedCount} updated). Glossary extraction in progress...`,
+      currentMessage: `Style rule extraction completed: ${actualDbCount} rules (${createdCount} created, ${updatedCount} updated${deletedCount > 0 ? `, ${deletedCount} deleted` : ''}). Glossary extraction in progress...`,
     },
     update: {
       // Do NOT change status to COMPLETED - keep it RUNNING until glossary is done
       styleRulesExtracted: true,
       currentStage: 'saving_style',
       progressPercentage: 85, // Style rules are 50% of the work, so 85% when style rules done
-      currentMessage: `Style rule extraction completed: ${actualDbCount} rules (${createdCount} created, ${updatedCount} updated). Glossary extraction in progress...`,
+      currentMessage: `Style rule extraction completed: ${actualDbCount} rules (${createdCount} created, ${updatedCount} updated${deletedCount > 0 ? `, ${deletedCount} deleted` : ''}). Glossary extraction in progress...`,
       // Do NOT set completedAt or change status here
     },
   });
@@ -2816,7 +2940,7 @@ export const runFullAnalysis = async (documentId: string, forceReset: boolean = 
       glossaryExtracted: false,
       styleRulesExtracted: false,
       currentStage: 'initializing',
-      progressPercentage: 0,
+      progressPercentage: 1, // Start at 1% to show activity immediately
       currentMessage: 'Initializing analysis...',
     },
     update: {
@@ -2825,11 +2949,20 @@ export const runFullAnalysis = async (documentId: string, forceReset: boolean = 
       styleRulesExtracted: false,
       completedAt: null,
       currentStage: 'initializing',
-      progressPercentage: 0,
+      progressPercentage: 1, // Start at 1% to show activity immediately
       currentMessage: 'Initializing analysis...',
     },
   });
+  
+  // Log immediately after setting status to help with debugging
+  logger.info(
+    { documentId, forceReset },
+    'Analysis initialized with RUNNING status',
+  );
 
+  // Immediately update progress to show analysis has started
+  await updateProgress(documentId, 'initializing', 1, 'Analysis started, initializing...', true);
+  
   // Get document to access projectId, sourceLocale, targetLocale
   const document = await prisma.document.findUnique({
     where: { id: documentId },
@@ -2957,9 +3090,28 @@ export const runFullAnalysis = async (documentId: string, forceReset: boolean = 
     if (glossarySettlement.status === 'fulfilled') {
       glossaryResult = glossarySettlement.value;
     } else {
-      hasErrors = true;
       const error = glossarySettlement.reason;
       const errorMsg = error?.message || 'Unknown error during glossary extraction';
+      
+      // If cancelled, update status and return immediately
+      if (errorMsg.includes('cancelled')) {
+        await prisma.documentAnalysis.update({
+          where: { documentId },
+          data: {
+            status: 'CANCELLED',
+            completedAt: new Date(),
+            currentMessage: 'Analysis cancelled by user',
+          },
+        });
+        clearAnalysisCancellation(documentId);
+        return {
+          glossaryCount: 0,
+          styleRulesCount: 0,
+          status: 'CANCELLED',
+        };
+      }
+      
+      hasErrors = true;
       errorMessages.push(`Glossary extraction failed: ${errorMsg}`);
       logger.error(
         { documentId, error: errorMsg, errorStack: error?.stack },
@@ -2970,9 +3122,28 @@ export const runFullAnalysis = async (documentId: string, forceReset: boolean = 
     if (styleRulesSettlement.status === 'fulfilled') {
       styleRulesResult = styleRulesSettlement.value;
     } else {
-      hasErrors = true;
       const error = styleRulesSettlement.reason;
       const errorMsg = error?.message || 'Unknown error during style rules extraction';
+      
+      // If cancelled, update status and return immediately
+      if (errorMsg.includes('cancelled')) {
+        await prisma.documentAnalysis.update({
+          where: { documentId },
+          data: {
+            status: 'CANCELLED',
+            completedAt: new Date(),
+            currentMessage: 'Analysis cancelled by user',
+          },
+        });
+        clearAnalysisCancellation(documentId);
+        return {
+          glossaryCount: glossaryResult?.count || 0,
+          styleRulesCount: 0,
+          status: 'CANCELLED',
+        };
+      }
+      
+      hasErrors = true;
       errorMessages.push(`Style rules extraction failed: ${errorMsg}`);
       logger.error(
         { documentId, error: errorMsg, errorStack: error?.stack },
@@ -3366,17 +3537,23 @@ export const getAnalysisResults = async (documentId: string) => {
     });
 
     // Count approved vs candidate terms
+    // IMPORTANT: Terms are considered APPROVED if:
+    // 1. They exist in Global Glossary (projectId: null) with status PREFERRED
+    // 2. They exist in Project Glossary with status PREFERRED
+    // Terms are CANDIDATE if:
+    // 1. They exist in Global Glossary but status is not PREFERRED (CANDIDATE or DEPRECATED)
+    // 2. They exist in Project Glossary but status is not PREFERRED
+    // 3. They only exist in DocumentGlossaryEntry (not yet in global/project glossary)
     let approvedCount = 0;
     let candidateCount = 0;
+    let candidateFromGlobalCount = 0;
     
     if (glossaryEntries.length > 0 && analysis.document) {
       for (const entry of glossaryEntries) {
-        const glossaryEntry = await prisma.glossaryEntry.findFirst({
+        // First check Global Glossary (projectId: null)
+        const globalEntry = await prisma.glossaryEntry.findFirst({
           where: {
-            OR: [
-              { projectId: null },
-              { projectId: analysis.document.projectId || undefined },
-            ],
+            projectId: null, // Global only
             sourceTerm: { equals: entry.sourceTerm, mode: 'insensitive' },
             sourceLocale: analysis.document.sourceLocale,
             targetLocale: analysis.document.targetLocale,
@@ -3384,10 +3561,35 @@ export const getAnalysisResults = async (documentId: string) => {
           select: { status: true },
         });
         
-        if (glossaryEntry?.status === 'PREFERRED') {
-          approvedCount++;
+        if (globalEntry) {
+          // Term exists in Global Glossary
+          if (globalEntry.status === 'PREFERRED') {
+            // Status is PREFERRED - approved
+            approvedCount++;
+          } else {
+            // Status is CANDIDATE or DEPRECATED - candidate from global
+            candidateCount++;
+            candidateFromGlobalCount++;
+          }
         } else {
-          candidateCount++;
+          // Check Project Glossary
+          const projectEntry = await prisma.glossaryEntry.findFirst({
+            where: {
+              projectId: analysis.document.projectId || undefined,
+              sourceTerm: { equals: entry.sourceTerm, mode: 'insensitive' },
+              sourceLocale: analysis.document.sourceLocale,
+              targetLocale: analysis.document.targetLocale,
+            },
+            select: { status: true },
+          });
+          
+          if (projectEntry?.status === 'PREFERRED') {
+            // Term exists in Project Glossary with PREFERRED status - approved
+            approvedCount++;
+          } else {
+            // Term only exists in DocumentGlossaryEntry (not in global/project glossary) - candidate
+            candidateCount++;
+          }
         }
       }
     } else {
@@ -3403,6 +3605,7 @@ export const getAnalysisResults = async (documentId: string) => {
       glossaryCount: glossaryEntries.length,
       approvedCount,
       candidateCount,
+      candidateFromGlobalCount,
       styleRulesCount: styleRules.length,
       currentStage: analysis.currentStage || null,
       progressPercentage: analysis.progressPercentage || 0,
@@ -3488,13 +3691,21 @@ export const getDocumentGlossaryForSegment = async (
       return [];
     }
 
+    // Get projectId for lookup
+    const documentWithProject = await prisma.document.findUnique({
+      where: { id: documentId },
+      select: { projectId: true },
+    });
+
     // Lookup status from GlossaryEntry for each matching term
     const termsWithStatus = await Promise.all(
       matchingTerms.map(async (entry) => {
         // Find matching GlossaryEntry to get status
-        const glossaryEntry = await prisma.glossaryEntry.findFirst({
+        // First check global (projectId: null), then project-specific
+        let glossaryEntry = await prisma.glossaryEntry.findFirst({
           where: {
-            sourceTerm: entry.sourceTerm,
+            projectId: null, // Global first
+            sourceTerm: { equals: entry.sourceTerm, mode: 'insensitive' },
             sourceLocale: document.sourceLocale,
             targetLocale: document.targetLocale,
           },
@@ -3502,6 +3713,21 @@ export const getDocumentGlossaryForSegment = async (
             status: true,
           },
         });
+
+        // If not found in global, check project-specific
+        if (!glossaryEntry && documentWithProject?.projectId) {
+          glossaryEntry = await prisma.glossaryEntry.findFirst({
+            where: {
+              projectId: documentWithProject.projectId,
+              sourceTerm: { equals: entry.sourceTerm, mode: 'insensitive' },
+              sourceLocale: document.sourceLocale,
+              targetLocale: document.targetLocale,
+            },
+            select: {
+              status: true,
+            },
+          });
+        }
 
         const status = glossaryEntry?.status || 'CANDIDATE';
 

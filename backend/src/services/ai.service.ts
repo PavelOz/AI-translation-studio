@@ -476,7 +476,10 @@ const buildAiContext = async (
         if (vectorResults.length > 0) {
           const vectorIds = vectorResults.map(r => r.id);
           const fullEntries = await prisma.glossaryEntry.findMany({
-            where: { id: { in: vectorIds } },
+            where: { 
+              id: { in: vectorIds },
+              status: { not: 'DEPRECATED' }, // Exclude deprecated terms
+            },
             select: {
               id: true,
               sourceTerm: true,
@@ -486,6 +489,7 @@ const buildAiContext = async (
               isForbidden: true,
               notes: true,
               contextRules: true,
+              status: true, // Include status for filtering
             },
           });
           
@@ -494,7 +498,7 @@ const buildAiContext = async (
           glossaryEntries = vectorIds
             .map(id => entriesMap.get(id))
             .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined)
-            .map(({ id, ...rest }) => rest); // Remove id field to match expected type
+            .map(({ id, status, ...rest }) => rest); // Remove id and status fields to match expected type
 
           logger.debug({
             sourceText: sourceText.substring(0, 50),
@@ -519,7 +523,10 @@ const buildAiContext = async (
   if (glossaryEntries.length === 0) {
     logger.debug('Using fallback: traditional search with take: 200');
     glossaryEntries = await prisma.glossaryEntry.findMany({
-      where: { OR: [{ projectId }, { projectId: null }] },
+      where: { 
+        OR: [{ projectId }, { projectId: null }],
+        status: { not: 'DEPRECATED' }, // Exclude deprecated terms
+      },
       orderBy: { createdAt: 'desc' },
       take: 200,
       select: { sourceTerm: true, targetTerm: true, sourceLocale: true, targetLocale: true, isForbidden: true, notes: true, contextRules: true },
@@ -921,6 +928,7 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
   let translationText: string | undefined;
   let fuzzyScore: number | null = null;
   let bestTmEntryId: string | null = null;
+  let aiResult: { targetText: string; provider: string; model: string; confidence: number; usage?: any } | null = null;
   const metadata: TranslationMetadata[] = [];
 
   // Priority 1: Check for direct TM match (≥70%)
@@ -1121,7 +1129,30 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
       },
     });
 
-    const aiResult = await orchestrator.translateSingleSegment(
+    // Calculate dynamic maxTokens based on source text length
+    // Rule of thumb: 1 token ≈ 4 characters, translation needs 2-3x input tokens
+    // Add buffer for prompt, glossary, examples, etc.
+    const sourceTextLength = segment.sourceText.length;
+    const estimatedInputTokens = Math.ceil(sourceTextLength / 4);
+    // Translation typically needs 1.5-2x input tokens, plus buffer for prompt/context
+    const calculatedMaxTokens = Math.max(
+      Math.ceil(estimatedInputTokens * 2.5) + 1000, // 2.5x for translation + 1000 for prompt/context
+      context.settings?.maxTokens ?? 2048 // Minimum 2048 (increased from 1024)
+    );
+    // Cap at reasonable maximum (8192 for most models, 32768 for larger models)
+    const maxTokens = Math.min(calculatedMaxTokens, 8192);
+
+    logger.info({
+      provider: context.settings?.provider,
+      model: context.settings?.model,
+      sourceTextLength,
+      estimatedInputTokens,
+      calculatedMaxTokens,
+      finalMaxTokens: maxTokens,
+      source: 'translateSegment:before-translateSingleSegment',
+    }, 'translateSegment: Calling translateSingleSegment with dynamic maxTokens');
+
+    aiResult = await orchestrator.translateSingleSegment(
       buildOrchestratorSegment(segment, previous, next, segment.document.name),
       {
         provider: context.settings?.provider,
@@ -1140,7 +1171,7 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
         sourceLocale: segment.document.sourceLocale, // Pass explicit source locale from document
         targetLocale: segment.document.targetLocale, // Pass explicit target locale from document
         temperature: context.settings?.temperature ?? 0.2,
-        maxTokens: context.settings?.maxTokens ?? 1024,
+        maxTokens,
         glossaryMode, // Pass glossary mode to orchestrator
       },
     );
@@ -1166,6 +1197,15 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
 
   // Add metadata to the response (extend the Segment type in the API response)
   (updatedSegment as any).translationMetadata = metadata.sort((a, b) => a.priority - b.priority);
+  
+  // Add model information to the response if AI was used
+  if (aiResult) {
+    (updatedSegment as any)._metadata = {
+      provider: aiResult.provider,
+      model: aiResult.model,
+      usage: aiResult.usage,
+    };
+  }
 
   return updatedSegment;
 };
@@ -1303,11 +1343,28 @@ export const runSegmentMachineTranslationWithCritic = async (
     );
   }
 
+  // Calculate dynamic maxTokens based on source text length
+  // Rule of thumb: 1 token ≈ 4 characters, translation needs 2-3x input tokens
+  // Add buffer for prompt, glossary, examples, etc.
+  const sourceTextLength = segment.sourceText.length;
+  const estimatedInputTokens = Math.ceil(sourceTextLength / 4);
+  // Translation typically needs 1.5-2x input tokens, plus buffer for prompt/context
+  const calculatedMaxTokens = Math.max(
+    Math.ceil(estimatedInputTokens * 2.5) + 1000, // 2.5x for translation + 1000 for prompt/context
+    context.settings?.maxTokens ?? 2048 // Minimum 2048 (increased from 1024)
+  );
+  // Cap at reasonable maximum (8192 for most models, 32768 for larger models)
+  const maxTokens = Math.min(calculatedMaxTokens, 8192);
+
   logger.info({
     provider: context.settings?.provider,
     model: context.settings?.model,
+    sourceTextLength,
+    estimatedInputTokens,
+    calculatedMaxTokens,
+    finalMaxTokens: maxTokens,
     source: 'translateSegment:before-translateWithCritic',
-  }, 'translateSegment: Calling translateWithCritic with provider and model');
+  }, 'translateSegment: Calling translateWithCritic with dynamic maxTokens');
 
   const aiResult = await orchestrator.translateWithCritic(
     buildOrchestratorSegment(segment, previous, next, segment.document.name),
@@ -1323,7 +1380,7 @@ export const runSegmentMachineTranslationWithCritic = async (
       sourceLocale: segment.document.sourceLocale, // Pass explicit source locale from document
       targetLocale: segment.document.targetLocale, // Pass explicit target locale from document
       temperature: context.settings?.temperature ?? 0.2,
-      maxTokens: context.settings?.maxTokens ?? 1024,
+      maxTokens,
       glossaryMode,
       // Stage 2: Document-specific context (only if not ignoring context)
       documentGlossary: !options?.ignoreContext && documentGlossary.length > 0 ? documentGlossary : undefined,
@@ -1352,7 +1409,16 @@ export const runSegmentMachineTranslationWithCritic = async (
     include: { document: true },
   });
 
-  return updatedSegment;
+  // Add model information to the response (extend the segment object)
+  return {
+    ...updatedSegment,
+    // Add model info as metadata (not stored in DB, but returned in API)
+    _metadata: {
+      provider: aiResult.provider,
+      model: aiResult.model,
+      usage: aiResult.usage,
+    },
+  } as typeof updatedSegment & { _metadata: { provider: string; model: string; usage?: any } };
 };
 
 export const runDocumentMachineTranslation = async (

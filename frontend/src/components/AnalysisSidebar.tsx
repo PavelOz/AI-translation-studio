@@ -16,6 +16,9 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
   // Track if we've seen a completion to ensure we refetch final counts
   const hasSeenCompletionRef = useRef(false);
   
+  // Track failed poll count for FAILED status polling
+  const failedPollCountRef = useRef(0);
+  
   // Fetch analysis status and results
   const { data: analysis, isLoading, error, refetch } = useQuery({
     queryKey: ['analysis', documentId],
@@ -26,9 +29,11 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
         const currentStatus = data?.status;
         
         // Poll every 2 seconds if analysis is running
-        if (currentStatus === 'RUNNING') {
+        // Also poll if data is not yet loaded (might be starting)
+        if (currentStatus === 'RUNNING' || !data) {
           hasSeenCompletionRef.current = false;
           failedPollCountRef.current = 0;
+          console.log('Polling: RUNNING or no data, will poll in 2s', { currentStatus, hasData: !!data });
           return 2000;
         }
         
@@ -139,13 +144,27 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
     mutationFn: () => analysisApi.triggerAnalysis(documentId),
     onSuccess: () => {
       toast.success('Analysis started! This may take a moment...');
+      console.log('Analysis started, invalidating queries and starting polling');
       // Immediately invalidate glossary queries (data is being flushed on backend)
       queryClient.invalidateQueries({ queryKey: ['document-glossary', documentId] }); // GlossaryReviewTable
       queryClient.invalidateQueries({ queryKey: ['glossary', documentId] }); // DocumentGlossary component
       // Immediately invalidate analysis query and start polling
       queryClient.invalidateQueries({ queryKey: ['analysis', documentId] });
       // Start refetching immediately and continue polling
-      setTimeout(() => refetch(), 500); // Small delay to let backend set status
+      // Refetch multiple times to ensure we catch the RUNNING status
+      setTimeout(() => {
+        console.log('First refetch after analysis start');
+        void refetch().then((result) => {
+          console.log('First refetch result:', { status: result.data?.status, progress: result.data?.progressPercentage });
+        });
+        // Refetch again after a short delay to ensure status is updated
+        setTimeout(() => {
+          console.log('Second refetch after analysis start');
+          void refetch().then((result) => {
+            console.log('Second refetch result:', { status: result.data?.status, progress: result.data?.progressPercentage });
+          });
+        }, 1000);
+      }, 300); // Smaller delay to catch status faster
     },
     onError: (error: any) => {
       toast.error(`Failed to start analysis: ${error.response?.data?.message || error.message || 'Unknown error'}`);
@@ -315,9 +334,12 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
         styleRulesCount: analysis.styleRulesCount,
         currentMessage: analysis.currentMessage,
         currentStage: analysis.currentStage,
+        timestamp: new Date().toISOString(),
       });
+    } else {
+      console.log('Analysis data is null/undefined', { isLoading, error, timestamp: new Date().toISOString() });
     }
-  }, [analysis]);
+  }, [analysis, isLoading, error]);
 
   return (
     <div className="bg-white rounded-lg shadow p-4">

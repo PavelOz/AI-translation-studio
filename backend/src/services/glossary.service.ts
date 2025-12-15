@@ -1099,6 +1099,7 @@ export const listDocumentGlossary = async (documentId: string) => {
       documentEntries.map(async (entry) => {
         // Try to find matching GlossaryEntry (first check global, then project)
         let glossaryStatus: string | undefined = undefined;
+        let source: 'global' | 'project' | 'new' = 'new';
         
         try {
           // First, try exact match with case-insensitive locales
@@ -1141,6 +1142,7 @@ export const listDocumentGlossary = async (documentId: string) => {
 
           if (glossaryEntry && glossaryEntry.status) {
             glossaryStatus = glossaryEntry.status;
+            source = 'global';
             logger.debug(
               { 
                 documentId, 
@@ -1192,6 +1194,7 @@ export const listDocumentGlossary = async (documentId: string) => {
             
             if (projectEntry && projectEntry.status) {
               glossaryStatus = projectEntry.status;
+              source = 'project';
               logger.debug(
                 { documentId, sourceTerm: entry.sourceTerm, foundStatus: glossaryStatus },
                 'Found matching project glossary entry',
@@ -1205,6 +1208,7 @@ export const listDocumentGlossary = async (documentId: string) => {
             'Failed to lookup glossary entry status, defaulting to CANDIDATE',
           );
           glossaryStatus = undefined;
+          source = 'new';
         }
 
         // Map status: PREFERRED -> APPROVED, CANDIDATE -> CANDIDATE, DEPRECATED -> DEPRECATED
@@ -1246,6 +1250,7 @@ export const listDocumentGlossary = async (documentId: string) => {
           targetTerm: entry.targetTerm,
           frequency,
           status,
+          source,
         };
       }),
     );
@@ -1292,7 +1297,10 @@ export const updateDocumentGlossaryEntry = async (
   const { document } = documentEntry;
 
   // Find or create the corresponding GlossaryEntry
-  // First check global (projectId: null)
+  // When approving (PREFERRED), we want to save to Global Glossary (projectId: null)
+  // When rejecting (DEPRECATED) or setting to CANDIDATE, we can save to project scope
+  
+  // First check global (projectId: null) - this is where approved terms should be
   let glossaryEntry = await prisma.glossaryEntry.findFirst({
     where: {
       projectId: null,
@@ -1317,6 +1325,12 @@ export const updateDocumentGlossaryEntry = async (
   // If still not found, create a new GlossaryEntry
   if (!glossaryEntry) {
     const statusToSave = data.status === 'CANDIDATE' ? 'CANDIDATE' : data.status || 'CANDIDATE';
+    
+    // IMPORTANT: Only create in Global Glossary when approving (PREFERRED)
+    // CANDIDATE and DEPRECATED terms should NOT be in global glossary
+    // They remain only in DocumentGlossaryEntry until approved
+    const projectIdToUse = data.status === 'PREFERRED' ? null : document.projectId;
+    
     glossaryEntry = await prisma.glossaryEntry.create({
       data: {
         sourceTerm: documentEntry.sourceTerm,
@@ -1324,15 +1338,63 @@ export const updateDocumentGlossaryEntry = async (
         sourceLocale: document.sourceLocale,
         targetLocale: document.targetLocale,
         direction: `${document.sourceLocale}-${document.targetLocale}`,
-        projectId: document.projectId, // Create in project scope
+        projectId: projectIdToUse,
         status: statusToSave as any,
       },
     });
+    
+    // Log when creating in global glossary (only on approval)
+    if (projectIdToUse === null) {
+      logger.info(
+        {
+          documentId: documentEntry.documentId,
+          sourceTerm: documentEntry.sourceTerm,
+          targetTerm: data.targetTerm || documentEntry.targetTerm,
+        },
+        'Created term in Global Glossary after approval in Glossary Review',
+      );
+    } else {
+      logger.debug(
+        {
+          documentId: documentEntry.documentId,
+          sourceTerm: documentEntry.sourceTerm,
+          status: statusToSave,
+        },
+        'Created term in project glossary (not approved yet, will move to global on approval)',
+      );
+    }
   } else {
     // Update existing GlossaryEntry
     const updateData: any = {};
     if (data.status !== undefined) {
       updateData.status = data.status === 'CANDIDATE' ? 'CANDIDATE' : data.status;
+      
+      // If approving (PREFERRED) and entry is in project scope, move to global scope
+      if (data.status === 'PREFERRED' && glossaryEntry.projectId !== null) {
+        updateData.projectId = null; // Move to global
+        logger.info(
+          {
+            documentId: documentEntry.documentId,
+            sourceTerm: documentEntry.sourceTerm,
+            previousProjectId: glossaryEntry.projectId,
+          },
+          'Moving term from project to Global Glossary after approval',
+        );
+      }
+      
+      // If rejecting (DEPRECATED) or setting to CANDIDATE and entry is in global scope, move to project scope
+      // This ensures rejected/candidate terms don't remain in global glossary
+      if ((data.status === 'DEPRECATED' || data.status === 'CANDIDATE') && glossaryEntry.projectId === null) {
+        updateData.projectId = document.projectId; // Move to project scope
+        logger.info(
+          {
+            documentId: documentEntry.documentId,
+            sourceTerm: documentEntry.sourceTerm,
+            status: data.status,
+          },
+          'Moving term from Global Glossary to project scope (rejected or set to candidate)',
+        );
+      }
     }
     if (data.targetTerm !== undefined) {
       updateData.targetTerm = data.targetTerm;

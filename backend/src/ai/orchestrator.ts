@@ -627,11 +627,35 @@ export class AIOrchestrator {
             }, 'YandexGPT translation request');
           }
           
+          // Calculate dynamic maxTokens for batch if not explicitly set
+          let maxTokens = options.maxTokens;
+          if (!maxTokens || maxTokens < 2048) {
+            // For batch, use the longest segment
+            const longestSegment = job.segments.reduce((longest, seg) => 
+              seg.sourceText.length > longest.sourceText.length ? seg : longest,
+              job.segments[0]
+            );
+            const sourceTextLength = longestSegment.sourceText.length;
+            const estimatedInputTokens = Math.ceil(sourceTextLength / 4);
+            const calculatedMaxTokens = Math.max(
+              Math.ceil(estimatedInputTokens * 2.5) + 1000,
+              2048 // Minimum 2048
+            );
+            maxTokens = Math.min(calculatedMaxTokens, 8192);
+            logger.debug({
+              batchSize: job.segments.length,
+              longestSegmentLength: sourceTextLength,
+              estimatedInputTokens,
+              calculatedMaxTokens,
+              finalMaxTokens: maxTokens,
+            }, 'translateSegments: Calculated dynamic maxTokens for batch');
+          }
+          
           const response = await provider.callModel({
             prompt,
             model,
             temperature: options.temperature ?? 0.2,
-            maxTokens: options.maxTokens ?? 1024,
+            maxTokens,
             segments: job.segments.map((segment) => ({ segmentId: segment.segmentId, sourceText: segment.sourceText })),
           });
           
@@ -682,8 +706,27 @@ export class AIOrchestrator {
     segment: OrchestratorSegment,
     options: Omit<TranslateSegmentsOptions, 'segments'>,
   ): Promise<OrchestratorResult> {
+    // Calculate dynamic maxTokens for single segment if not explicitly set
+    let maxTokens = options.maxTokens;
+    if (!maxTokens || maxTokens < 2048) {
+      const sourceTextLength = segment.sourceText.length;
+      const estimatedInputTokens = Math.ceil(sourceTextLength / 4);
+      const calculatedMaxTokens = Math.max(
+        Math.ceil(estimatedInputTokens * 2.5) + 1000,
+        2048 // Minimum 2048
+      );
+      maxTokens = Math.min(calculatedMaxTokens, 8192);
+      logger.debug({
+        sourceTextLength,
+        estimatedInputTokens,
+        calculatedMaxTokens,
+        finalMaxTokens: maxTokens,
+      }, 'translateSingleSegment: Calculated dynamic maxTokens');
+    }
+    
     const [result] = await this.translateSegments({
       ...options,
+      maxTokens,
       segments: [segment],
     });
     if (!result) {
@@ -707,10 +750,29 @@ export class AIOrchestrator {
     const provider = getProvider(options.provider, options.apiKey, options.yandexFolderId);
     const model = options.model ?? provider.defaultModel;
 
-    logger.info({ sourceLength: sourceText.length }, 'Step 1: Generating Draft');
+    // Calculate dynamic maxTokens for draft generation
+    let maxTokens = options.maxTokens;
+    if (!maxTokens || maxTokens < 2048) {
+      const sourceTextLength = sourceText.length;
+      const estimatedInputTokens = Math.ceil(sourceTextLength / 4);
+      const calculatedMaxTokens = Math.max(
+        Math.ceil(estimatedInputTokens * 2.5) + 1000,
+        2048 // Minimum 2048
+      );
+      maxTokens = Math.min(calculatedMaxTokens, 8192);
+      logger.debug({
+        sourceTextLength,
+        estimatedInputTokens,
+        calculatedMaxTokens,
+        finalMaxTokens: maxTokens,
+      }, 'generateDraft: Calculated dynamic maxTokens');
+    }
+
+    logger.info({ sourceLength: sourceText.length, maxTokens }, 'Step 1: Generating Draft');
 
     const [result] = await this.translateSegments({
       ...options,
+      maxTokens,
       segments: [{ segmentId: 'draft', sourceText }],
     });
 
@@ -740,6 +802,7 @@ export class AIOrchestrator {
   ): Promise<{
     errors: Array<{ term: string; expected: string; found: string; severity: string }>;
     reasoning: string;
+    modelUsed: string;
     usage?: ProviderUsage;
   }> {
     const provider = getProvider(options.provider, options.apiKey, options.yandexFolderId);
@@ -1116,7 +1179,7 @@ export class AIOrchestrator {
       errors = [];
     }
 
-    return { errors, reasoning, usage: response.usage };
+    return { errors, reasoning, modelUsed: model, usage: response.usage };
   }
 
   /**
@@ -1191,11 +1254,14 @@ export class AIOrchestrator {
     draftText: string,
     errors: Array<{ term: string; expected: string; found: string; severity: string }>,
     options: { provider?: string; model?: string; apiKey?: string; yandexFolderId?: string; temperature?: number; maxTokens?: number; glossary?: OrchestratorGlossaryEntry[]; sourceLocale?: string; targetLocale?: string },
-  ): Promise<{ finalText: string; usage?: ProviderUsage }> {
+  ): Promise<{ finalText: string; modelUsed: string; usage?: ProviderUsage }> {
+    const provider = getProvider(options.provider, options.apiKey, options.yandexFolderId);
+    const model = options.model ?? provider.defaultModel;
+    
     // Validate errors array
     if (!errors || errors.length === 0) {
       logger.warn('fixTranslation called with empty errors array, returning draft as-is');
-      return { finalText: draftText };
+      return { finalText: draftText, modelUsed: model };
     }
     
     // Filter out invalid errors
@@ -1207,7 +1273,7 @@ export class AIOrchestrator {
     
     if (validErrors.length === 0) {
       logger.warn('fixTranslation: All errors were invalid, returning draft as-is');
-      return { finalText: draftText };
+      return { finalText: draftText, modelUsed: model };
     }
     
     logger.debug({
@@ -1215,9 +1281,6 @@ export class AIOrchestrator {
       validErrors: validErrors.length,
       errors: validErrors.map(e => ({ term: e.term, expected: e.expected, found: e.found })),
     }, 'fixTranslation: Starting to fix errors');
-    
-    const provider = getProvider(options.provider, options.apiKey, options.yandexFolderId);
-    const model = options.model ?? provider.defaultModel;
     
     // Get language information
     const sourceLocale = options.sourceLocale ?? 'ru';
@@ -1280,8 +1343,30 @@ export class AIOrchestrator {
     ].join('\n');
 
     // Editor/Fix prompts can be long (source text + draft + glossary + error list)
-    // Use higher maxTokens to ensure complete responses
-    const editorMaxTokens = options.maxTokens ? Math.max(options.maxTokens, 2048) : 2048;
+    // Calculate dynamic maxTokens based on total input length
+    let editorMaxTokens = options.maxTokens;
+    if (!editorMaxTokens || editorMaxTokens < 2048) {
+      const sourceTextLength = sourceText.length;
+      const draftTextLength = draftText.length;
+      const totalLength = sourceTextLength + draftTextLength;
+      const estimatedInputTokens = Math.ceil(totalLength / 4);
+      const calculatedMaxTokens = Math.max(
+        Math.ceil(estimatedInputTokens * 2.5) + 1000, // 2.5x for translation + buffer
+        2048 // Minimum 2048
+      );
+      editorMaxTokens = Math.min(calculatedMaxTokens, 8192);
+      logger.debug({
+        sourceTextLength,
+        draftTextLength,
+        totalLength,
+        estimatedInputTokens,
+        calculatedMaxTokens,
+        finalMaxTokens: editorMaxTokens,
+      }, 'fixTranslation: Calculated dynamic maxTokens');
+    } else {
+      // Ensure minimum 2048 even if explicitly set
+      editorMaxTokens = Math.max(editorMaxTokens, 2048);
+    }
     
     logger.debug({
       promptLength: prompt.length,
@@ -1313,7 +1398,7 @@ export class AIOrchestrator {
       
       if (!final || final.length === 0) {
         logger.warn('fixTranslation: Response is empty after trim, returning draft');
-        return { finalText: draftText, usage: response.usage };
+        return { finalText: draftText, modelUsed: model, usage: response.usage };
       }
       
       // Try to parse as JSON array (AI sometimes returns this format)
@@ -1375,7 +1460,7 @@ export class AIOrchestrator {
 
       if (!final || final.length === 0) {
         logger.warn('fixTranslation: Final text is empty after processing, returning draft');
-        return { finalText: draftText, usage: response.usage };
+        return { finalText: draftText, modelUsed: model, usage: response.usage };
       }
 
       logger.debug({
@@ -1384,7 +1469,7 @@ export class AIOrchestrator {
         hadMockMarker: response.outputText.includes('synthetic translation'),
       }, 'fixTranslation: Successfully fixed translation');
 
-      return { finalText: final, usage: response.usage };
+      return { finalText: final, modelUsed: model, usage: response.usage };
     } catch (error) {
       logger.error({
         error: error instanceof Error ? error.message : String(error),
@@ -1394,7 +1479,7 @@ export class AIOrchestrator {
       
       // Return draft as fallback instead of throwing
       logger.warn('fixTranslation: Returning draft as fallback due to error');
-      return { finalText: draftText };
+      return { finalText: draftText, modelUsed: model };
     }
   }
 
@@ -1531,6 +1616,29 @@ export class AIOrchestrator {
     // 3. Fix (if needed)
     if (critique.errors.length > 0) {
         onProgress?.('editor', `Fixing ${critique.errors.length} error(s)...`);
+        
+        // Calculate dynamic maxTokens for fix step (needs to handle source + draft + errors)
+        let fixMaxTokens = options.maxTokens;
+        if (!fixMaxTokens || fixMaxTokens < 2048) {
+          const sourceTextLength = segment.sourceText.length;
+          const draftTextLength = draft.draftText.length;
+          const totalLength = sourceTextLength + draftTextLength;
+          const estimatedInputTokens = Math.ceil(totalLength / 4);
+          const calculatedMaxTokens = Math.max(
+            Math.ceil(estimatedInputTokens * 2.5) + 1000,
+            2048 // Minimum 2048
+          );
+          fixMaxTokens = Math.min(calculatedMaxTokens, 8192);
+          logger.debug({
+            sourceTextLength,
+            draftTextLength,
+            totalLength,
+            estimatedInputTokens,
+            calculatedMaxTokens,
+            finalMaxTokens: fixMaxTokens,
+          }, 'translateWithCritic: Calculated dynamic maxTokens for fix step');
+        }
+        
         const fixed = await this.fixTranslation(
             segment.sourceText, 
             draft.draftText, 
@@ -1541,7 +1649,7 @@ export class AIOrchestrator {
                 apiKey: options.apiKey,
                 yandexFolderId: options.yandexFolderId,
                 temperature: options.temperature,
-                maxTokens: options.maxTokens,
+                maxTokens: fixMaxTokens,
                 glossary: options.glossary,
                 sourceLocale: options.sourceLocale,
                 targetLocale: options.targetLocale,
