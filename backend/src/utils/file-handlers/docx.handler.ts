@@ -2817,10 +2817,16 @@ export class DocxHandler implements FileHandler {
       likelySentenceSegmented: boolean;
       processedParagraphs: { value: number };
       namespace: string;
+      consecutiveFailures?: { value: number }; // Track consecutive verification failures
     }
   ): void {
     const elementIndex = context.elementIndex.value;
     let segmentIndex = context.segmentIndex.value;
+    
+    // Initialize consecutiveFailures counter if not present
+    if (!context.consecutiveFailures) {
+      context.consecutiveFailures = { value: 0 };
+    }
     
     // Skip table of contents paragraphs
     const isTOC = this.isTableOfContentsParagraphDOM(paraElement, elementIndex);
@@ -2861,7 +2867,7 @@ export class DocxHandler implements FileHandler {
     if (segment) {
       // Get source text from segment - try segment.text first, then fallback to metadata
       let segmentText = '';
-      const segmentMetadata = segment.metadata as any;
+      const segmentMetadata = (segment as any).metadata as any;
       
       // Try segment.text directly (if available)
       if ((segment as any).text) {
@@ -2894,21 +2900,112 @@ export class DocxHandler implements FileHandler {
         const normalizedSegmentText = this.normalizeText(plainSegmentText);
         
         if (normalizedDomText !== normalizedSegmentText) {
-          // Mismatch detected - log warning and skip this node
-          logger.warn({
-            message: '[Mismatch] DOM text does not match segment text',
-            elementIndex,
-            segmentIndex,
-            domText: paraText.substring(0, 200),
-            segmentText: segmentText.substring(0, 200),
-            plainSegmentText: plainSegmentText.substring(0, 200),
-            normalizedDomText: normalizedDomText.substring(0, 200),
-            normalizedSegmentText: normalizedSegmentText.substring(0, 200),
-          });
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:2847',message:'[Mismatch] DOM: "..." vs Segment: "..."',data:{elementIndex,segmentIndex,domText:paraText.substring(0,200),segmentText:segmentText.substring(0,200),plainSegmentText:plainSegmentText.substring(0,200),normalizedDomText:normalizedDomText.substring(0,200),normalizedSegmentText:normalizedSegmentText.substring(0,200),skipped:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'MISMATCH'})}).catch(()=>{});
-          // #endregion
-          return; // Skip this node - don't increment segmentIndex, continue traversal to find correct match
+          // Mismatch detected - try to find matching segment by searching forward
+          context.consecutiveFailures!.value++;
+          
+          // If we have too many consecutive failures, increment segmentIndex to avoid getting stuck
+          if (context.consecutiveFailures!.value >= 3) {
+            logger.warn({
+              message: '[Mismatch] Too many consecutive failures, incrementing segmentIndex to avoid cascade',
+              elementIndex,
+              segmentIndex,
+              consecutiveFailures: context.consecutiveFailures!.value,
+            });
+            // #region agent log
+            fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:2908',message:'[Mismatch] Cascade prevention - incrementing segmentIndex',data:{elementIndex,segmentIndex,consecutiveFailures:context.consecutiveFailures!.value,domText:paraText.substring(0,100),normalizedDomText:normalizedDomText.substring(0,100)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'MISMATCH_CASCADE'})}).catch(()=>{});
+            // #endregion
+            context.segmentIndex.value = segmentIndex + 1;
+            context.consecutiveFailures!.value = 0; // Reset counter
+            return; // Skip this node but with incremented segmentIndex
+          }
+          
+          // Try to find a matching segment within next 5 segments
+          let foundMatch = false;
+          for (let searchIdx = segmentIndex + 1; searchIdx <= Math.min(segmentIndex + 5, context.segmentMap.size - 1); searchIdx++) {
+            const searchSegment = context.options.segments.find(s => s.index === searchIdx);
+            if (!searchSegment) continue;
+            
+            const searchSegmentMetadata = (searchSegment as any).metadata as any;
+            const searchSegmentText = searchSegmentMetadata?.sourceText || '';
+            if (!searchSegmentText) continue;
+            
+            const normalizedSearchText = this.normalizeText(this.stripFormattingTags(searchSegmentText));
+            if (normalizedDomText === normalizedSearchText) {
+              // Found match! Update segmentIndex to the matching segment
+              logger.info({
+                message: '[Mismatch Recovery] Found matching segment by searching forward',
+                elementIndex,
+                oldSegmentIndex: segmentIndex,
+                newSegmentIndex: searchIdx,
+                distance: searchIdx - segmentIndex,
+              });
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:2925',message:'[Mismatch Recovery] Found match by forward search',data:{elementIndex,oldSegmentIndex:segmentIndex,newSegmentIndex:searchIdx,distance:searchIdx-segmentIndex},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'MISMATCH_RECOVERY'})}).catch(()=>{});
+              // #endregion
+              segmentIndex = searchIdx;
+              context.segmentIndex.value = searchIdx;
+              foundMatch = true;
+              context.consecutiveFailures!.value = 0; // Reset counter
+              break;
+            }
+          }
+          
+          if (!foundMatch) {
+            // No exact match found - check if texts are similar enough to proceed
+            // Calculate similarity: check if normalized texts start with same prefix (first 100 chars)
+            const domPrefix = normalizedDomText.substring(0, 100).trim();
+            const segmentPrefix = normalizedSegmentText.substring(0, 100).trim();
+            const hasSimilarPrefix = domPrefix.length > 20 && segmentPrefix.length > 20 && 
+                                   (domPrefix === segmentPrefix || 
+                                    domPrefix.substring(0, Math.min(50, domPrefix.length)) === segmentPrefix.substring(0, Math.min(50, segmentPrefix.length)));
+            
+            // Also check if one text contains the other (might be partial match)
+            // Check if DOM text starts with segment text or vice versa
+            const domStartsWithSegment = normalizedDomText.startsWith(normalizedSegmentText.substring(0, Math.min(100, normalizedSegmentText.length)));
+            const segmentStartsWithDom = normalizedSegmentText.startsWith(normalizedDomText.substring(0, Math.min(100, normalizedDomText.length)));
+            const oneContainsOther = domStartsWithSegment || segmentStartsWithDom ||
+                                    normalizedDomText.includes(normalizedSegmentText.substring(0, 100)) || 
+                                    normalizedSegmentText.includes(normalizedDomText.substring(0, 100));
+            
+            if (hasSimilarPrefix || oneContainsOther) {
+              // Texts are similar enough - proceed with translation despite mismatch
+              logger.info({
+                message: '[Mismatch] Texts are similar enough, proceeding with translation',
+                elementIndex,
+                segmentIndex,
+                domPrefix: domPrefix.substring(0, 50),
+                segmentPrefix: segmentPrefix.substring(0, 50),
+                hasSimilarPrefix,
+                oneContainsOther,
+              });
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:2978',message:'[Mismatch] Similar texts - proceeding',data:{elementIndex,segmentIndex,domPrefix:domPrefix.substring(0,100),segmentPrefix:segmentPrefix.substring(0,100),hasSimilarPrefix,oneContainsOther,domStartsWithSegment,segmentStartsWithDom,domLength:normalizedDomText.length,segmentLength:normalizedSegmentText.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'MISMATCH_LENIENT'})}).catch(()=>{});
+              // #endregion
+              // Reset consecutive failures since we're proceeding
+              context.consecutiveFailures!.value = 0;
+              // Continue with translation application below
+            } else {
+              // Not similar enough - log warning and skip this node
+              logger.warn({
+                message: '[Mismatch] DOM text does not match segment text, no forward match found, texts not similar',
+                elementIndex,
+                segmentIndex,
+                consecutiveFailures: context.consecutiveFailures!.value,
+                domText: paraText.substring(0, 200),
+                segmentText: segmentText.substring(0, 200),
+                normalizedDomText: normalizedDomText.substring(0, 200),
+                normalizedSegmentText: normalizedSegmentText.substring(0, 200),
+              });
+              // #region agent log
+              fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:2973',message:'[Mismatch] DOM: "..." vs Segment: "..." - no forward match, not similar',data:{elementIndex,segmentIndex,consecutiveFailures:context.consecutiveFailures!.value,domText:paraText.substring(0,200),segmentText:segmentText.substring(0,200),normalizedDomText:normalizedDomText.substring(0,200),normalizedSegmentText:normalizedSegmentText.substring(0,200),skipped:true},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'MISMATCH'})}).catch(()=>{});
+              // #endregion
+              return; // Skip this node - don't increment segmentIndex, continue traversal to find correct match
+            }
+          }
+          // If foundMatch is true, we continue with the updated segmentIndex
+        } else {
+          // Match found - reset consecutive failures counter
+          context.consecutiveFailures!.value = 0;
         }
       } else {
         // Could not extract segment text for verification - skip to maintain alignment
@@ -2929,6 +3026,11 @@ export class DocxHandler implements FileHandler {
     
     // Get translation - handle sentence segmentation if needed
     let translatedText = context.segmentMap.get(segmentIndex);
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:2931',message:'Export: lookup translation for paragraph',data:{elementIndex,segmentIndex,segmentMapSize:context.segmentMap.size,hasTranslation:translatedText!==undefined,translatedTextPreview:translatedText?.substring(0,50)||'undefined',translatedTextLength:translatedText?.length||0,translatedTextTrimmedLength:translatedText?.trim().length||0,paraTextPreview:paraText.substring(0,50),paraTextLength:paraText.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+    // #endregion
+    
     let segmentsToSkip = 0;
     
     // Check if sentence segmentation is needed
@@ -2965,14 +3067,130 @@ export class DocxHandler implements FileHandler {
     }
     
     // Apply translation
-    if (translatedText !== undefined && translatedText !== null && translatedText.trim().length > 0) {
+    // #region agent log
+    const willApplyTranslation = translatedText !== undefined && translatedText !== null && translatedText.trim().length > 0;
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:3018',message:'Export: checking translation application condition',data:{elementIndex,segmentIndex,translatedTextUndefined:translatedText===undefined,translatedTextNull:translatedText===null,translatedTextTrimmedLength:translatedText?.trim().length||0,willApplyTranslation,reason:!willApplyTranslation?(translatedText===undefined?'undefined':translatedText===null?'null':'empty_after_trim'):'will_apply'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+    // #endregion
+    
+    // Re-extract segment text for logging and comparison (it's only available in verification block scope)
+    let segmentTextForLog = '';
+    const segmentForLog = context.options.segments.find(s => s.index === segmentIndex);
+    if (segmentForLog) {
+      const segmentMetadataForLog = (segmentForLog as any).metadata as any;
+      if ((segmentForLog as any).text) {
+        segmentTextForLog = (segmentForLog as any).text;
+      } else if (segmentMetadataForLog?.sourceText) {
+        segmentTextForLog = segmentMetadataForLog.sourceText;
+      } else if (segmentMetadataForLog?.formattedText) {
+        segmentTextForLog = this.stripFormattingTags(segmentMetadataForLog.formattedText);
+      } else if (segmentMetadataForLog?.formattedRuns) {
+        segmentTextForLog = segmentMetadataForLog.formattedRuns.map((run: { text?: string }) => run.text || '').join('');
+      } else if (segmentMetadataForLog?.runs) {
+        segmentTextForLog = segmentMetadataForLog.runs.map((run: { text?: string }) => run.text || '').join('');
+      }
+    }
+    
+    // CRITICAL: Check if DOM text is longer than segment/translation (might indicate split caption)
+    // This happens when import split "Table 1. List of..." into two segments, but DOM has the full text
+    const domTextLonger = paraText.length > (translatedText?.trim().length || 0);
+    const domStartsWithSegmentSource = segmentTextForLog && paraText.startsWith(segmentTextForLog.trim());
+    const domStartsWithTranslation = translatedText && paraText.startsWith(translatedText.trim());
+    
+    // Check if DOM text contains the segment source at the start (even if translation doesn't match)
+    // This indicates the DOM has more text than the segment captured
+    const translationIsPartial = domTextLonger && (domStartsWithSegmentSource || domStartsWithTranslation);
+    
+    // Check if next segments might contain the remainder (e.g., split table captions)
+    let nextSegmentsPreview = '';
+    let combinedTranslation = translatedText;
+    let segmentsToCombine = 0;
+    
+    if (translationIsPartial && domStartsWithSegmentSource && segmentIndex + 1 < context.segmentMap.size) {
+      // DOM text starts with segment source but is longer - might be split during import
+      const normalizedSegmentSource = this.normalizeText(segmentTextForLog);
+      let remainderFromDom = paraText.substring(normalizedSegmentSource.length).trim();
+      
+      // Check up to 2 segments ahead for split captions (handles 2-3 segment splits)
+      // This covers cases like "Table 1." + "List of" + "accommodation sites"
+      const maxSegmentsToCheck = 2;
+      let foundMatch = false;
+      let accumulatedTranslation = translatedText ? translatedText.trim() : '';
+      let accumulatedRemainder = remainderFromDom;
+      
+      // Pre-fetch next segments for preview
+      const nextSegment1 = context.segmentMap.get(segmentIndex + 1);
+      const nextSegment2 = context.segmentMap.get(segmentIndex + 2);
+      
+      for (let offset = 1; offset <= maxSegmentsToCheck && !foundMatch && segmentIndex + offset < context.segmentMap.size; offset++) {
+        const candidateSegmentObj = context.options.segments.find(s => s.index === segmentIndex + offset);
+        if (!candidateSegmentObj) continue;
+        
+        const candidateMetadata = (candidateSegmentObj as any).metadata as any;
+        const candidateSource = candidateMetadata?.sourceText || (candidateSegmentObj as any).text || '';
+        const normalizedCandidate = this.normalizeText(this.stripFormattingTags(candidateSource));
+        const candidateTranslation = context.segmentMap.get(segmentIndex + offset);
+        
+        if (!normalizedCandidate || !candidateTranslation || !candidateTranslation.trim()) continue;
+        
+        // Adaptive threshold: use 30 chars or 70% of remainder length (whichever is smaller, min 10)
+        // This handles both long and short remainders better
+        // Examples: 5 chars -> 5, 20 chars -> 14, 50 chars -> 30
+        const thresholdLength = Math.max(10, Math.min(30, Math.floor(accumulatedRemainder.length * 0.7)));
+        
+        // Check if accumulated remainder matches candidate segment
+        const candidatePrefix = normalizedCandidate.substring(0, Math.min(thresholdLength, normalizedCandidate.length));
+        const remainderPrefix = accumulatedRemainder.substring(0, Math.min(thresholdLength, accumulatedRemainder.length));
+        
+        if (candidatePrefix && remainderPrefix &&
+            (normalizedCandidate.startsWith(remainderPrefix) ||
+             accumulatedRemainder.startsWith(candidatePrefix) ||
+             candidatePrefix === remainderPrefix)) {
+          // Match found - add to combined translation
+          accumulatedTranslation = accumulatedTranslation + ' ' + candidateTranslation.trim();
+          segmentsToCombine = offset;
+          foundMatch = true;
+          
+          // Update accumulated remainder by removing the matched portion
+          // This allows checking if there's more remainder (for 3+ segment splits)
+          if (accumulatedRemainder.length > normalizedCandidate.length) {
+            accumulatedRemainder = accumulatedRemainder.substring(normalizedCandidate.length).trim();
+            // If there's still remainder, we could continue, but we stop at first match
+            // to avoid false positives (rare case of 3+ segment splits)
+          } else {
+            accumulatedRemainder = ''; // Fully matched
+          }
+        }
+      }
+      
+      if (foundMatch && accumulatedTranslation) {
+        combinedTranslation = accumulatedTranslation;
+        nextSegmentsPreview = `[Combined ${segmentsToCombine} segment(s)]`;
+      } else {
+        // Log preview for debugging when no match found
+        nextSegmentsPreview = `[+1:${nextSegment1?.substring(0,50)||'N/A'}|+2:${nextSegment2?.substring(0,50)||'N/A'}]`;
+      }
+    }
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:3075',message:'Export: translation vs DOM text comparison (table caption check)',data:{elementIndex,segmentIndex,paraTextLength:paraText.length,translatedTextLength:translatedText?.trim().length||0,combinedTranslationLength:combinedTranslation?.trim().length||0,segmentTextLength:segmentTextForLog.length,domTextLonger,domStartsWithSegmentSource,domStartsWithTranslation,translationIsPartial,segmentsToCombine,paraTextPreview:paraText.substring(0,100),translatedTextPreview:translatedText?.substring(0,100)||'N/A',combinedTranslationPreview:combinedTranslation?.substring(0,100)||'N/A',segmentTextPreview:segmentTextForLog.substring(0,100)||'N/A',nextSegmentsPreview},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'TABLE_CAPTION'})}).catch(()=>{});
+    // #endregion
+    
+    // Use combined translation if we found a split caption
+    if (segmentsToCombine > 0 && combinedTranslation && translatedText) {
+      translatedText = combinedTranslation;
+      // Update segmentsToSkip to account for the combined segment
+      segmentsToSkip = segmentsToCombine;
+    }
+    
+    if (willApplyTranslation && translatedText !== undefined && translatedText !== null && translatedText.trim().length > 0) {
       // #region agent log
       // TRAVERSAL TRACE: Log every paragraph translation injection
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:2613',message:'[EXPORT] Seg injection',data:{elementIndex,segmentIndex,type:'paragraph',text:paraText.substring(0,200),textLength:paraText.length,translatedText:translatedText.substring(0,200),translatedLength:translatedText.length,skipped:false},timestamp:Date.now(),sessionId:'debug-session',runId:'traversal-trace',hypothesisId:'EXPORT_SEG'})}).catch(()=>{});
+      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:3042',message:'[EXPORT] Seg injection',data:{elementIndex,segmentIndex,type:'paragraph',text:paraText.substring(0,200),textLength:paraText.length,translatedText:translatedText.substring(0,200),translatedLength:translatedText.length,skipped:false},timestamp:Date.now(),sessionId:'debug-session',runId:'traversal-trace',hypothesisId:'EXPORT_SEG'})}).catch(()=>{});
       // #endregion
       
       // Segment already retrieved above for verification, reuse it
-      const segmentMetadata = segment?.metadata as any;
+      const segmentForInjection = context.options.segments.find(s => s.index === segmentIndex);
+      const segmentMetadata = (segmentForInjection as any)?.metadata as any;
       const hasLocationMetadata = segmentMetadata?.location || segmentMetadata?.formattedRuns;
       
       if (hasLocationMetadata) {
@@ -2984,12 +3202,17 @@ export class DocxHandler implements FileHandler {
     } else {
       // #region agent log
       // TRAVERSAL TRACE: Log when no translation available (but segment exists)
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:2627',message:'[EXPORT] Seg no translation',data:{elementIndex,segmentIndex,type:'paragraph',text:paraText.substring(0,200),textLength:paraText.length,reason:'no_translation',skipped:false},timestamp:Date.now(),sessionId:'debug-session',runId:'traversal-trace',hypothesisId:'EXPORT_NO_TRANS'})}).catch(()=>{});
+      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:2995',message:'[EXPORT] Seg no translation',data:{elementIndex,segmentIndex,type:'paragraph',text:paraText.substring(0,200),textLength:paraText.length,reason:translatedText===undefined?'undefined':translatedText===null?'null':'empty_after_trim',skipped:false},timestamp:Date.now(),sessionId:'debug-session',runId:'traversal-trace',hypothesisId:'EXPORT_NO_TRANS'})}).catch(()=>{});
       // #endregion
     }
     
     // Increment segmentIndex
+    const oldSegmentIndex = context.segmentIndex.value;
     context.segmentIndex.value = segmentIndex + segmentsToSkip + 1;
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:2996',message:'Export: segmentIndex incremented after paragraph',data:{elementIndex,oldSegmentIndex,newSegmentIndex:context.segmentIndex.value,segmentsToSkip,type:'paragraph'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+    // #endregion
   }
 
   /**
@@ -3072,6 +3295,10 @@ export class DocxHandler implements FileHandler {
         // Get translation
         const translatedText = context.segmentMap.get(context.segmentIndex.value);
         
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:3074',message:'Export: lookup translation for table cell',data:{elementIndex,segmentIndex:context.segmentIndex.value,segmentMapSize:context.segmentMap.size,hasTranslation:translatedText!==undefined,translatedTextPreview:translatedText?.substring(0,50)||'undefined',translatedTextLength:translatedText?.length||0,cellTextPreview:cellText.substring(0,50),cellTextLength:cellText.length,cellSegmentType},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
+        
         // Apply translation
         if (translatedText !== undefined && translatedText !== null && translatedText.trim().length > 0) {
           // #region agent log
@@ -3088,7 +3315,12 @@ export class DocxHandler implements FileHandler {
         
         // CRITICAL: Only increment segmentIndex if we processed a valid table cell segment
         // This matches parse() behavior: parse() only increments segmentIndex when creating a segment
+        const oldSegmentIndex = context.segmentIndex.value;
         context.segmentIndex.value++;
+        
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:3095',message:'Export: segmentIndex incremented after table cell',data:{elementIndex,oldSegmentIndex,newSegmentIndex:context.segmentIndex.value,type:'table-cell'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
       }
     }
   }
@@ -3134,6 +3366,10 @@ export class DocxHandler implements FileHandler {
     // Also create a map of segment types to know which segments are table cells
     const segmentMap = new Map(options.segments.map((seg) => [seg.index, seg.targetText]));
     const segmentTypeMap = new Map(options.segments.map((seg) => [seg.index, seg.segmentType || 'paragraph']));
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'docx.handler.ts:3136',message:'Export: segmentMap created',data:{totalSegments:options.segments.length,segmentMapSize:segmentMap.size,firstFewEntries:Array.from(segmentMap.entries()).slice(0,10).map(([idx,text])=>({index:idx,targetTextPreview:text.substring(0,50),targetTextLength:text.length,hasContent:text.trim().length>0})),indicesRange:{min:Math.min(...Array.from(segmentMap.keys())),max:Math.max(...Array.from(segmentMap.keys()))}},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+    // #endregion
     
     // CRITICAL: Create a map of documentParagraphIndex -> segment indices for sentence segmentation grouping
     // This allows us to correctly group sentence segments back to their original paragraphs
@@ -3269,6 +3505,7 @@ export class DocxHandler implements FileHandler {
       processedParagraphs: { value: processedParagraphs },
       processedTables: { value: processedTables },
       namespace,
+      consecutiveFailures: { value: 0 }, // Track consecutive verification failures to prevent cascade
     };
     this.processContainerNodeRecursively(bodyElement, context);
     

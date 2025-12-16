@@ -18,14 +18,23 @@ export type ParsedFileResult = {
 };
 
 export type ExportOptions = {
-  segments: Array<{ index: number; targetText: string }>;
+  segments: Array<{ 
+    index: number; 
+    targetText: string;
+    segmentType?: string;
+    metadata?: Record<string, unknown>;
+  }>;
   originalBuffer?: Buffer;
   metadata?: Record<string, unknown>;
 };
 
+export type ParseOptions = {
+  segmentationMode?: 'paragraphs' | 'sentences';
+};
+
 export interface FileHandler {
   supports: (mimeType: string | undefined, extension: string) => boolean;
-  parse: (buffer: Buffer) => Promise<ParsedFileResult>;
+  parse: (buffer: Buffer, options?: ParseOptions) => Promise<ParsedFileResult>;
   export?: (options: ExportOptions) => Promise<Buffer>;
 }
 

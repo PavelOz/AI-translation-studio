@@ -20,6 +20,7 @@ export type ImportDocumentInput = {
   projectId: string;
   sourceLocale: string;
   targetLocale: string;
+  segmentationMode?: 'paragraphs' | 'sentences';
 };
 
 export const importDocumentFile = async (
@@ -37,7 +38,9 @@ export const importDocumentFile = async (
 
   let parsed;
   try {
-    parsed = await handler.parse(file.buffer);
+    parsed = await handler.parse(file.buffer, {
+      segmentationMode: input.segmentationMode || 'paragraphs',
+    });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     logger.error({ error: errorMessage, filename: file.originalname }, 'Failed to parse document file');
@@ -230,20 +233,46 @@ export const exportDocumentFile = async (documentId: string): Promise<Buffer> =>
   }
 
   const originalBuffer = await fs.readFile(document.storagePath);
-  const segments = await getDocumentSegments(documentId, 1, 10000);
+  
+  // Fetch all segments (not paginated) - we need all of them for export
+  const allSegments = await prisma.segment.findMany({
+    where: { documentId },
+    orderBy: { segmentIndex: 'asc' },
+    select: {
+      segmentIndex: true,
+      sourceText: true,
+      targetMt: true,
+      targetFinal: true,
+      segmentType: true,
+    },
+  });
 
-  const exportSegments = segments.segments.map((seg) => ({
+  const exportSegments = allSegments.map((seg) => ({
     index: seg.segmentIndex,
     targetText: seg.targetFinal ?? seg.targetMt ?? seg.sourceText,
+    segmentType: seg.segmentType || 'paragraph',
+    metadata: {
+      sourceText: seg.sourceText, // Include sourceText for verification matching
+    },
+    // Note: metadata (like documentParagraphIndex) is not stored in DB,
+    // so export will need to reconstruct paragraph mapping from segment indices
   }));
 
   // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'file.service.ts:233',message:'Export: fetched segments from database',data:{documentId,totalSegments:segments.segments.length,firstFewSegments:segments.segments.slice(0,3).map(s=>({index:s.segmentIndex,hasTargetFinal:!!s.targetFinal,hasTargetMt:!!s.targetMt,targetFinal:s.targetFinal?.substring(0,30),targetMt:s.targetMt?.substring(0,30),sourceText:s.sourceText.substring(0,30)})),segmentsWithTargetFinal:segments.segments.filter(s=>s.targetFinal).length,segmentsWithTargetMt:segments.segments.filter(s=>s.targetMt).length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'file.service.ts:250',message:'Export: segments from database',data:{documentId,totalSegments:allSegments.length,segmentsWithTargetFinal:allSegments.filter(s=>s.targetFinal).length,segmentsWithTargetMt:allSegments.filter(s=>s.targetMt).length,firstFewSegments:allSegments.slice(0,5).map(s=>({segmentIndex:s.segmentIndex,hasTargetFinal:!!s.targetFinal,hasTargetMt:!!s.targetMt,targetFinalPreview:s.targetFinal?.substring(0,50),targetMtPreview:s.targetMt?.substring(0,50),sourceTextPreview:s.sourceText.substring(0,50),chosenTargetText:(s.targetFinal??s.targetMt??s.sourceText).substring(0,50),segmentType:s.segmentType}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
   // #endregion
 
   // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'file.service.ts:235',message:'Export: created exportSegments array',data:{totalExportSegments:exportSegments.length,firstFewExportSegments:exportSegments.slice(0,3).map(s=>({index:s.index,targetText:s.targetText.substring(0,30),targetTextLength:s.targetText.length})),segmentsWithNonSourceText:exportSegments.filter(s=>s.targetText!==segments.segments.find(orig=>orig.segmentIndex===s.index)?.sourceText).length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'file.service.ts:256',message:'Export: exportSegments array created',data:{exportSegmentsCount:exportSegments.length,firstFewExportSegments:exportSegments.slice(0,5).map(s=>({index:s.index,targetTextPreview:s.targetText.substring(0,50),targetTextLength:s.targetText.length,segmentType:s.segmentType,isSourceText:s.targetText===allSegments.find(orig=>orig.segmentIndex===s.index)?.sourceText}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
   // #endregion
+
+  logger.debug({
+    documentId,
+    totalSegments: allSegments.length,
+    segmentsWithTargetFinal: allSegments.filter(s => s.targetFinal).length,
+    segmentsWithTargetMt: allSegments.filter(s => s.targetMt).length,
+    exportSegmentsCount: exportSegments.length,
+  }, 'Export: prepared segments for export');
 
   return handler.export({
     segments: exportSegments,
