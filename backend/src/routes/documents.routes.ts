@@ -60,6 +60,7 @@ const uploadSchema = z.object({
   projectId: z.string().uuid(),
   sourceLocale: z.string(),
   targetLocale: z.string(),
+  segmentationMode: z.enum(['paragraphs', 'sentences']).optional(),
 });
 
 export const documentRoutes = Router();
@@ -69,7 +70,11 @@ documentRoutes.use(requireAuth);
 documentRoutes.get(
   '/',
   asyncHandler(async (req, res) => {
-    const documents = await listDocuments(req.query.projectId as string | undefined);
+    const projectId = req.query.projectId as string | undefined;
+    const sortBy = (req.query.sortBy as DocumentSortField) || 'createdAt';
+    const sortOrder = (req.query.sortOrder as DocumentSortOrder) || 'desc';
+    
+    const documents = await listDocuments(projectId, sortBy, sortOrder);
     res.json(documents);
   }),
 );
@@ -323,12 +328,6 @@ documentRoutes.patch(
 documentRoutes.delete(
   '/:documentId',
   asyncHandler(async (req, res) => {
-    const document = await getDocument(req.params.documentId);
-    try {
-      await fs.unlink(document.storagePath);
-    } catch (error) {
-      // File may not exist, continue with deletion
-    }
     await deleteDocument(req.params.documentId);
     res.status(204).send();
   }),

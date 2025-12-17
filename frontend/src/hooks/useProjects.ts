@@ -57,13 +57,23 @@ export const useProjects = () => {
     },
   });
 
+  const deleteProject = (projectId: string, options?: { onSuccess?: () => void }) => {
+    deleteMutation.mutate(projectId, {
+      onSuccess: () => {
+        if (options?.onSuccess) {
+          options.onSuccess();
+        }
+      },
+    });
+  };
+
   return {
     projects: projectsQuery.data || [],
     isLoading: projectsQuery.isLoading,
     project: projectQuery,
     create: createProject,
     update: updateMutation.mutate,
-    delete: deleteMutation.mutate,
+    delete: deleteProject,
     isCreating: createMutation.isPending,
     isUpdating: updateMutation.isPending,
     isDeleting: deleteMutation.isPending,

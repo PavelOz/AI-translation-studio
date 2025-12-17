@@ -33,11 +33,18 @@ export type UploadDocumentRequest = {
   sourceLocale: string;
   targetLocale: string;
   file: File;
+  segmentationMode?: 'paragraphs' | 'sentences';
 };
 
+export type DocumentSortField = 'name' | 'size' | 'createdAt' | 'fileType';
+export type DocumentSortOrder = 'asc' | 'desc';
+
 export const documentsApi = {
-  list: async (projectId?: string): Promise<Document[]> => {
-    const params = projectId ? { projectId } : {};
+  list: async (projectId?: string, sortBy?: DocumentSortField, sortOrder?: DocumentSortOrder): Promise<Document[]> => {
+    const params: Record<string, string> = {};
+    if (projectId) params.projectId = projectId;
+    if (sortBy) params.sortBy = sortBy;
+    if (sortOrder) params.sortOrder = sortOrder;
     const response = await apiClient.get<Document[]>('/documents', { params });
     return response.data;
   },
@@ -56,6 +63,9 @@ export const documentsApi = {
     formData.append('projectId', data.projectId);
     formData.append('sourceLocale', data.sourceLocale);
     formData.append('targetLocale', data.targetLocale);
+    if (data.segmentationMode) {
+      formData.append('segmentationMode', data.segmentationMode);
+    }
 
     const response = await apiClient.post<{ document: Document; importedSegments: number }>(
       '/documents/upload',

@@ -120,11 +120,76 @@ export const updateProject = async (projectId: string, data: UpdateProjectInput)
 };
 
 export const deleteProject = async (projectId: string) => {
-  const project = await prisma.project.findUnique({ where: { id: projectId } });
+  const project = await prisma.project.findUnique({ 
+    where: { id: projectId },
+    include: { documents: true },
+  });
   if (!project) {
     throw ApiError.notFound('Project not found');
   }
-  return prisma.project.delete({ where: { id: projectId } });
+
+  // Delete physical files for all documents
+  const fs = await import('fs/promises');
+  for (const document of project.documents) {
+    try {
+      await fs.unlink(document.storagePath);
+    } catch (error) {
+      // File may not exist, continue with deletion
+    }
+  }
+
+  // Manual cascade deletion in transaction to avoid foreign key violations
+  return prisma.$transaction(async (tx) => {
+    // Delete in order: child records first, then parent
+    // 1. Translation Memory entries and files
+    await tx.translationMemoryEntry.deleteMany({ where: { projectId } });
+    await tx.translationMemoryFile.deleteMany({ where: { projectId } });
+    
+    // 2. Documents (which cascade segments, AI requests, etc. if relations have onDelete: Cascade)
+    // But we need to manually handle segments and AI requests
+    const documents = await tx.document.findMany({ where: { projectId }, select: { id: true } });
+    for (const doc of documents) {
+      // Delete segments and their related records
+      const segments = await tx.segment.findMany({ where: { documentId: doc.id }, select: { id: true } });
+      const segmentIds = segments.map((s) => s.id);
+      
+      // Delete quality metrics
+      await tx.qualityMetric.deleteMany({ where: { segmentId: { in: segmentIds } } });
+      
+      // Delete segments
+      await tx.segment.deleteMany({ where: { documentId: doc.id } });
+      
+      // Delete AI requests
+      await tx.aIRequest.deleteMany({ where: { documentId: doc.id } });
+      
+      // Delete chat messages for document
+      await tx.chatMessage.deleteMany({ where: { documentId: doc.id } });
+    }
+    
+    // Delete documents
+    await tx.document.deleteMany({ where: { projectId } });
+    
+    // 3. Project members
+    await tx.projectMember.deleteMany({ where: { projectId } });
+    
+    // 4. Glossary entries
+    await tx.glossaryEntry.deleteMany({ where: { projectId } });
+    
+    // 5. Reports
+    await tx.report.deleteMany({ where: { projectId } });
+    
+    // 6. Project AI settings (has @unique on projectId)
+    await tx.projectAISetting.deleteMany({ where: { projectId } });
+    
+    // 7. Project guidelines (has @unique on projectId)
+    await tx.projectGuideline.deleteMany({ where: { projectId } });
+    
+    // 8. Chat messages
+    await tx.chatMessage.deleteMany({ where: { projectId } });
+    
+    // 9. Finally, delete the project itself
+    return tx.project.delete({ where: { id: projectId } });
+  });
 };
 
 export const addProjectMember = async (projectId: string, userId: string, role: UserRole) => {

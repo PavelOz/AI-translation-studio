@@ -156,7 +156,7 @@ export class XliffHandler implements FileHandler {
     });
   }
 
-  async parse(buffer: Buffer): Promise<ParsedFileResult> {
+  async parse(buffer: Buffer, options?: { segmentationMode?: 'paragraphs' | 'sentences' }): Promise<ParsedFileResult> {
     const xml = buffer.toString('utf-8');
     const parsed = this.parser.parse(xml);
 

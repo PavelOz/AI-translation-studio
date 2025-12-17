@@ -38,7 +38,7 @@ export class XlsxHandler implements FileHandler {
     return extension === '.xlsx';
   }
 
-  async parse(buffer: Buffer): Promise<ParsedFileResult> {
+  async parse(buffer: Buffer, options?: { segmentationMode?: 'paragraphs' | 'sentences' }): Promise<ParsedFileResult> {
     let zip: JSZip;
     try {
       zip = await JSZip.loadAsync(buffer);

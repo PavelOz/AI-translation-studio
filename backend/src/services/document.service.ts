@@ -15,11 +15,30 @@ export type CreateDocumentInput = {
   totalWords?: number;
 };
 
-export const listDocuments = (projectId?: string) =>
-  prisma.document.findMany({
+export type DocumentSortField = 'name' | 'size' | 'createdAt' | 'fileType';
+export type DocumentSortOrder = 'asc' | 'desc';
+
+export const listDocuments = (
+  projectId?: string,
+  sortBy: DocumentSortField = 'createdAt',
+  sortOrder: DocumentSortOrder = 'desc',
+) => {
+  // Map sort fields to Prisma field names
+  const orderByField: Record<DocumentSortField, string> = {
+    name: 'name',
+    size: 'totalWords', // Using totalWords as a proxy for file size
+    createdAt: 'createdAt',
+    fileType: 'fileType',
+  };
+
+  return prisma.document.findMany({
     where: projectId ? { projectId } : undefined,
     include: { project: true },
+    orderBy: {
+      [orderByField[sortBy]]: sortOrder,
+    },
   });
+};
 
 export const createDocument = (input: CreateDocumentInput) =>
   prisma.document.create({
@@ -69,6 +88,40 @@ export const deleteDocument = async (documentId: string) => {
   if (!document) {
     throw ApiError.notFound('Document not found');
   }
-  return prisma.document.delete({ where: { id: documentId } });
+
+  // Delete physical file
+  const fs = await import('fs/promises');
+  try {
+    await fs.unlink(document.storagePath);
+  } catch (error) {
+    // File may not exist, continue with deletion
+  }
+
+  // Manual cascade deletion in transaction to avoid foreign key violations
+  return prisma.$transaction(async (tx) => {
+    // Delete in order: child records first, then parent
+    // 1. Fetch all segment IDs for this document
+    const segments = await tx.segment.findMany({ 
+      where: { documentId }, 
+      select: { id: true } 
+    });
+    const segmentIds = segments.map((s) => s.id);
+    
+    // 2. Delete quality metrics
+    await tx.qualityMetric.deleteMany({ where: { segmentId: { in: segmentIds } } });
+    
+    // 3. Delete segments
+    await tx.segment.deleteMany({ where: { documentId } });
+    
+    // 4. Delete AI requests
+    await tx.aIRequest.deleteMany({ where: { documentId } });
+    
+    // 5. Delete chat messages (for document and segments)
+    await tx.chatMessage.deleteMany({ where: { documentId } });
+    await tx.chatMessage.deleteMany({ where: { segmentId: { in: segmentIds } } });
+    
+    // 6. Finally, delete the document itself
+    return tx.document.delete({ where: { id: documentId } });
+  });
 };
 

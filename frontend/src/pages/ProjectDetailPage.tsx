@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import Layout from '../components/Layout';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useProjects } from '../hooks/useProjects';
+import { useDocuments } from '../hooks/useDocuments';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
-import { documentsApi } from '../api/documents.api';
+import { documentsApi, type DocumentSortField, type DocumentSortOrder } from '../api/documents.api';
 import TMImportModal from '../components/TMImportModal';
 import ProjectAISettingsModal from '../components/ProjectAISettingsModal';
 import ProjectGuidelinesModal from '../components/ProjectGuidelinesModal';
@@ -12,9 +13,11 @@ import toast from 'react-hot-toast';
 
 export default function ProjectDetailPage() {
   const { projectId } = useParams<{ projectId: string }>();
-  const { project } = useProjects();
+  const { project, delete: deleteProject, isDeleting } = useProjects();
+  const { delete: deleteDocument, isDeleting: isDeletingDocument } = useDocuments();
   const projectData = project(projectId!);
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<{
     percentage: number;
@@ -27,10 +30,13 @@ export default function ProjectDetailPage() {
   const [isTmModalOpen, setIsTmModalOpen] = useState(false);
   const [isAISettingsModalOpen, setIsAISettingsModalOpen] = useState(false);
   const [isGuidelinesModalOpen, setIsGuidelinesModalOpen] = useState(false);
+  const [sortBy, setSortBy] = useState<DocumentSortField>('createdAt');
+  const [sortOrder, setSortOrder] = useState<DocumentSortOrder>('desc');
+  const [segmentationMode, setSegmentationMode] = useState<'paragraphs' | 'sentences'>('paragraphs');
 
   const { data: documents } = useQuery({
-    queryKey: ['documents', projectId],
-    queryFn: () => documentsApi.list(projectId),
+    queryKey: ['documents', projectId, sortBy, sortOrder],
+    queryFn: () => documentsApi.list(projectId, sortBy, sortOrder),
     enabled: !!projectId,
   });
 
@@ -54,6 +60,7 @@ export default function ProjectDetailPage() {
           sourceLocale: projectData.data.sourceLocale,
           targetLocale: projectData.data.targetLocales[0] || projectData.data.sourceLocale,
           file,
+          segmentationMode,
         },
         (progress) => {
           // Upload progress (file transfer)
@@ -120,12 +127,40 @@ export default function ProjectDetailPage() {
     );
   }
 
+  const handleDeleteProject = () => {
+    if (window.confirm(`Are you sure you want to delete project "${projectData.data?.name}"? This will delete all associated documents, translations, and data. This action cannot be undone.`)) {
+      deleteProject(projectId!, {
+        onSuccess: () => {
+          navigate('/projects');
+        },
+      });
+    }
+  };
+
+  const handleDeleteDocument = (documentId: string, documentName: string, e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (window.confirm(`Are you sure you want to delete document "${documentName}"? This action cannot be undone.`)) {
+      deleteDocument(documentId);
+    }
+  };
+
   return (
     <Layout>
       <div className="space-y-6">
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900">{projectData.data.name}</h1>
-          <p className="text-gray-600 mt-2">{projectData.data.description}</p>
+        <div className="flex justify-between items-start">
+          <div>
+            <h1 className="text-3xl font-bold text-gray-900">{projectData.data.name}</h1>
+            <p className="text-gray-600 mt-2">{projectData.data.description}</p>
+          </div>
+          <button
+            onClick={handleDeleteProject}
+            disabled={isDeleting}
+            className="btn btn-danger text-sm"
+            title="Delete project"
+          >
+            {isDeleting ? 'Deleting...' : 'Delete Project'}
+          </button>
         </div>
 
         <div className="card">
@@ -192,16 +227,70 @@ export default function ProjectDetailPage() {
         <div className="card">
           <div className="flex justify-between items-center mb-4">
             <h2 className="text-xl font-semibold">Documents</h2>
-            <label className="btn btn-primary cursor-pointer">
-              {isUploading ? 'Uploading...' : '+ Upload Document'}
-              <input
-                type="file"
-                className="hidden"
-                accept=".docx,.xlsx,.xliff,.xlf"
-                onChange={handleFileUpload}
-                disabled={isUploading}
-              />
+            <div className="flex items-center gap-2">
+              {/* Sorting Controls */}
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value as DocumentSortField)}
+                className="px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+              >
+                <option value="name">Sort by Name</option>
+                <option value="size">Sort by Size</option>
+                <option value="createdAt">Sort by Import Time</option>
+                <option value="fileType">Sort by Type</option>
+              </select>
+              <button
+                onClick={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}
+                className="px-3 py-2 border border-gray-300 rounded-md text-sm hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-primary-500"
+                title={`Sort ${sortOrder === 'asc' ? 'Ascending' : 'Descending'}`}
+              >
+                {sortOrder === 'asc' ? '↑' : '↓'}
+              </button>
+              <label className="btn btn-primary cursor-pointer">
+                {isUploading ? 'Uploading...' : '+ Upload Document'}
+                <input
+                  type="file"
+                  className="hidden"
+                  accept=".docx,.xlsx,.xliff,.xlf"
+                  onChange={handleFileUpload}
+                  disabled={isUploading}
+                />
+              </label>
+            </div>
+          </div>
+          
+          {/* Segmentation Mode Selection */}
+          <div className="mb-4 p-3 bg-gray-50 rounded-lg">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Segmentation Mode
             </label>
+            <div className="flex gap-4">
+              <label className="flex items-center">
+                <input
+                  type="radio"
+                  value="paragraphs"
+                  checked={segmentationMode === 'paragraphs'}
+                  onChange={(e) => setSegmentationMode(e.target.value as 'paragraphs' | 'sentences')}
+                  className="mr-2"
+                />
+                <span className="text-sm text-gray-700">By Paragraphs</span>
+              </label>
+              <label className="flex items-center">
+                <input
+                  type="radio"
+                  value="sentences"
+                  checked={segmentationMode === 'sentences'}
+                  onChange={(e) => setSegmentationMode(e.target.value as 'paragraphs' | 'sentences')}
+                  className="mr-2"
+                />
+                <span className="text-sm text-gray-700">By Sentences</span>
+              </label>
+            </div>
+            <p className="text-xs text-gray-500 mt-2">
+              {segmentationMode === 'paragraphs' 
+                ? 'Documents will be split by paragraphs (recommended for most documents)'
+                : 'Documents will be split by sentences (useful for detailed editing and alignment)'}
+            </p>
           </div>
           
           {/* Upload Progress Bar */}
@@ -252,7 +341,7 @@ export default function ProjectDetailPage() {
             <div className="space-y-2">
               {documents.map((doc) => (
                 <div key={doc.id} className="border-b border-gray-200 pb-3 flex justify-between items-center">
-                  <div>
+                  <div className="flex-1">
                     <Link
                       to={`/documents/${doc.id}`}
                       className="text-primary-600 hover:underline font-medium"
@@ -261,6 +350,8 @@ export default function ProjectDetailPage() {
                     </Link>
                     <div className="text-sm text-gray-500 mt-1">
                       {getLanguageName(doc.sourceLocale)} → {getLanguageName(doc.targetLocale)} • {doc.totalSegments} segments
+                      {doc.fileType && ` • ${doc.fileType}`}
+                      {doc.wordCount > 0 && ` • ${doc.wordCount.toLocaleString()} words`}
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
@@ -277,6 +368,16 @@ export default function ProjectDetailPage() {
                     >
                       Open Editor
                     </Link>
+                    <button
+                      onClick={(e) => handleDeleteDocument(doc.id, doc.name, e)}
+                      disabled={isDeletingDocument}
+                      className="text-red-600 hover:text-red-800 disabled:opacity-50 p-2"
+                      title="Delete document"
+                    >
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                      </svg>
+                    </button>
                   </div>
                 </div>
               ))}
