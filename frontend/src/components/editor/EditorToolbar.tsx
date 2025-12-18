@@ -21,6 +21,11 @@ export default function EditorToolbar({
   glossaryMode = 'strict_source',
 }: EditorToolbarProps) {
   const [isPretranslateModalOpen, setIsPretranslateModalOpen] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState<{
+    stage: 'preparing' | 'downloading' | 'processing' | 'complete';
+    message: string;
+  } | null>(null);
   const handleBatchTranslate = async () => {
     try {
       const response = await documentsApi.batchTranslate(documentId, {
@@ -38,9 +43,36 @@ export default function EditorToolbar({
   };
 
   const handleDownload = async (exportFile = false) => {
+    if (isExporting) return; // Prevent multiple clicks
+    
+    setIsExporting(true);
+    setExportProgress({
+      stage: 'preparing',
+      message: 'Preparing export...',
+    });
+
     try {
+      // Stage 1: Get document info
+      setExportProgress({
+        stage: 'preparing',
+        message: 'Loading document information...',
+      });
       const doc = await documentsApi.get(documentId);
+
+      // Stage 2: Download/Export
+      setExportProgress({
+        stage: exportFile ? 'processing' : 'downloading',
+        message: exportFile ? 'Generating translated file...' : 'Downloading original file...',
+      });
+      
       const blob = await documentsApi.download(documentId, exportFile);
+      
+      // Stage 3: Create download link
+      setExportProgress({
+        stage: 'processing',
+        message: 'Preparing download...',
+      });
+      
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -52,9 +84,24 @@ export default function EditorToolbar({
       a.click();
       window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
-      toast.success('Download started');
+      
+      // Stage 4: Complete
+      setExportProgress({
+        stage: 'complete',
+        message: 'Download started',
+      });
+      
+      toast.success(exportFile ? 'Translated document exported successfully' : 'Original document downloaded');
+      
+      // Clear progress after a short delay
+      setTimeout(() => {
+        setExportProgress(null);
+        setIsExporting(false);
+      }, 1500);
     } catch (error: any) {
-      toast.error('Failed to download document');
+      setIsExporting(false);
+      setExportProgress(null);
+      toast.error(error.response?.data?.message || 'Failed to export document');
     }
   };
 
@@ -83,16 +130,30 @@ export default function EditorToolbar({
       <div className="flex items-center space-x-3">
         <button
           onClick={() => handleDownload(false)}
-          className="btn btn-secondary text-sm"
+          disabled={isExporting}
+          className="btn btn-secondary text-sm disabled:opacity-50"
         >
           Download Original
         </button>
         <button
           onClick={() => handleDownload(true)}
-          className="btn btn-primary text-sm"
+          disabled={isExporting}
+          className="btn btn-primary text-sm disabled:opacity-50 relative"
         >
-          Export Translated
+          {isExporting && exportProgress ? (
+            <span className="flex items-center gap-2">
+              <div className="animate-spin rounded-full h-4 w-4 border-2 border-white border-t-transparent"></div>
+              {exportProgress.message}
+            </span>
+          ) : (
+            'Export Translated'
+          )}
         </button>
+        {exportProgress && exportProgress.stage !== 'complete' && (
+          <div className="text-xs text-gray-600 max-w-xs">
+            {exportProgress.message}
+          </div>
+        )}
       </div>
       </div>
 

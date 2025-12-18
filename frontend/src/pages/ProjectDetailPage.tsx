@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Layout from '../components/Layout';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useProjects } from '../hooks/useProjects';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { documentsApi } from '../api/documents.api';
@@ -12,9 +12,10 @@ import toast from 'react-hot-toast';
 
 export default function ProjectDetailPage() {
   const { projectId } = useParams<{ projectId: string }>();
-  const { project } = useProjects();
+  const { project, delete: deleteProject, isDeleting } = useProjects();
   const projectData = project(projectId!);
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<{
     percentage: number;
@@ -27,12 +28,75 @@ export default function ProjectDetailPage() {
   const [isTmModalOpen, setIsTmModalOpen] = useState(false);
   const [isAISettingsModalOpen, setIsAISettingsModalOpen] = useState(false);
   const [isGuidelinesModalOpen, setIsGuidelinesModalOpen] = useState(false);
+  const [documentSortBy, setDocumentSortBy] = useState<string>('name_asc');
 
   const { data: documents } = useQuery({
     queryKey: ['documents', projectId],
     queryFn: () => documentsApi.list(projectId),
     enabled: !!projectId,
   });
+
+  const deleteDocumentMutation = useMutation({
+    mutationFn: documentsApi.delete,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['documents', projectId] });
+      toast.success('Document deleted successfully');
+    },
+    onError: (error: any) => {
+      toast.error(error.response?.data?.message || 'Failed to delete document');
+    },
+  });
+
+  const handleDeleteProject = () => {
+    if (window.confirm(`Are you sure you want to delete project "${projectData.data?.name}"? This will also delete all documents in this project. This action cannot be undone.`)) {
+      deleteProject(projectId!);
+      // Navigate immediately - the mutation will handle the deletion and show success toast
+      setTimeout(() => navigate('/projects'), 100);
+    }
+  };
+
+  const handleDeleteDocument = (documentId: string, documentName: string) => {
+    if (window.confirm(`Are you sure you want to delete document "${documentName}"? This action cannot be undone.`)) {
+      deleteDocumentMutation.mutate(documentId);
+    }
+  };
+
+  // Format date/time for display
+  const formatImportDate = (dateString: string | undefined) => {
+    if (!dateString) return '';
+    try {
+      const date = new Date(dateString);
+      return date.toLocaleString('en-US', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+    } catch {
+      return '';
+    }
+  };
+
+  // Sort documents
+  const sortedDocuments = documents ? [...documents].sort((a, b) => {
+    switch (documentSortBy) {
+      case 'name_asc':
+        return (a.name || '').localeCompare(b.name || '');
+      case 'name_desc':
+        return (b.name || '').localeCompare(a.name || '');
+      case 'size_asc':
+        return (a.totalSegments || 0) - (b.totalSegments || 0);
+      case 'size_desc':
+        return (b.totalSegments || 0) - (a.totalSegments || 0);
+      case 'date_asc':
+        return new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime();
+      case 'date_desc':
+        return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
+      default:
+        return 0;
+    }
+  }) : [];
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -123,9 +187,18 @@ export default function ProjectDetailPage() {
   return (
     <Layout>
       <div className="space-y-6">
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900">{projectData.data.name}</h1>
-          <p className="text-gray-600 mt-2">{projectData.data.description}</p>
+        <div className="flex justify-between items-start">
+          <div>
+            <h1 className="text-3xl font-bold text-gray-900">{projectData.data.name}</h1>
+            <p className="text-gray-600 mt-2">{projectData.data.description}</p>
+          </div>
+          <button
+            onClick={handleDeleteProject}
+            disabled={isDeleting}
+            className="btn btn-danger text-sm"
+          >
+            {isDeleting ? 'Deleting...' : 'Delete Project'}
+          </button>
         </div>
 
         <div className="card">
@@ -177,16 +250,30 @@ export default function ProjectDetailPage() {
         <div className="card">
           <div className="flex justify-between items-center mb-4">
             <h2 className="text-xl font-semibold">Documents</h2>
-            <label className="btn btn-primary cursor-pointer">
-              {isUploading ? 'Uploading...' : '+ Upload Document'}
-              <input
-                type="file"
-                className="hidden"
-                accept=".docx,.xlsx,.xliff,.xlf"
-                onChange={handleFileUpload}
-                disabled={isUploading}
-              />
-            </label>
+            <div className="flex items-center gap-2">
+              <select
+                value={documentSortBy}
+                onChange={(e) => setDocumentSortBy(e.target.value)}
+                className="input text-sm"
+              >
+                <option value="name_asc">Sort: Name (A-Z)</option>
+                <option value="name_desc">Sort: Name (Z-A)</option>
+                <option value="size_desc">Sort: Size (Largest)</option>
+                <option value="size_asc">Sort: Size (Smallest)</option>
+                <option value="date_desc">Sort: Import Date (Newest)</option>
+                <option value="date_asc">Sort: Import Date (Oldest)</option>
+              </select>
+              <label className="btn btn-primary cursor-pointer">
+                {isUploading ? 'Uploading...' : '+ Upload Document'}
+                <input
+                  type="file"
+                  className="hidden"
+                  accept=".docx,.xlsx,.xliff,.xlf"
+                  onChange={handleFileUpload}
+                  disabled={isUploading}
+                />
+              </label>
+            </div>
           </div>
           
           {/* Upload Progress Bar */}
@@ -235,7 +322,7 @@ export default function ProjectDetailPage() {
           
           {documents && documents.length > 0 ? (
             <div className="space-y-2">
-              {documents.map((doc) => (
+              {sortedDocuments.map((doc) => (
                 <div key={doc.id} className="border-b border-gray-200 pb-3 flex justify-between items-center">
                   <div>
                     <Link
@@ -246,6 +333,9 @@ export default function ProjectDetailPage() {
                     </Link>
                     <div className="text-sm text-gray-500 mt-1">
                       {getLanguageName(doc.sourceLocale)} → {getLanguageName(doc.targetLocale)} • {doc.totalSegments} segments
+                    </div>
+                    <div className="text-xs text-gray-400 mt-1">
+                      Imported: {formatImportDate(doc.createdAt)}
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
@@ -262,6 +352,14 @@ export default function ProjectDetailPage() {
                     >
                       Open Editor
                     </Link>
+                    <button
+                      onClick={() => handleDeleteDocument(doc.id, doc.name)}
+                      disabled={deleteDocumentMutation.isPending}
+                      className="btn btn-danger text-sm"
+                      title="Delete document"
+                    >
+                      ×
+                    </button>
                   </div>
                 </div>
               ))}

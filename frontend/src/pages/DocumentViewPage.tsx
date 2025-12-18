@@ -1,12 +1,15 @@
 import Layout from '../components/Layout';
-import { useParams, Link } from 'react-router-dom';
-import { useQuery } from 'react-query';
+import { useParams, Link, useNavigate } from 'react-router-dom';
+import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { documentsApi } from '../api/documents.api';
 import { segmentsApi } from '../api/segments.api';
 import { getLanguageName } from '../utils/languages';
+import toast from 'react-hot-toast';
 
 export default function DocumentViewPage() {
   const { documentId } = useParams<{ documentId: string }>();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   const { data: document } = useQuery({
     queryKey: ['documents', documentId],
@@ -19,6 +22,25 @@ export default function DocumentViewPage() {
     queryFn: () => segmentsApi.list(documentId!, 1, 200),
     enabled: !!documentId,
   });
+
+  const deleteDocumentMutation = useMutation({
+    mutationFn: documentsApi.delete,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['documents'] });
+      toast.success('Document deleted successfully');
+      // Navigate back to projects page
+      navigate('/projects');
+    },
+    onError: (error: any) => {
+      toast.error(error.response?.data?.message || 'Failed to delete document');
+    },
+  });
+
+  const handleDeleteDocument = () => {
+    if (window.confirm(`Are you sure you want to delete document "${document?.name}"? This action cannot be undone.`)) {
+      deleteDocumentMutation.mutate(documentId!);
+    }
+  };
 
   if (!document) {
     return (
@@ -38,12 +60,21 @@ export default function DocumentViewPage() {
               {getLanguageName(document.sourceLocale)} → {getLanguageName(document.targetLocale)}
             </p>
           </div>
-          <Link
-            to={`/documents/${documentId}/editor`}
-            className="btn btn-primary"
-          >
-            Open Editor
-          </Link>
+          <div className="flex items-center gap-2">
+            <Link
+              to={`/documents/${documentId}/editor`}
+              className="btn btn-primary"
+            >
+              Open Editor
+            </Link>
+            <button
+              onClick={handleDeleteDocument}
+              disabled={deleteDocumentMutation.isPending}
+              className="btn btn-danger"
+            >
+              {deleteDocumentMutation.isPending ? 'Deleting...' : 'Delete Document'}
+            </button>
+          </div>
         </div>
 
         <div className="card">
