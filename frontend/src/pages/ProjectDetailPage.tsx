@@ -28,7 +28,9 @@ export default function ProjectDetailPage() {
   const [isTmModalOpen, setIsTmModalOpen] = useState(false);
   const [isAISettingsModalOpen, setIsAISettingsModalOpen] = useState(false);
   const [isGuidelinesModalOpen, setIsGuidelinesModalOpen] = useState(false);
-  const [documentSortBy, setDocumentSortBy] = useState<string>('name_asc');
+  const [segmentationMode, setSegmentationMode] = useState<'paragraphs' | 'sentences'>('paragraphs');
+  const [sortBy, setSortBy] = useState<'name' | 'size' | 'importTime'>('importTime');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
 
   const { data: documents } = useQuery({
     queryKey: ['documents', projectId],
@@ -61,41 +63,23 @@ export default function ProjectDetailPage() {
     }
   };
 
-  // Format date/time for display
-  const formatImportDate = (dateString: string | undefined) => {
-    if (!dateString) return '';
-    try {
-      const date = new Date(dateString);
-      return date.toLocaleString('en-US', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      });
-    } catch {
-      return '';
-    }
-  };
-
   // Sort documents
   const sortedDocuments = documents ? [...documents].sort((a, b) => {
-    switch (documentSortBy) {
-      case 'name_asc':
-        return (a.name || '').localeCompare(b.name || '');
-      case 'name_desc':
-        return (b.name || '').localeCompare(a.name || '');
-      case 'size_asc':
-        return (a.totalSegments || 0) - (b.totalSegments || 0);
-      case 'size_desc':
-        return (b.totalSegments || 0) - (a.totalSegments || 0);
-      case 'date_asc':
-        return new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime();
-      case 'date_desc':
-        return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
-      default:
-        return 0;
+    let comparison = 0;
+    
+    switch (sortBy) {
+      case 'name':
+        comparison = a.name.localeCompare(b.name);
+        break;
+      case 'size':
+        comparison = (a.wordCount || a.totalWords || 0) - (b.wordCount || b.totalWords || 0);
+        break;
+      case 'importTime':
+        comparison = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+        break;
     }
+    
+    return sortOrder === 'asc' ? comparison : -comparison;
   }) : [];
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -118,6 +102,7 @@ export default function ProjectDetailPage() {
           sourceLocale: projectData.data.sourceLocale,
           targetLocale: projectData.data.targetLocales[0] || projectData.data.sourceLocale,
           file,
+          segmentationMode,
         },
         (progress) => {
           // Upload progress (file transfer)
@@ -250,19 +235,27 @@ export default function ProjectDetailPage() {
         <div className="card">
           <div className="flex justify-between items-center mb-4">
             <h2 className="text-xl font-semibold">Documents</h2>
-            <div className="flex items-center gap-2">
-              <select
-                value={documentSortBy}
-                onChange={(e) => setDocumentSortBy(e.target.value)}
-                className="input text-sm"
-              >
-                <option value="name_asc">Sort: Name (A-Z)</option>
-                <option value="name_desc">Sort: Name (Z-A)</option>
-                <option value="size_desc">Sort: Size (Largest)</option>
-                <option value="size_asc">Sort: Size (Smallest)</option>
-                <option value="date_desc">Sort: Import Date (Newest)</option>
-                <option value="date_asc">Sort: Import Date (Oldest)</option>
-              </select>
+            <div className="flex items-center gap-3">
+              {/* Sort Controls */}
+              <div className="flex items-center gap-2">
+                <label className="text-sm text-gray-600">Sort by:</label>
+                <select
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value as 'name' | 'size' | 'importTime')}
+                  className="text-sm border border-gray-300 rounded px-2 py-1 bg-white"
+                >
+                  <option value="name">Name</option>
+                  <option value="size">Size</option>
+                  <option value="importTime">Import Time</option>
+                </select>
+                <button
+                  onClick={() => setSortOrder(sortOrder === 'asc' ? 'desc' : 'asc')}
+                  className="text-sm text-gray-600 hover:text-gray-900"
+                  title={sortOrder === 'asc' ? 'Ascending' : 'Descending'}
+                >
+                  {sortOrder === 'asc' ? '↑' : '↓'}
+                </button>
+              </div>
               <label className="btn btn-primary cursor-pointer">
                 {isUploading ? 'Uploading...' : '+ Upload Document'}
                 <input
@@ -274,6 +267,41 @@ export default function ProjectDetailPage() {
                 />
               </label>
             </div>
+          </div>
+          
+          {/* Segmentation Mode Selection */}
+          <div className="mb-4 p-3 bg-gray-50 rounded-lg">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Segmentation Mode
+            </label>
+            <div className="flex gap-4">
+              <label className="flex items-center">
+                <input
+                  type="radio"
+                  value="paragraphs"
+                  checked={segmentationMode === 'paragraphs'}
+                  onChange={(e) => setSegmentationMode(e.target.value as 'paragraphs' | 'sentences')}
+                  className="mr-2"
+                />
+                <span className="text-sm text-gray-700">By Paragraphs</span>
+              </label>
+              <label className="flex items-center">
+                <input
+                  type="radio"
+                  value="sentences"
+                  checked={segmentationMode === 'sentences'}
+                  onChange={(e) => setSegmentationMode(e.target.value as 'paragraphs' | 'sentences')}
+                  className="mr-2"
+                />
+                <span className="text-sm text-gray-700">By Sentences</span>
+              </label>
+            </div>
+            <p className="text-xs text-gray-500 mt-2">
+              {segmentationMode === 'paragraphs' 
+                ? 'Documents will be split by paragraphs (recommended for most documents)'
+                : 'Documents will be split by sentences (useful for detailed editing and alignment)'}
+            </p>
+>>>>>>> 500edc9 (Add document sorting and import time display; Fix export for sentence-segmented documents)
           </div>
           
           {/* Upload Progress Bar */}
@@ -320,7 +348,7 @@ export default function ProjectDetailPage() {
             </div>
           )}
           
-          {documents && documents.length > 0 ? (
+          {sortedDocuments && sortedDocuments.length > 0 ? (
             <div className="space-y-2">
               {sortedDocuments.map((doc) => (
                 <div key={doc.id} className="border-b border-gray-200 pb-3 flex justify-between items-center">
@@ -332,7 +360,10 @@ export default function ProjectDetailPage() {
                       {doc.name}
                     </Link>
                     <div className="text-sm text-gray-500 mt-1">
-                      {getLanguageName(doc.sourceLocale)} → {getLanguageName(doc.targetLocale)} • {doc.totalSegments} segments
+                      {getLanguageName(doc.sourceLocale)} → {getLanguageName(doc.targetLocale)} • {doc.totalSegments} segments • {(doc.wordCount || doc.totalWords || 0).toLocaleString()} words
+                    </div>
+                    <div className="text-xs text-gray-400 mt-1">
+                      Imported: {new Date(doc.createdAt).toLocaleString()}
                     </div>
                     <div className="text-xs text-gray-400 mt-1">
                       Imported: {formatImportDate(doc.createdAt)}

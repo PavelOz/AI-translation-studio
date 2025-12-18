@@ -33,6 +33,7 @@ export type UploadDocumentRequest = {
   sourceLocale: string;
   targetLocale: string;
   file: File;
+  segmentationMode?: 'paragraphs' | 'sentences';
 };
 
 export const documentsApi = {
@@ -56,6 +57,9 @@ export const documentsApi = {
     formData.append('projectId', data.projectId);
     formData.append('sourceLocale', data.sourceLocale);
     formData.append('targetLocale', data.targetLocale);
+    if (data.segmentationMode) {
+      formData.append('segmentationMode', data.segmentationMode);
+    }
 
     const response = await apiClient.post<{ document: Document; importedSegments: number }>(
       '/documents/upload',

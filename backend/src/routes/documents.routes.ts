@@ -56,6 +56,7 @@ const uploadSchema = z.object({
   projectId: z.string().uuid(),
   sourceLocale: z.string(),
   targetLocale: z.string(),
+  segmentationMode: z.enum(['paragraphs', 'sentences']).optional(),
 });
 
 export const documentRoutes = Router();

@@ -343,8 +343,13 @@ export const exportDocumentFile = async (documentId: string): Promise<Buffer> =>
 
   const exportSegments = segments.segments.map((seg) => ({
     index: seg.segmentIndex,
-    targetText: seg.targetFinal ?? seg.targetMt ?? seg.sourceText, // Use sourceText as fallback
-    segmentType: seg.segmentType || 'paragraph', // Include segment type for export logic
+    targetText: seg.targetFinal ?? seg.targetMt ?? seg.sourceText,
+    segmentType: seg.segmentType || 'paragraph',
+    metadata: {
+      sourceText: seg.sourceText, // Include sourceText for verification matching
+    },
+    // Note: documentParagraphIndex metadata is not stored in DB,
+    // Export will use heuristic approach to group sentence segments
   }));
 
   // #region agent log
