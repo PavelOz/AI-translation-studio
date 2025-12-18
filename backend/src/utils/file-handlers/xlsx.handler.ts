@@ -38,7 +38,7 @@ export class XlsxHandler implements FileHandler {
     return extension === '.xlsx';
   }
 
-  async parse(buffer: Buffer, options?: { segmentationMode?: 'paragraphs' | 'sentences' }): Promise<ParsedFileResult> {
+  async parse(buffer: Buffer): Promise<ParsedFileResult> {
     let zip: JSZip;
     try {
       zip = await JSZip.loadAsync(buffer);
@@ -143,7 +143,7 @@ export class XlsxHandler implements FileHandler {
       );
     }
 
-    const segments: Array<{ index: number; sourceText: string; type: 'cell'; sharedStringIndex?: number }> = [];
+    const segments: Array<{ index: number; sourceText: string; sharedStringIndex?: number }> = [];
     const structure: XlsxStructure = {
       sharedStrings,
       worksheets: [],
@@ -244,7 +244,6 @@ export class XlsxHandler implements FileHandler {
             segments.push({
               index: segments.length,
               sourceText: cellText.trim(),
-              type: 'cell' as const,
               sharedStringIndex: cellType === 's' && typeof cellValue === 'string' ? parseInt(cellValue, 10) : undefined,
             });
           }
@@ -272,7 +271,6 @@ export class XlsxHandler implements FileHandler {
       segments: segments.map((seg) => ({
         index: seg.index,
         sourceText: seg.sourceText,
-        type: seg.type || 'cell' as const,
         metadata: {
           sharedStringIndex: seg.sharedStringIndex,
         },

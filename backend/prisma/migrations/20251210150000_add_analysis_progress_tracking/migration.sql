@@ -8,3 +8,4 @@ ALTER TABLE "DocumentAnalysis" ADD COLUMN IF NOT EXISTS "currentMessage" TEXT;
 
 
 
+

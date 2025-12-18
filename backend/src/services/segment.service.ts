@@ -95,7 +95,7 @@ export const updateSegment = async (segmentId: string, data: SegmentUpdateInput)
 };
 
 export const bulkUpsertSegments = (
-  segments: Array<{ documentId: string; segmentIndex: number; sourceText: string; targetMt?: string | null; segmentType?: string }>,
+  segments: Array<{ documentId: string; segmentIndex: number; sourceText: string; targetMt?: string | null }>,
 ) =>
   prisma.$transaction(
     segments.map((segment) =>
@@ -109,13 +109,10 @@ export const bulkUpsertSegments = (
         update: {
           sourceText: segment.sourceText,
           targetMt: segment.targetMt ?? undefined,
-          // Only update segmentType if it's provided, otherwise keep existing value
-          ...(segment.segmentType !== undefined && { segmentType: segment.segmentType }),
         },
         create: {
           ...segment,
           status: 'NEW',
-          segmentType: segment.segmentType ?? 'paragraph',
         },
       }),
     ),

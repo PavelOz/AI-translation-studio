@@ -33,18 +33,11 @@ export type UploadDocumentRequest = {
   sourceLocale: string;
   targetLocale: string;
   file: File;
-  segmentationMode?: 'paragraphs' | 'sentences';
 };
 
-export type DocumentSortField = 'name' | 'size' | 'createdAt' | 'fileType';
-export type DocumentSortOrder = 'asc' | 'desc';
-
 export const documentsApi = {
-  list: async (projectId?: string, sortBy?: DocumentSortField, sortOrder?: DocumentSortOrder): Promise<Document[]> => {
-    const params: Record<string, string> = {};
-    if (projectId) params.projectId = projectId;
-    if (sortBy) params.sortBy = sortBy;
-    if (sortOrder) params.sortOrder = sortOrder;
+  list: async (projectId?: string): Promise<Document[]> => {
+    const params = projectId ? { projectId } : {};
     const response = await apiClient.get<Document[]>('/documents', { params });
     return response.data;
   },
@@ -63,9 +56,6 @@ export const documentsApi = {
     formData.append('projectId', data.projectId);
     formData.append('sourceLocale', data.sourceLocale);
     formData.append('targetLocale', data.targetLocale);
-    if (data.segmentationMode) {
-      formData.append('segmentationMode', data.segmentationMode);
-    }
 
     const response = await apiClient.post<{ document: Document; importedSegments: number }>(
       '/documents/upload',
@@ -115,7 +105,6 @@ export const documentsApi = {
       rewriteConfirmed?: boolean;
       rewriteNonConfirmed?: boolean;
       glossaryMode?: GlossaryMode;
-      useCritic?: boolean;
     },
   ): Promise<{
     status: string;
@@ -174,28 +163,6 @@ export const documentsApi = {
     currentProgress?: any;
   }> => {
     const response = await apiClient.post(`/documents/${documentId}/pretranslate/cancel`);
-    return response.data;
-  },
-
-  generateGlossary: async (documentId: string): Promise<{ count: number }> => {
-    const response = await apiClient.post<{ count: number }>(`/documents/${documentId}/generate-glossary`);
-    return response.data;
-  },
-
-  listDocumentGlossary: async (documentId: string): Promise<Array<{
-    id: string;
-    documentId: string;
-    sourceTerm: string;
-    targetTerm: string;
-    createdAt: string;
-  }>> => {
-    const response = await apiClient.get<Array<{
-      id: string;
-      documentId: string;
-      sourceTerm: string;
-      targetTerm: string;
-      createdAt: string;
-    }>>(`/documents/${documentId}/glossary`);
     return response.data;
   },
 };
