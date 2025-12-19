@@ -409,8 +409,12 @@ export default function TMSuggestionsPanel({
       });
       
       // Auto-apply 100% match if segment is empty
+      // Only auto-apply paragraph matches to empty segments (not sentence matches)
       const isSegmentEmpty = !currentTargetText || currentTargetText.trim() === '';
-      const perfectMatch = matches.find((m) => m.fuzzyScore === 100);
+      const perfectMatch = matches.find((m) => 
+        m.fuzzyScore === 100 && 
+        (m.entryType === 'paragraph' || !m.entryType) // Only paragraph matches for auto-apply
+      );
       
       if (isSegmentEmpty && perfectMatch && perfectMatch.targetText && autoAppliedRef.current !== segmentId) {
         // Only auto-apply once per segment to prevent loops
@@ -480,14 +484,38 @@ export default function TMSuggestionsPanel({
       return;
     }
 
+    // Determine if this is a sentence-level match
+    const isSentence = suggestion.entryType === 'sentence';
+    const isParagraph = suggestion.entryType === 'paragraph' || !suggestion.entryType;
+    
+    // Check if segment has existing text
+    const hasExistingText = currentTargetText && currentTargetText.trim().length > 0;
+    
+    // Smart insertion logic:
+    // - Sentence match + empty segment → replace (current behavior)
+    // - Sentence match + non-empty segment → append with space
+    // - Paragraph match → always replace (current behavior)
+    let finalText: string;
+    let actionType: 'insert' | 'append';
+    
+    if (isSentence && hasExistingText) {
+      // Append sentence to existing text with space separator
+      finalText = `${currentTargetText.trim()} ${suggestion.targetText.trim()}`;
+      actionType = 'append';
+    } else {
+      // Replace entire segment (for paragraphs or empty segments with sentence matches)
+      finalText = suggestion.targetText;
+      actionType = 'insert';
+    }
+
     // Update UI immediately (optimistic update) before API call
-    onApply(suggestion.targetText);
+    onApply(finalText);
 
     try {
       // Update the segment with the TM match
       const updatePayload: any = {
-        targetFinal: suggestion.targetText,
-        targetMt: suggestion.targetText, // Also set targetMt for consistency
+        targetFinal: finalText,
+        targetMt: finalText, // Also set targetMt for consistency
         status: 'MT',
       };
       
@@ -507,7 +535,8 @@ export default function TMSuggestionsPanel({
         toast.error('Failed to save changes. Please try again.');
       });
       
-      toast.success(`TM match (${suggestion.fuzzyScore || 0}%) applied`);
+      const actionLabel = actionType === 'append' ? 'appended' : 'inserted';
+      toast.success(`TM match (${suggestion.fuzzyScore || 0}%) ${actionLabel}`);
     } catch (error: any) {
       const errorMessage = error.response?.data?.message || error.message || 'Failed to apply suggestion';
       toast.error(errorMessage);
@@ -995,8 +1024,15 @@ export default function TMSuggestionsPanel({
                 }}
                 className="w-full mt-3 px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md transition-colors shadow-sm hover:shadow-md"
                 type="button"
+                title={
+                  suggestion.entryType === 'sentence' && currentTargetText && currentTargetText.trim().length > 0
+                    ? 'Append this sentence to existing text'
+                    : 'Insert this translation'
+                }
               >
-                Insert
+                {suggestion.entryType === 'sentence' && currentTargetText && currentTargetText.trim().length > 0
+                  ? 'Append'
+                  : 'Insert'}
               </button>
             </div>
           );
