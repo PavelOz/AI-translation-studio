@@ -19,6 +19,7 @@ type TranslationMemoryEntry = {
   embeddingModel?: string | null;
   embeddingVersion?: string | null;
   embeddingUpdatedAt?: Date | null;
+  entryType?: 'sentence' | 'paragraph' | null;
   tmxFile?: { filename?: string; name?: string; lastImportedAt?: Date | null } | null;
 };
 import { ApiError } from '../utils/apiError';
@@ -27,6 +28,7 @@ import { generateEmbedding } from './embedding.service';
 import { searchByVector } from './vector-search.service';
 import { logger } from '../utils/logger';
 import { generateEmbeddingForEntry } from './embedding-generation.service';
+import { stripFormattingTags } from '../utils/segmentation';
 
 const tmxParser = new XMLParser({ ignoreAttributes: false });
 
@@ -35,8 +37,10 @@ const searchCache = new Map<string, { results: TmSearchResult[]; timestamp: numb
 const CACHE_TTL = 30000; // 30 seconds
 const MAX_CACHE_SIZE = 100;
 
-const getCacheKey = (sourceText: string, sourceLocale: string, targetLocale: string, projectId?: string) => {
-  return `${projectId || 'global'}:${sourceLocale}:${targetLocale}:${sourceText.toLowerCase().trim()}`;
+const getCacheKey = (sourceText: string, sourceLocale: string, targetLocale: string, projectId?: string, entryType?: 'sentence' | 'paragraph' | null) => {
+  // Include entryType in cache key to prevent cross-contamination between sentence and paragraph searches
+  const entryTypeSuffix = entryType ? `:${entryType}` : '';
+  return `${projectId || 'global'}:${sourceLocale}:${targetLocale}:${sourceText.toLowerCase().trim()}${entryTypeSuffix}`;
 };
 
 const getCachedResults = (key: string): TmSearchResult[] | null => {
@@ -71,9 +75,10 @@ type TmSearchOptions = {
   vectorSimilarity?: number; // Vector search similarity threshold (0-100)
   mode?: 'basic' | 'extended'; // Search mode: 'basic' = strict thresholds, 'extended' = relaxed thresholds
   useVectorSearch?: boolean; // Whether to use semantic (vector) search
+  entryType?: 'sentence' | 'paragraph' | null; // Optional: filter by entry type for more precise matching
 };
 
-type SearchScope = 'project' | 'global';
+type SearchScope = 'project' | 'global' | 'other-project';
 
 export type TmSearchResult = TranslationMemoryEntry & {
   fuzzyScore: number;
@@ -82,6 +87,7 @@ export type TmSearchResult = TranslationMemoryEntry & {
   tmxFileName?: string;
   tmxFileSource?: 'imported' | 'linked';
   searchMethod?: 'fuzzy' | 'vector' | 'hybrid'; // How this result was found
+  entryType?: 'sentence' | 'paragraph' | null; // Explicitly include entryType in result type
 };
 
 const fetchScopedEntries = async (
@@ -91,6 +97,7 @@ const fetchScopedEntries = async (
   projectId?: string,
   take = 200,
   allowAnyLocale = false,
+  entryType?: 'sentence' | 'paragraph' | null, // Optional: filter by entry type
 ) => {
   if (scope === 'project' && !projectId) {
     return [];
@@ -144,8 +151,21 @@ const fetchScopedEntries = async (
 
   if (scope === 'project') {
     whereClause.projectId = projectId;
-  } else {
+  } else if (scope === 'global') {
     whereClause.projectId = null;
+  } else if (scope === 'other-project') {
+    // Search entries from other projects (not null, not current project)
+    if (projectId) {
+      whereClause.projectId = { not: projectId };
+    } else {
+      // If no projectId provided, search all non-null project entries
+      whereClause.projectId = { not: null };
+    }
+  }
+
+  // Filter by entryType if specified (for precise sentence vs paragraph matching)
+  if (entryType !== undefined && entryType !== null) {
+    whereClause.entryType = entryType;
   }
 
   // Debug logging for locale matching
@@ -214,13 +234,19 @@ export const searchTranslationMemory = async ({
   vectorSimilarity,
   mode = 'basic', // Default to 'basic' to preserve current behavior
   useVectorSearch = true, // Default to true to preserve current behavior
+  entryType, // Optional: filter by entry type for precise matching
 }: TmSearchOptions): Promise<TmSearchResult[]> => {
   if (!sourceText || !sourceText.trim()) {
     return [];
   }
 
-  // Check cache first
-  const cacheKey = getCacheKey(sourceText, sourceLocale ?? '', targetLocale ?? '', projectId ?? undefined);
+  // Strip formatting tags ({{0}}, {{/0}}, etc.) before searching
+  // This ensures we match against clean text in TM, which is saved without formatting tags
+  // This is critical for consistent matching regardless of where searchTranslationMemory is called
+  const cleanSourceText = stripFormattingTags(sourceText);
+
+  // Check cache first (use clean text for cache key, include entryType to prevent cross-contamination)
+  const cacheKey = getCacheKey(cleanSourceText, sourceLocale ?? '', targetLocale ?? '', projectId ?? undefined, entryType);
   const cached = getCachedResults(cacheKey);
   if (cached) {
     return cached.slice(0, limit);
@@ -237,8 +263,8 @@ export const searchTranslationMemory = async ({
   
   try {
     if (useVectorSearch) {
-      // Generate embedding for query text
-      const queryEmbedding = await generateEmbedding(sourceText, true);
+      // Generate embedding for query text (use clean text without formatting tags)
+      const queryEmbedding = await generateEmbedding(cleanSourceText, true);
       
       // Vector similarity threshold: use provided value or default to 0.5 (50%)
       // This is independent of fuzzy minScore to allow separate control
@@ -247,7 +273,7 @@ export const searchTranslationMemory = async ({
         : 0.5;
       
   logger.info({
-    sourceText: sourceText.substring(0, 50),
+    sourceText: cleanSourceText.substring(0, 50),
     sourceLocale,
     targetLocale,
     projectId: projectId || 'none',
@@ -261,12 +287,14 @@ export const searchTranslationMemory = async ({
   }, 'Starting TM search');
       
       // Search using vector similarity
+      // Pass entryType filter if specified (for sentence searches to only match sentence entries)
       const vectorMatches = await searchByVector(queryEmbedding, {
         projectId,
         sourceLocale,
         targetLocale,
         limit: normalizedLimit * 2, // Get more candidates for merging
         minSimilarity,
+        entryType: entryType, // Filter by entry type for precise matching
       });
       
       logger.info(`Vector search returned ${vectorMatches.length} raw matches`);
@@ -294,6 +322,7 @@ export const searchTranslationMemory = async ({
           tmxFileName: undefined, // Vector results don't include tmxFile relation
           tmxFileSource: undefined,
           searchMethod: 'vector' as const,
+          entryType: entry.entryType ?? undefined, // Explicitly preserve entryType
         };
       });
       
@@ -319,14 +348,21 @@ export const searchTranslationMemory = async ({
   const candidateScopes: Array<{ scope: SearchScope; entries: TranslationMemoryEntry[] }> = [];
   
   // First try with exact locale matching
+  // Pass entryType filter if specified (for sentence searches to only match sentence entries)
+  const entryTypeFilter = entryType;
   if (projectId) {
-    const [projectEntries, globalEntries] = await Promise.all([
-      fetchScopedEntries(sourceLocale, targetLocale, 'project', projectId, candidateTake, false),
-      fetchScopedEntries(sourceLocale, targetLocale, 'global', undefined, candidateTake, false),
+    const [projectEntries, globalEntries, otherProjectEntries] = await Promise.all([
+      fetchScopedEntries(sourceLocale, targetLocale, 'project', projectId, candidateTake, false, entryTypeFilter),
+      fetchScopedEntries(sourceLocale, targetLocale, 'global', undefined, candidateTake, false, entryTypeFilter),
+      fetchScopedEntries(sourceLocale, targetLocale, 'other-project', projectId, candidateTake, false, entryTypeFilter),
     ]);
-    candidateScopes.push({ scope: 'project', entries: projectEntries }, { scope: 'global', entries: globalEntries });
+    candidateScopes.push(
+      { scope: 'project', entries: projectEntries }, 
+      { scope: 'global', entries: globalEntries },
+      { scope: 'other-project', entries: otherProjectEntries }
+    );
   } else {
-    const globalEntries = await fetchScopedEntries(sourceLocale, targetLocale, 'global', undefined, candidateTake * 2, false);
+    const globalEntries = await fetchScopedEntries(sourceLocale, targetLocale, 'global', undefined, candidateTake * 2, false, entryTypeFilter);
     candidateScopes.push({ scope: 'global', entries: globalEntries });
   }
 
@@ -347,15 +383,21 @@ export const searchTranslationMemory = async ({
   if (totalMatches === 0 && hasSpecifiedLocales) {
     logger.info(`No matches found for locales ${sourceLocale}->${targetLocale}, trying all locales`);
     if (projectId) {
-      const [projectEntriesAny, globalEntriesAny] = await Promise.all([
-        fetchScopedEntries(sourceLocale, targetLocale, 'project', projectId, candidateTake, true),
-        fetchScopedEntries(sourceLocale, targetLocale, 'global', undefined, candidateTake, true),
+      const [projectEntriesAny, globalEntriesAny, otherProjectEntriesAny] = await Promise.all([
+        fetchScopedEntries(sourceLocale, targetLocale, 'project', projectId, candidateTake, true, entryTypeFilter),
+        fetchScopedEntries(sourceLocale, targetLocale, 'global', undefined, candidateTake, true, entryTypeFilter),
+        fetchScopedEntries(sourceLocale, targetLocale, 'other-project', projectId, candidateTake, true, entryTypeFilter),
       ]);
       logger.debug({
         projectEntriesAny: projectEntriesAny.length,
         globalEntriesAny: globalEntriesAny.length,
+        otherProjectEntriesAny: otherProjectEntriesAny.length,
       }, 'Fuzzy search with allowAnyLocale=true');
-      candidateScopes.push({ scope: 'project', entries: projectEntriesAny }, { scope: 'global', entries: globalEntriesAny });
+      candidateScopes.push(
+        { scope: 'project', entries: projectEntriesAny }, 
+        { scope: 'global', entries: globalEntriesAny },
+        { scope: 'other-project', entries: otherProjectEntriesAny }
+      );
     } else {
       const globalEntriesAny = await fetchScopedEntries(sourceLocale, targetLocale, 'global', undefined, candidateTake * 2, true);
       logger.debug({ globalEntriesAny: globalEntriesAny.length }, 'Fuzzy search with allowAnyLocale=true');
@@ -412,7 +454,8 @@ export const searchTranslationMemory = async ({
   // Optimize: Quick pre-filter before expensive fuzzy scoring
   // Normalize text: trim, lowercase, and ensure proper UTF-8 encoding
   // Also normalize source text to handle potential encoding issues
-  const normalizedSource = normalizeEntryText(sourceText.trim());
+  // CRITICAL: Use cleanSourceText (without formatting tags) to match against TM entries (which also don't have tags)
+  const normalizedSource = normalizeEntryText(cleanSourceText.trim());
   const sourceLength = normalizedSource.length;
   const sourceWords = normalizedSource.split(/\s+/).filter(Boolean);
   
@@ -441,7 +484,8 @@ export const searchTranslationMemory = async ({
       
       // If not found in candidates, we need to fetch it or add it manually
       // For now, we'll score it directly
-      const similarity = computeFuzzyScore(sourceText, vectorResult.sourceText);
+      // Use cleanSourceText for consistent matching
+      const similarity = computeFuzzyScore(cleanSourceText, vectorResult.sourceText);
       if (similarity.score >= minScore) {
         scored.push({
           ...vectorResult,
@@ -477,6 +521,7 @@ export const searchTranslationMemory = async ({
           tmxFileName: entry.tmxFile?.filename || entry.tmxFile?.name,
           tmxFileSource: entry.tmxFile ? (entry.tmxFile.lastImportedAt ? 'imported' : 'linked') : undefined,
           searchMethod: 'fuzzy' as const,
+          entryType: entry.entryType ?? undefined, // Explicitly preserve entryType
         });
         // If we found a perfect match, we can stop early
         if (scored.length >= normalizedLimit) {
@@ -487,6 +532,7 @@ export const searchTranslationMemory = async ({
       
       // Quick pre-filter: length check (very fast)
       // Threshold is mode-dependent: 'basic' = 0.4 (40%), 'extended' = 0.6 (60%)
+      // sourceLength is already calculated from cleanSourceText (normalizedSource)
       const lengthDiff = Math.abs(sourceLength - entryText.length) / Math.max(sourceLength, entryText.length);
       if (lengthDiff > lengthThreshold) {
         // Debug: log why entries are being filtered
@@ -515,7 +561,7 @@ export const searchTranslationMemory = async ({
       // Calculate word overlap ratio
       const commonWords = normalizedSourceWords.filter((w) => w && normalizedEntryWords.includes(w)).length;
       const wordOverlapRatio = commonWords / Math.max(normalizedSourceWords.length, normalizedEntryWords.length, 1);
-      
+
       if (wordOverlapRatio < wordOverlapThreshold) {
         // Debug: log why entries are being filtered (only for first few to avoid spam)
         if (scored.length < 3) {
@@ -540,12 +586,13 @@ export const searchTranslationMemory = async ({
       // Only do expensive fuzzy scoring if pre-filters pass
       // Use normalized entry text for fuzzy scoring to handle encoding issues
       const entrySourceTextForScoring = normalizeEntryText(entry.sourceText);
-      const similarity = computeFuzzyScore(sourceText, entrySourceTextForScoring);
+      // Use cleanSourceText for consistent matching (without formatting tags)
+      const similarity = computeFuzzyScore(cleanSourceText, entrySourceTextForScoring);
       
       // Debug logging for first few entries to see scores
       if (scored.length < 5) {
         logger.debug({
-          sourceText: sourceText.substring(0, 60),
+          sourceText: cleanSourceText.substring(0, 60),
           entryText: entry.sourceText.substring(0, 60),
           fuzzyScore: similarity.score,
           minScore,
@@ -564,6 +611,7 @@ export const searchTranslationMemory = async ({
           tmxFileName: entry.tmxFile?.filename || entry.tmxFile?.name,
           tmxFileSource: entry.tmxFile ? (entry.tmxFile.lastImportedAt ? 'imported' : 'linked') : undefined,
           searchMethod: 'fuzzy' as const,
+          entryType: entry.entryType ?? undefined, // Explicitly preserve entryType
         });
       }
       
@@ -642,10 +690,14 @@ export const searchTranslationMemory = async ({
   // Convert map back to array
   const hybridResults = Array.from(resultMap.values());
   
-  // Sort by scope (project first) then by score
+  // Sort by scope (project first, then global, then other-project) then by score
   hybridResults.sort((a, b) => {
     if (a.scope !== b.scope) {
-      return a.scope === 'project' ? -1 : 1;
+      if (a.scope === 'project') return -1;
+      if (b.scope === 'project') return 1;
+      if (a.scope === 'global') return -1;
+      if (b.scope === 'global') return 1;
+      return 0; // both are 'other-project'
     }
     return b.fuzzyScore - a.fuzzyScore;
   });
@@ -720,14 +772,18 @@ export const searchTranslationMemory = async ({
   const allResults = [...scored, ...linkedResults];
   allResults.sort((a, b) => {
     if (a.scope !== b.scope) {
-      return a.scope === 'project' ? -1 : 1;
+      if (a.scope === 'project') return -1;
+    if (b.scope === 'project') return 1;
+    if (a.scope === 'global') return -1;
+    if (b.scope === 'global') return 1;
+    return 0; // both are 'other-project'
     }
     return b.fuzzyScore - a.fuzzyScore;
   });
 
   const finalResults = allResults.slice(0, normalizedLimit);
   
-  // Cache the results
+  // Cache the results (cache key already includes entryType from earlier)
   setCachedResults(cacheKey, finalResults);
   
   return finalResults;
@@ -762,6 +818,7 @@ export const upsertTranslationMemoryEntry = async (data: {
   clientName?: string;
   domain?: string;
   matchRate?: number;
+  entryType?: 'sentence' | 'paragraph';
 }) => {
   // Normalize source text for comparison (trim and lowercase)
   const normalizedSource = data.sourceText.trim().toLowerCase();
@@ -790,6 +847,7 @@ export const upsertTranslationMemoryEntry = async (data: {
         clientName: data.clientName ?? existing.clientName,
         domain: data.domain ?? existing.domain,
         usageCount: existing.usageCount + 1,
+        entryType: data.entryType ?? existing.entryType, // Update entryType if provided
       },
     });
   } else {
@@ -797,7 +855,9 @@ export const upsertTranslationMemoryEntry = async (data: {
     entry = await prisma.translationMemoryEntry.create({
       data: {
         ...data,
+        projectId: data.projectId ?? null,
         matchRate: data.matchRate ?? 1,
+        entryType: data.entryType ?? null,
       },
     });
   }
@@ -1077,6 +1137,9 @@ const queryLinkedTmxFile = async (
   targetLocale: string,
   minScore: number = 60,
 ): Promise<TmSearchResult[]> => {
+  // Strip formatting tags ({{0}}, {{/0}}, etc.) before searching
+  // This ensures we match against clean text in TMX files
+  const cleanSourceText = stripFormattingTags(sourceText);
   const tmxFile = await prisma.translationMemoryFile.findUnique({
     where: { id: tmxFileId },
     select: {
@@ -1177,12 +1240,14 @@ const queryLinkedTmxFile = async (
         if (!unitSourceText || !unitTargetText) continue;
 
         // Quick pre-filter: skip if source text length is too different (simple optimization)
-        const lengthDiff = Math.abs(sourceText.length - unitSourceText.length) / Math.max(sourceText.length, unitSourceText.length);
+        // Use cleanSourceText for consistent matching (strip formatting tags from TMX entries too)
+        const cleanUnitSourceText = stripFormattingTags(unitSourceText);
+        const lengthDiff = Math.abs(cleanSourceText.length - cleanUnitSourceText.length) / Math.max(cleanSourceText.length, cleanUnitSourceText.length);
         if (lengthDiff > 0.5) {
           continue; // Skip if length difference is > 50%
         }
 
-        const similarity = computeFuzzyScore(sourceText, unitSourceText);
+        const similarity = computeFuzzyScore(cleanSourceText, cleanUnitSourceText);
         const fuzzyScore = similarity.score;
 
         if (fuzzyScore >= minScore) {

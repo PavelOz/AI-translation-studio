@@ -32,7 +32,7 @@ export class OpenAIProvider extends BaseProvider {
           messages: [
             { 
               role: 'system', 
-              content: request.systemPrompt ?? 'You are a professional technical/legal translator specializing in natural, native-sounding translations. Follow ALL instructions in the user prompt carefully, including translation direction, glossary terms, formatting requirements, and natural language quality guidelines. Always translate to the target language specified in the prompt, ensuring the translation reads as if originally written by a native speaker, not translated.' 
+              content: request.systemPrompt ?? 'You are a professional technical/legal translator. CRITICAL: Follow the translation direction specified in the user prompt. The user prompt will clearly state SOURCE language (input) and TARGET language (output). You MUST translate FROM source TO target. Your output MUST be in the target language only. Never return text in the source language. ALL source text must be translated - do not keep source text unchanged. Even if source text appears similar to target language, you must still translate it. Follow ALL instructions in the user prompt carefully, including translation direction, glossary terms, formatting requirements, and natural language quality guidelines. Always translate to the target language specified in the prompt, ensuring the translation reads as if originally written by a native speaker, not translated.' 
             },
             { role: 'user', content: request.prompt },
           ],

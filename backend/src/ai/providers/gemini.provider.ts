@@ -268,6 +268,12 @@ export class GeminiProvider extends BaseProvider {
         }, 'Using high maxTokens for Gemini API (likely critic workflow)');
         }
         
+        // For Gemini, prepend systemPrompt to the user prompt if provided
+        // Gemini API v1 doesn't have explicit system role, so we inject it into the prompt
+        const userPrompt = request.systemPrompt 
+          ? `${request.systemPrompt}\n\n${request.prompt}`
+          : request.prompt;
+        
         const response = await fetch(apiUrl, {
         method: 'POST',
         headers: {
@@ -277,7 +283,7 @@ export class GeminiProvider extends BaseProvider {
           contents: [
             {
               role: 'user',
-              parts: [{ text: request.prompt }],
+              parts: [{ text: userPrompt }],
             },
           ],
           generationConfig: {

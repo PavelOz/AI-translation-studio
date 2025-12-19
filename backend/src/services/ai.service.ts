@@ -14,9 +14,236 @@ import { env } from '../utils/env';
 import type { GlossaryMode } from '../types/glossary';
 import type { ContextRules } from './glossary.service';
 import { getDocumentGlossaryForSegment, getDocumentStyleRules } from './analysis.service';
+import { splitIntoSentences, stripFormattingTags } from '../utils/segmentation';
 
 const orchestrator = new AIOrchestrator();
 const qaEngine = new QAEngine();
+
+/**
+ * Scatter-Gather TM Search: Split paragraph into sentences, search each sentence + full paragraph
+ * 
+ * Strategy:
+ * 1. Split: Split paragraph into sentences
+ * 2. Scatter: Search TM for full paragraph AND each sentence in parallel
+ * 3. Gather: Combine and deduplicate results by entry ID
+ * 
+ * @param paragraphText - The full paragraph text to search
+ * @param sourceLocale - Source locale
+ * @param targetLocale - Target locale
+ * @param projectId - Project ID
+ * @param searchOptions - Search options (limit, minScore, vectorSimilarity)
+ * @returns Deduplicated array of TM search results
+ */
+export async function scatterGatherTmSearch(
+  paragraphText: string,
+  sourceLocale: string,
+  targetLocale: string,
+  projectId: string | null,
+  searchOptions: {
+    limit?: number;
+    minScore?: number;
+    vectorSimilarity?: number;
+    mode?: 'basic' | 'extended';
+    useVectorSearch?: boolean;
+  }
+): Promise<Array<{
+  id: string;
+  sourceText: string;
+  targetText: string;
+  fuzzyScore: number;
+  searchMethod?: 'fuzzy' | 'vector' | 'hybrid';
+  entryType?: 'sentence' | 'paragraph' | null;
+}>> {
+  if (!paragraphText || !paragraphText.trim()) {
+    return [];
+  }
+
+  // Strip formatting tags ({{0}}, {{/0}}, etc.) before searching
+  // This ensures we match against clean text in TM, which is saved without formatting tags
+  const cleanParagraphText = stripFormattingTags(paragraphText);
+  
+  // Step 1: Split paragraph into sentences
+  const sentences = splitIntoSentences(cleanParagraphText, sourceLocale);
+  
+  // Step 2: Scatter - Search for full paragraph AND each sentence in parallel
+  const searchPromises: Promise<Array<{
+    id: string;
+    sourceText: string;
+    targetText: string;
+    fuzzyScore: number;
+    searchMethod?: 'fuzzy' | 'vector' | 'hybrid';
+    entryType?: 'sentence' | 'paragraph' | null;
+  }>>[] = [];
+
+  // Always search for the full paragraph (for context)
+  // Use clean text without formatting tags
+  // CRITICAL: Only search paragraph-level entries when searching for paragraphs
+  searchPromises.push(
+    searchTranslationMemory({
+      sourceText: cleanParagraphText,
+      sourceLocale,
+      targetLocale,
+      projectId,
+      limit: searchOptions.limit ?? 5,
+      minScore: searchOptions.minScore ?? 50,
+      vectorSimilarity: searchOptions.vectorSimilarity ?? 60,
+      mode: searchOptions.mode ?? 'basic',
+      useVectorSearch: searchOptions.useVectorSearch ?? true,
+      entryType: 'paragraph', // CRITICAL: Only search paragraph-level entries when searching for paragraphs
+    })
+  );
+
+  // Search for each sentence individually
+  // Use a higher limit per sentence to ensure we capture all sentence-level matches
+  // Since sentences are shorter, we can afford to get more candidates
+  // Increase limit significantly for sentence searches to find all matches
+  const perSentenceLimit = Math.max((searchOptions.limit ?? 5) * 3, 15);
+  
+  // For sentence searches, use a lower minScore since sentence-level entries should be exact matches
+  // This ensures we find all sentence matches even if there are minor whitespace differences
+  const sentenceMinScore = Math.min(searchOptions.minScore ?? 50, 40);
+  
+  for (const sentence of sentences) {
+    // Only search if sentence is meaningful (more than just punctuation/whitespace)
+    // Strip formatting tags to match how sentences are saved in TM
+    const cleanSentence = stripFormattingTags(sentence).trim();
+    if (cleanSentence.length > 10) {
+      // Log for debugging: what sentence we're searching for
+      logger.debug({
+        sentenceLength: cleanSentence.length,
+        sentencePreview: cleanSentence.substring(0, 80),
+        entryTypeFilter: 'sentence',
+      }, 'Searching for sentence with entryType filter');
+      
+      searchPromises.push(
+        searchTranslationMemory({
+          sourceText: cleanSentence, // Clean text without formatting tags, matching save behavior
+          sourceLocale,
+          targetLocale,
+          projectId,
+          limit: perSentenceLimit, // Higher limit for sentence searches
+          minScore: sentenceMinScore, // Lower threshold for sentence searches
+          vectorSimilarity: searchOptions.vectorSimilarity ?? 60,
+          mode: searchOptions.mode ?? 'basic',
+          useVectorSearch: searchOptions.useVectorSearch ?? true,
+          entryType: 'sentence', // CRITICAL: Only search sentence-level entries when searching for sentences
+        })
+      );
+    }
+  }
+
+  // Execute all searches in parallel
+  const searchResults = await Promise.all(searchPromises);
+
+  // Step 3: Gather - Flatten and Deduplicate with entryType preservation
+  const resultsMap = new Map<string, {
+    id: string;
+    sourceText: string;
+    targetText: string;
+    fuzzyScore: number;
+    searchMethod?: 'fuzzy' | 'vector' | 'hybrid';
+    entryType?: 'sentence' | 'paragraph' | null;
+  }>();
+
+  for (const results of searchResults) {
+    for (const result of results) {
+      // Keep the result with the highest score if duplicate
+      const existing = resultsMap.get(result.id);
+      if (!existing || result.fuzzyScore > existing.fuzzyScore) {
+        // Preserve entryType from the result - it should be included from the database query
+        // Explicitly extract entryType to ensure it's preserved
+        const entryType = result.entryType as 'sentence' | 'paragraph' | null | undefined;
+        resultsMap.set(result.id, { 
+          ...result, 
+          entryType: entryType ?? undefined // Ensure entryType is explicitly set
+        });
+      }
+    }
+  }
+
+  // Step 4: Separate Matches by Type
+  const allResults = Array.from(resultsMap.values());
+  const sentenceMatches = allResults.filter(r => r.entryType === 'sentence');
+  const paragraphMatches = allResults.filter(r => r.entryType !== 'sentence');
+  
+  // Debug logging: verify entryType is preserved and check for data quality issues
+  logger.debug({
+    totalResults: allResults.length,
+    sentenceMatches: sentenceMatches.length,
+    paragraphMatches: paragraphMatches.length,
+    sentenceMatchDetails: sentenceMatches.slice(0, 3).map(r => ({
+      id: r.id,
+      entryType: r.entryType,
+      score: r.fuzzyScore,
+      sourceLength: r.sourceText.length,
+      sourcePreview: r.sourceText.substring(0, 100),
+    })),
+  }, 'Scatter-Gather results by entryType');
+
+  let finalResults: typeof allResults;
+
+  // Step 5: Apply "Gold Standard" Prioritization Strategy
+  if (sentenceMatches.length > 0) {
+    const bestSentenceScore = Math.max(...sentenceMatches.map(r => r.fuzzyScore), 0);
+    
+    // CRITICAL: Keep paragraph ONLY if it's Perfect (100%) OR significantly better than sentences
+    const highQualityParagraphs = paragraphMatches.filter(
+      p => p.fuzzyScore === 100 || (p.fuzzyScore >= 95 && p.fuzzyScore > bestSentenceScore + 5)
+    );
+    
+    // SORT ORDER:
+    // 1. Perfect Paragraphs (Gold Standard)
+    // 2. Sentence Matches (The "Lego Blocks")
+    // 3. Other High-Quality Paragraphs (Context)
+    finalResults = [
+      ...highQualityParagraphs.filter(p => p.fuzzyScore === 100),
+      ...sentenceMatches.sort((a, b) => b.fuzzyScore - a.fuzzyScore),
+      ...highQualityParagraphs.filter(p => p.fuzzyScore < 100).sort((a, b) => b.fuzzyScore - a.fuzzyScore),
+    ];
+    
+    logger.debug({
+      sentenceMatches: sentenceMatches.length,
+      paragraphMatches: paragraphMatches.length,
+      keptParagraphs: highQualityParagraphs.length,
+      bestSentenceScore,
+    }, 'Applied Scatter-Gather Prioritization');
+
+  } else {
+    // Fallback: Standard sort if no sentences found
+    finalResults = allResults.sort((a, b) => b.fuzzyScore - a.fuzzyScore);
+  }
+
+  // Step 6: Cap results (allow more results to accommodate granular sentences)
+  // For sentence-level matches, we want to ensure we get enough results per sentence
+  // Multiply by sentence count but use a higher base limit for sentences
+  const baseLimit = searchOptions.limit ?? 5;
+  // For sentences, we want more results since they're more granular
+  // If we have sentence matches, increase the limit to show more of them
+  const sentenceMultiplier = sentenceMatches.length > 0 ? Math.max(2, sentences.length) : 1;
+  const effectiveLimit = Math.min(
+    baseLimit * sentenceMultiplier,
+    50 // Increased from 25 to allow more sentence matches
+  );
+  
+  const deduplicatedResults = finalResults.slice(0, effectiveLimit);
+
+  logger.debug({
+    paragraphLength: paragraphText.length,
+    sentenceCount: sentences.length,
+    totalSearches: searchPromises.length,
+    uniqueResults: deduplicatedResults.length,
+    effectiveLimit,
+    originalLimit: searchOptions.limit ?? 5,
+    resultsByScore: deduplicatedResults.map(r => ({ 
+      id: r.id, 
+      score: r.fuzzyScore, 
+      entryType: r.entryType,
+      text: r.sourceText.substring(0, 50) 
+    })),
+  }, 'Scatter-gather TM search completed');
+
+  return deduplicatedResults;
+}
 
 type MachineTranslationOptions = {
   applyTm?: boolean;
@@ -321,16 +548,15 @@ const getRelevantGlossaryEntries = async (
         const vectorIds = vectorResults.map(r => r.id);
         const fullEntries = await prisma.glossaryEntry.findMany({
           where: { id: { in: vectorIds } },
-          select: {
-            id: true,
-            sourceTerm: true,
-            targetTerm: true,
-            sourceLocale: true,
-            targetLocale: true,
-            isForbidden: true,
-            notes: true,
-            contextRules: true,
-          },
+            select: {
+              id: true,
+              sourceTerm: true,
+              targetTerm: true,
+              sourceLocale: true,
+              targetLocale: true,
+              isForbidden: true,
+              notes: true,
+            },
         });
         
         // Preserve order from vector search results (most relevant first)
@@ -372,7 +598,6 @@ const getRelevantGlossaryEntries = async (
         targetLocale: true,
         isForbidden: true,
         notes: true,
-        contextRules: true,
       },
     });
     vectorCandidates = fallbackEntries;
@@ -478,7 +703,6 @@ const buildAiContext = async (
           const fullEntries = await prisma.glossaryEntry.findMany({
             where: { 
               id: { in: vectorIds },
-              status: { not: 'DEPRECATED' }, // Exclude deprecated terms
             },
             select: {
               id: true,
@@ -488,8 +712,6 @@ const buildAiContext = async (
               targetLocale: true,
               isForbidden: true,
               notes: true,
-              contextRules: true,
-              status: true, // Include status for filtering
             },
           });
           
@@ -525,11 +747,10 @@ const buildAiContext = async (
     glossaryEntries = await prisma.glossaryEntry.findMany({
       where: { 
         OR: [{ projectId }, { projectId: null }],
-        status: { not: 'DEPRECATED' }, // Exclude deprecated terms
       },
       orderBy: { createdAt: 'desc' },
       take: 200,
-      select: { sourceTerm: true, targetTerm: true, sourceLocale: true, targetLocale: true, isForbidden: true, notes: true, contextRules: true },
+      select: { sourceTerm: true, targetTerm: true, sourceLocale: true, targetLocale: true, isForbidden: true, notes: true },
     });
   }
 
@@ -795,8 +1016,6 @@ export const generateSegmentSuggestions = async (documentId: string): Promise<Se
       where: { id: document.id },
       select: {
         name: true,
-        summary: true,
-        clusterSummary: true,
       },
     });
 
@@ -853,8 +1072,6 @@ export const generateSegmentSuggestions = async (documentId: string): Promise<Se
       project: context.projectMeta,
       document: documentWithSummary ? {
         name: documentWithSummary.name,
-        summary: documentWithSummary.summary,
-        clusterSummary: documentWithSummary.clusterSummary,
       } : undefined,
       sourceLocale: document.sourceLocale, // Pass explicit source locale from document
       targetLocale: document.targetLocale, // Pass explicit target locale from document
@@ -988,17 +1205,20 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
       const ragUseVectorSearch = options?.tmRagSettings?.useVectorSearch ?? true; // Default true
       const ragLimit = options?.tmRagSettings?.limit ?? 5; // Default 5
 
-      const exampleMatches = await searchTranslationMemory({
-        sourceText: segment.sourceText,
-        sourceLocale: segment.document.sourceLocale,
-        targetLocale: segment.document.targetLocale,
-        projectId: segment.document.projectId,
-        limit: ragLimit,
-        minScore: ragMinScore,
-        vectorSimilarity: ragVectorSimilarity,
-        mode: ragMode,
-        useVectorSearch: ragUseVectorSearch,
-      });
+      // Use scatter-gather search: split paragraph, search sentences + full paragraph
+      const exampleMatches = await scatterGatherTmSearch(
+        segment.sourceText,
+        segment.document.sourceLocale,
+        segment.document.targetLocale,
+        segment.document.projectId,
+        {
+          limit: ragLimit,
+          minScore: ragMinScore,
+          vectorSimilarity: ragVectorSimilarity,
+          mode: ragMode,
+          useVectorSearch: ragUseVectorSearch,
+        }
+      );
       
       tmExamples = exampleMatches.map((match) => ({
         sourceText: match.sourceText,
@@ -1119,13 +1339,11 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
       documentContext,
     );
 
-    // Fetch document with summary fields
+    // Fetch document with name field
     const document = await prisma.document.findUnique({
       where: { id: segment.document.id },
       select: {
         name: true,
-        summary: true,
-        clusterSummary: true,
       },
     });
 
@@ -1165,10 +1383,9 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
         project: context.projectMeta,
         document: document ? {
           name: document.name,
-          summary: document.summary,
-          clusterSummary: document.clusterSummary,
         } : undefined,
-        sourceLocale: segment.document.sourceLocale, // Pass explicit source locale from document
+        // #region agent log
+        sourceLocale: (()=>{fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:1387',message:'runSegmentMachineTranslation: Document locales before passing to orchestrator',data:{documentSourceLocale:segment.document.sourceLocale,documentTargetLocale:segment.document.targetLocale,segmentId:segment.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});return segment.document.sourceLocale;})(), // Pass explicit source locale from document
         targetLocale: segment.document.targetLocale, // Pass explicit target locale from document
         temperature: context.settings?.temperature ?? 0.2,
         maxTokens,
@@ -1377,7 +1594,8 @@ export const runSegmentMachineTranslationWithCritic = async (
       guidelines: context.guidelines,
       tmExamples, // TM examples used for RAG, but we always generate fresh translation
       project: context.projectMeta,
-      sourceLocale: segment.document.sourceLocale, // Pass explicit source locale from document
+      // #region agent log
+      sourceLocale: (()=>{fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:1596',message:'runSegmentMachineTranslationWithCritic: Document locales before passing to orchestrator',data:{documentSourceLocale:segment.document.sourceLocale,documentTargetLocale:segment.document.targetLocale,segmentId:segment.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});return segment.document.sourceLocale;})(), // Pass explicit source locale from document
       targetLocale: segment.document.targetLocale, // Pass explicit target locale from document
       temperature: context.settings?.temperature ?? 0.2,
       maxTokens,
@@ -1513,21 +1731,24 @@ export const runDocumentMachineTranslation = async (
   }
 
   if (queuedForAI.length > 0) {
-    // Classic RAG: Retrieve TM examples for each segment in parallel
+    // Scatter-Gather RAG: Split paragraphs into sentences, search each sentence + full paragraph
     const examplePromises = queuedForAI.map(async (entry) => {
       if (!tmAllowed) {
         return { segmentId: entry.segment.id, examples: [] };
       }
       
-      const exampleMatches = await searchTranslationMemory({
-        sourceText: entry.segment.sourceText,
-        sourceLocale: document.sourceLocale,
-        targetLocale: document.targetLocale,
-        projectId: document.projectId,
-        limit: 5, // Top 5 examples per segment
-        minScore: 50, // Lower threshold for examples
-        vectorSimilarity: 60, // Include semantic matches
-      });
+      // Use scatter-gather search: split paragraph, search sentences + full paragraph
+      const exampleMatches = await scatterGatherTmSearch(
+        entry.segment.sourceText,
+        document.sourceLocale,
+        document.targetLocale,
+        document.projectId,
+        {
+          limit: 5, // Top 5 examples per segment
+          minScore: 50, // Lower threshold for examples
+          vectorSimilarity: 60, // Include semantic matches
+        }
+      );
 
       const examples: TmExample[] = exampleMatches.map((match) => ({
         sourceText: match.sourceText,
@@ -1577,8 +1798,6 @@ export const runDocumentMachineTranslation = async (
       where: { id: document.id },
       select: {
         name: true,
-        summary: true,
-        clusterSummary: true,
       },
     });
 
@@ -1615,8 +1834,6 @@ export const runDocumentMachineTranslation = async (
       segments: orchestratorSegments,
       document: documentWithSummary ? {
         name: documentWithSummary.name,
-        summary: documentWithSummary.summary,
-        clusterSummary: documentWithSummary.clusterSummary,
       } : undefined,
       glossary: filteredGlossary,
       guidelines: context.guidelines,
@@ -1943,8 +2160,6 @@ export const pretranslateDocument = async (
               where: { id: document.id },
               select: {
                 name: true,
-                summary: true,
-                clusterSummary: true,
               },
             });
 
@@ -1960,8 +2175,6 @@ export const pretranslateDocument = async (
                 guidelines: context.guidelines,
                 document: documentWithSummary ? {
                   name: documentWithSummary.name,
-                  summary: documentWithSummary.summary,
-                  clusterSummary: documentWithSummary.clusterSummary,
                 } : undefined,
                 project: context.projectMeta,
                 sourceLocale: document.sourceLocale,
@@ -2061,8 +2274,6 @@ export const pretranslateDocument = async (
             where: { id: document.id },
             select: {
               name: true,
-              summary: true,
-              clusterSummary: true,
             },
           });
 
@@ -2099,8 +2310,6 @@ export const pretranslateDocument = async (
             yandexFolderId: context.yandexFolderId,
             document: documentWithSummary ? {
               name: documentWithSummary.name,
-              summary: documentWithSummary.summary,
-              clusterSummary: documentWithSummary.clusterSummary,
             } : undefined,
             segments: orchestratorSegments,
             glossary: filteredGlossary,
@@ -3096,8 +3305,6 @@ export const getSegmentDebugInfo = async (segmentId: string) => {
     where: { id: segment.document.id },
     select: {
       name: true,
-      summary: true,
-      clusterSummary: true,
     },
   });
 
@@ -3112,8 +3319,6 @@ export const getSegmentDebugInfo = async (segmentId: string) => {
     targetLocale: segment.document.targetLocale,
     document: documentWithSummary ? {
       name: documentWithSummary.name,
-      summary: documentWithSummary.summary,
-      clusterSummary: documentWithSummary.clusterSummary,
     } : undefined,
   });
 
@@ -3153,8 +3358,6 @@ export const getSegmentDebugInfo = async (segmentId: string) => {
       name: segment.document.name,
       sourceLocale: segment.document.sourceLocale,
       targetLocale: segment.document.targetLocale,
-      summary: documentWithSummary?.summary,
-      clusterSummary: documentWithSummary?.clusterSummary,
     },
   };
 };

@@ -20,6 +20,7 @@ export type TmSearchResult = TranslationMemoryEntry & {
   tmxFileName?: string;
   tmxFileSource?: 'imported' | 'linked';
   searchMethod?: 'fuzzy' | 'vector' | 'hybrid'; // How this result was found
+  entryType?: 'sentence' | 'paragraph' | null; // Type of TM entry: sentence-level or paragraph-level
 };
 
 export type TmSearchRequest = {

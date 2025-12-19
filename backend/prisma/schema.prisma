@@ -196,6 +196,7 @@ model TranslationMemoryEntry {
   matchRate        Float?
   usageCount       Int       @default(0)
   createdAt        DateTime  @default(now())
+  entryType        String?   // Values: 'sentence' | 'paragraph'. Null defaults to 'paragraph' for legacy data.
   
   // Vector embedding fields for semantic search (RAG)
   sourceEmbedding  Unsupported("vector(1536)")?  // pgvector type - 1536 dimensions for text-embedding-3-small

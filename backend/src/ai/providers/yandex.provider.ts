@@ -73,7 +73,7 @@ export class YandexProvider extends BaseProvider {
           messages: [
             {
               role: 'system',
-              text: request.systemPrompt ?? `You are a professional technical/legal translator specializing in natural, native-sounding translations. Your job is to translate text from the SOURCE language to the TARGET language as specified in the user prompt. CRITICAL: You MUST output translations ONLY in the TARGET language specified in the prompt. Never return text in the SOURCE language. Always follow the translation direction (SOURCE → TARGET) exactly as stated in the prompt. Ensure translations read as if originally written by a native speaker, not translated.`,
+              text: request.systemPrompt ?? `You are a professional technical/legal translator. CRITICAL TRANSLATION DIRECTION RULES: The user prompt will clearly specify SOURCE language (input) and TARGET language (output). You MUST translate FROM SOURCE language TO TARGET language. Your output MUST be in TARGET language ONLY. Never return text in SOURCE language. ALL source text must be translated - do not keep source text unchanged. Even if source text appears similar to target language, you must still translate it. Always follow the translation direction (SOURCE → TARGET) exactly as stated in the prompt. Ensure translations read as if originally written by a native speaker, not translated.`,
             },
             {
               role: 'user',

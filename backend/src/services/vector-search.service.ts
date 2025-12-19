@@ -23,6 +23,7 @@ export async function searchByVector(
     targetLocale?: string;
     limit?: number;
     minSimilarity?: number; // Cosine similarity threshold (0-1)
+    entryType?: 'sentence' | 'paragraph' | null; // Optional: filter by entry type
   },
 ): Promise<Array<TranslationMemoryEntry & { similarity: number }>> {
   if (!queryEmbedding || queryEmbedding.length !== 1536) {
@@ -79,6 +80,13 @@ export async function searchByVector(
       paramIndex += 1;
     }
 
+    // Filter by entryType if specified (for precise sentence vs paragraph matching)
+    if (options.entryType !== undefined && options.entryType !== null) {
+      whereConditions.push(`"entryType" = $${paramIndex}::text`);
+      params.push(String(options.entryType));
+      paramIndex += 1;
+    }
+
     const whereClause = whereConditions.join(' AND ');
 
     // Use cosine distance (1 - cosine similarity)
@@ -105,6 +113,7 @@ export async function searchByVector(
         "embeddingModel",
         "embeddingVersion",
         "embeddingUpdatedAt",
+        "entryType",
         1 - ("sourceEmbedding" <=> $1::vector) as similarity
       FROM "TranslationMemoryEntry"
       WHERE ${whereClause}

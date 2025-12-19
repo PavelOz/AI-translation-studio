@@ -168,12 +168,23 @@ tmRoutes.post(
   '/search',
   asyncHandler(async (req, res) => {
     const payload = searchSchema.parse(req.body);
-    const matches = await searchTranslationMemory({
-      ...payload,
-      vectorSimilarity: payload.vectorSimilarity,
-      mode: payload.mode,
-      useVectorSearch: payload.useVectorSearch,
-    });
+    
+    // Use scatter-gather search for better sentence-level matching
+    // This splits paragraphs into sentences and searches both sentence and paragraph entries
+    const { scatterGatherTmSearch } = await import('../services/ai.service');
+    const matches = await scatterGatherTmSearch(
+      payload.sourceText,
+      payload.sourceLocale,
+      payload.targetLocale,
+      payload.projectId ?? null,
+      {
+        limit: payload.limit,
+        minScore: payload.minScore,
+        vectorSimilarity: payload.vectorSimilarity,
+        mode: payload.mode,
+        useVectorSearch: payload.useVectorSearch,
+      }
+    );
     res.json(matches);
   }),
 );

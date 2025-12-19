@@ -208,8 +208,14 @@ export class AIOrchestrator {
 
     const sourceLangCode = options.sourceLocale ?? project.sourceLang ?? 'ru';
     const targetLangCode = options.targetLocale ?? project.targetLang ?? 'en';
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:212',message:'buildBatchPrompt: Locale codes determined',data:{optionsSourceLocale:options.sourceLocale,optionsTargetLocale:options.targetLocale,projectSourceLang:project.sourceLang,projectTargetLang:project.targetLang,sourceLangCode,targetLangCode},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
     const sourceLang = getLanguageName(sourceLangCode);
     const targetLang = getLanguageName(targetLangCode);
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:215',message:'buildBatchPrompt: Language names determined',data:{sourceLangCode,sourceLang,targetLangCode,targetLang},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+    // #endregion
     
     // Detect if target is UK English for natural language instructions
     const isUKEnglish = targetLangCode.toLowerCase() === 'en-gb' || targetLangCode.toLowerCase() === 'en_gb';
@@ -247,40 +253,55 @@ export class AIOrchestrator {
       ? `\n${documentContextParts.join('\n')}` 
       : '';
 
-    // NEW HIERARCHICAL PROMPT STRUCTURE (Simplified per requirements)
+    // NEW HIERARCHICAL PROMPT STRUCTURE with Context Anchors
+    // Ordering follows "Static-First" rule for KV-Caching efficiency:
+    // 1. System Persona (Static)
+    // 2. Glossary & Style Rules (Semi-Static)
+    // 3. TM Examples (Dynamic Context)
+    // 4. Source Segments (Highly Dynamic)
     return [
-      `You are a professional technical translator specializing in ${sourceLangCode} to ${targetLangCode}. Your primary objective is to deliver a fluent and idiomatic translation.`,
+      // 1. CLEAR PERSONA (Reinforced for models that ignore system prompt)
+      `You are a professional technical translator specializing in ${sourceLangCode} to ${targetLangCode}. Your goal is to produce a translation that flows naturally in the target language while preserving the original technical meaning.`,
       '',
-      '### 👑 CONTEXT HIERARCHY:',
-      '1. **TERMINOLOGY (NON-NEGOTIABLE):** You MUST strictly use the translations provided in the Glossary. Failure to use a required term is a critical error.',
-      '2. **STYLE & FORMATTING (HIGHLY RECOMMENDED):** Apply these rules unless they severely compromise the fluency or mandatory grammar of the target language.',
+      '### 👑 CONTEXT HIERARCHY & PRIORITIES:',
+      '1. **TERMINOLOGY (NON-NEGOTIABLE):** Strict adherence to the Glossary below is mandatory.',
+      '2. **CONSISTENCY (CRITICAL):** Use the provided "Translation Memory Examples" to match the tone and style of previous work.',
+      '3. **FLUENCY (HIGH):** If no Glossary/TM match exists, prioritize a natural, native-level reading experience over literal word-for-word translation.',
       '',
-      '### CRITICAL GLOSSARY:',
-      formattedGlossaryTerms,
+      '### 📖 CRITICAL GLOSSARY:',
+      formattedGlossaryTerms || '(No specific glossary terms for this segment)',
       '',
-      '### STYLE & FORMATTING RULES:',
+      '### ✍️ STYLE & GRAMMAR INSTRUCTIONS:',
+      naturalLanguageInstructions,
       formattedStyleRules,
       '',
-      '### FORMATTING MARKERS (CRITICAL):',
-      'If you see numbered tags like {{0}}...{{/0}}, {{1}}...{{/1}}, etc. in the source text,',
-      'you MUST preserve them exactly in the translation to maintain formatting (bold, italic, subscript, etc.).',
-      'Example: "{{0}}Water is {{/0}}{{1}}H2O{{/1}}" should become "{{0}}L\'eau est {{/0}}{{1}}H2O{{/1}}" (French).',
-      'Do NOT remove, modify, or reorder these markers. They are essential for preserving document formatting.',
-      '',
-      // Add segments in the required format
-      ...batch.map((segment) => [
-        `Source Segment: ${segment.sourceText}`,
-        'Target Translation:',
-        '',
-      ]),
+      '### 🧠 TRANSLATION MEMORY (REFERENCE):',
+      'Use these similar past translations to guide your style and terminology:',
+      examplesText || '(No similar past translations found for this segment)',
       '',
       '=== OUTPUT FORMAT ===',
       'Return ONLY valid JSON array matching this schema:',
       `[{"segment_id":"<id>","target_mt":"<translation>"}]`,
-      'Do not include comments or prose outside the JSON array.',
       '',
-      '=== SEGMENTS DATA (for reference) ===',
-      JSON.stringify(segmentsPayload, null, 2),
+      '=== SOURCE SEGMENTS TO TRANSLATE ===',
+      ...batch.map((segment) => {
+        // #region agent log
+        // Simple heuristic: check if text contains Cyrillic characters (Russian/Kazakh/etc)
+        const hasCyrillic = /[а-яёА-ЯЁҚқҒғҢңҰұҮүӘәІіӨөҺһ]/.test(segment.sourceText);
+        const hasLatin = /[a-zA-Z]/.test(segment.sourceText);
+        const appearsRussian = hasCyrillic && !hasLatin;
+        const appearsEnglish = hasLatin && !hasCyrillic;
+        const configuredSourceIsRussian = ['ru', 'kk', 'uk', 'be', 'ky', 'uz', 'tg', 'tk', 'mn'].includes(sourceLangCode.toLowerCase());
+        const configuredSourceIsEnglish = sourceLangCode.toLowerCase().startsWith('en');
+        const possibleMismatch = (appearsRussian && configuredSourceIsEnglish) || (appearsEnglish && configuredSourceIsRussian);
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:317',message:'buildBatchPrompt: Source text language detection',data:{segmentId:segment.segmentId,sourceTextPreview:segment.sourceText.substring(0,100),hasCyrillic,hasLatin,appearsRussian,appearsEnglish,configuredSourceLocale:sourceLangCode,configuredSourceIsRussian,configuredSourceIsEnglish,possibleMismatch},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
+        return [
+          `ID: ${segment.segmentId}`,
+          `Source: ${segment.sourceText}`,
+          '---'
+        ];
+      }),
     ].join('\n');
   }
 
@@ -614,6 +635,22 @@ export class AIOrchestrator {
     const batches = chunkSegments(options.segments, batchSize);
     const results: OrchestratorResult[] = [];
 
+    // Extract language codes and names for translation direction
+    const project = options.project ?? {};
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:649',message:'translateSegments: Input locale values',data:{optionsSourceLocale:options.sourceLocale,optionsTargetLocale:options.targetLocale,projectSourceLang:project.sourceLang,projectTargetLang:project.targetLang},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
+    const sourceLangCode = options.sourceLocale ?? project.sourceLang ?? 'ru';
+    const targetLangCode = options.targetLocale ?? project.targetLang ?? 'en';
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:652',message:'translateSegments: Final locale codes after fallback',data:{sourceLangCode,targetLangCode,usedOptionsSource:!!options.sourceLocale,usedProjectSource:!options.sourceLocale&&!!project.sourceLang,usedDefaultSource:!options.sourceLocale&&!project.sourceLang,usedOptionsTarget:!!options.targetLocale,usedProjectTarget:!options.targetLocale&&!!project.targetLang,usedDefaultTarget:!options.targetLocale&&!project.targetLang},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
+    const sourceLang = getLanguageName(sourceLangCode);
+    const targetLang = getLanguageName(targetLangCode);
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:655',message:'translateSegments: Language names from getLanguageName',data:{sourceLangCode,sourceLang,targetLangCode,targetLang},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+    // #endregion
+
     for (const job of batches) {
       let attempt = 0;
       let success = false;
@@ -657,13 +694,23 @@ export class AIOrchestrator {
             }, 'translateSegments: Calculated dynamic maxTokens for batch');
           }
           
+          // Build system persona for explicit injection with clear translation direction
+          const systemPersona = `You are an expert linguist. TRANSLATION DIRECTION: ${sourceLangCode} → ${targetLangCode}. You translate FROM ${sourceLangCode} (${sourceLang}, source/input) TO ${targetLangCode} (${targetLang}, target/output). CRITICAL: Your output MUST be in ${targetLangCode} only. Never return text in ${sourceLangCode}. If you see text in ${sourceLangCode}, translate it to ${targetLangCode}. If you see text in ${targetLangCode}, keep it as-is. Your translations must be accurate, natural, and idiomatic. Avoid literal calques and word-for-word translations. Prioritize meaning and fluency while maintaining technical precision.`;
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:700',message:'translateSegments: System persona constructed',data:{sourceLangCode,targetLangCode,sourceLang,targetLang,systemPersonaLength:systemPersona.length,systemPersonaPreview:systemPersona.substring(0,200),providerName:provider.name},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+          // #endregion
+          
           const response = await provider.callModel({
             prompt,
             model,
-            temperature: options.temperature ?? 0.2,
+            temperature: options.temperature ?? 0.4, // Increased from 0.2 to 0.4 for better fluency
             maxTokens,
+            systemPrompt: systemPersona, // Explicit system prompt injection
             segments: job.segments.map((segment) => ({ segmentId: segment.segmentId, sourceText: segment.sourceText })),
           });
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:710',message:'translateSegments: Provider callModel completed',data:{providerName:provider.name,responseLength:response.outputText?.length||0,responsePreview:response.outputText?.substring(0,100)||'',hasSystemPrompt:!!systemPersona},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+          // #endregion
           
           // Log response for YandexGPT debugging
           if (provider.name === 'yandex') {
@@ -1106,13 +1153,25 @@ export class AIOrchestrator {
       glossaryEntriesCount: glossary?.length || 0,
     }, 'Critic: Calling AI with increased maxTokens');
     
+    // Build system persona for explicit injection with clear translation direction
+    const sourceLangCode = sourceLocale || 'en';
+    const targetLangCode = targetLocale || 'ru';
+    const systemPersona = `You are a Senior QA Linguist. TRANSLATION DIRECTION: ${sourceLangCode} → ${targetLangCode}. You are checking a translation FROM ${sourceLangCode} (${sourceLang}, source/input) TO ${targetLangCode} (${targetLang}, target/output). CRITICAL: The Source text is in ${sourceLangCode} (${sourceLang}). The Draft text is a translation into ${targetLangCode} (${targetLang}). You must verify that the Draft uses the correct ${targetLangCode} terms from the glossary, not ${sourceLangCode} terms. Your analysis must be accurate and focused on glossary compliance and naturalness.`;
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:1195',message:'runCritique: System persona constructed',data:{sourceLangCode,targetLangCode,sourceLang,targetLang,systemPersonaLength:systemPersona.length,systemPersonaPreview:systemPersona.substring(0,200),providerName:provider.name},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'D'})}).catch(()=>{});
+    // #endregion
+    
     const response = await provider.callModel({
       prompt,
       model,
       temperature: 0.1, // Keep it cold and logical
       maxTokens: criticMaxTokens,
+      systemPrompt: systemPersona, // Explicit system prompt injection
       segments: [{ segmentId: 'critique', sourceText }],
     });
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:1207',message:'runCritique: Provider callModel completed',data:{providerName:provider.name,responseLength:response.outputText?.length||0,hasSystemPrompt:!!systemPersona},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'D'})}).catch(()=>{});
+    // #endregion
 
     const text = response.outputText.trim();
     let errors: any[] = [];
@@ -1293,6 +1352,8 @@ export class AIOrchestrator {
     const targetLocale = options.targetLocale ?? 'en';
     const sourceLang = getLanguageName(sourceLocale);
     const targetLang = getLanguageName(targetLocale);
+    const sourceLangCode = sourceLocale;
+    const targetLangCode = targetLocale;
     
     // Build specific prompt to fix ONLY the errors
     const errorList = validErrors.map((e) => `- Term "${e.term}": Change "${e.found}" to "${e.expected}"`).join('\n');
@@ -1381,11 +1442,15 @@ export class AIOrchestrator {
     }, 'fixTranslation: Calling AI with increased maxTokens');
     
     try {
+      // Build system persona for explicit injection with clear translation direction
+      const systemPersona = `You are an expert linguist. TRANSLATION DIRECTION: ${sourceLangCode} → ${targetLangCode}. You translate FROM ${sourceLangCode} (${sourceLang}, source/input) TO ${targetLangCode} (${targetLang}, target/output). CRITICAL: Your output MUST be in ${targetLangCode} only. Never return text in ${sourceLangCode}. ALL source text is in ${sourceLangCode} and MUST be translated to ${targetLangCode}. Do not keep source text unchanged - always translate. Your translations must be accurate, natural, and idiomatic. Avoid literal calques and word-for-word translations. Prioritize meaning and fluency while maintaining technical precision.`;
+      
       const response = await provider.callModel({
         prompt,
         model,
-        temperature: options.temperature ?? 0.2,
+        temperature: options.temperature ?? 0.4, // Increased from 0.2 to 0.4 for better fluency
         maxTokens: editorMaxTokens,
+        systemPrompt: systemPersona, // Explicit system prompt injection
         segments: [{ segmentId: 'fix', sourceText }],
       });
 

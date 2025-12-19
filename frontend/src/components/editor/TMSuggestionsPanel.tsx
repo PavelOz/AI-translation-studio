@@ -526,13 +526,17 @@ export default function TMSuggestionsPanel({
   // Uses a simple LCS-based diff algorithm to highlight additions and deletions
   // Shows what's different in the TM match compared to the current segment
   const getTextDifferences = (currentText: string, tmText: string) => {
-    if (currentText.toLowerCase().trim() === tmText.toLowerCase().trim()) {
+    // Strip formatting markers from both texts for comparison
+    const strippedCurrent = stripFormattingMarkers(currentText);
+    const strippedTm = stripFormattingMarkers(tmText);
+    
+    if (strippedCurrent.toLowerCase().trim() === strippedTm.toLowerCase().trim()) {
       return null; // No differences
     }
 
     // Normalize texts for comparison (preserve original for display)
-    const current = currentText.trim();
-    const tm = tmText.trim();
+    const current = strippedCurrent.trim();
+    const tm = strippedTm.trim();
     
     // Split into words while preserving spaces
     const currentWords = current.split(/(\s+)/).filter(Boolean);
@@ -877,62 +881,80 @@ export default function TMSuggestionsPanel({
           </div>
           {suggestions.map((suggestion, index) => {
             const isPerfectMatch = suggestion.fuzzyScore === 100;
-            const differences = !isPerfectMatch ? getTextDifferences(sourceText, suggestion.sourceText) : null;
+            const isSentence = suggestion.entryType === 'sentence';
+            const isParagraph = suggestion.entryType === 'paragraph' || !suggestion.entryType; // Default to paragraph if null/undefined
             
             return (
             <div
               key={suggestion.id || index}
-              className="border border-gray-200 rounded p-3 hover:bg-gray-50 transition-colors"
+              className={`border-2 rounded-lg p-3 transition-all ${
+                isSentence
+                  ? 'border-blue-400 bg-gradient-to-br from-blue-50 via-blue-50/80 to-blue-50/60 hover:from-blue-50 hover:to-blue-50/80 shadow-md' // Silver: Light blue gradient for sentences
+                  : isPerfectMatch
+                    ? 'border-yellow-400 bg-gradient-to-br from-yellow-50 via-yellow-50/90 to-yellow-50/70 hover:from-yellow-50 hover:to-yellow-50/90 shadow-lg ring-2 ring-yellow-200/50' // Gold: Yellow/gold gradient for perfect paragraph matches
+                    : 'border-gray-300 bg-white hover:bg-gray-50 shadow-sm' // Default white/gray for other paragraphs
+              }`}
             >
               <div className="flex justify-between items-start mb-2">
                 <div className="flex-1">
-                  {isPerfectMatch ? (
-                    <div className="text-sm text-gray-600 mb-1">{stripFormattingMarkers(suggestion.sourceText)}</div>
-                  ) : differences ? (
-                    <div className="text-sm text-gray-600 mb-1">
-                      <span className="text-xs text-gray-500 mb-1 block">Differences:</span>
-                      <div className="bg-gray-50 p-2 rounded border border-gray-200">
-                        {differences.map((diff, idx) => (
-                          <span
-                            key={idx}
-                            className={
-                              diff.type === 'added'
-                                ? 'bg-green-200 text-green-800 px-1 rounded font-medium'
-                                : diff.type === 'removed'
-                                  ? 'bg-red-200 text-red-800 px-1 rounded line-through'
-                                  : 'text-gray-700'
-                            }
-                          >
-                            {diff.text}
-                          </span>
-                        ))}
-                      </div>
-                      <div className="text-xs text-gray-500 mt-2 flex gap-3">
-                        <span className="flex items-center gap-1">
-                          <span className="inline-block w-3 h-3 bg-green-200 rounded"></span>
-                          Add to TM
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <span className="inline-block w-3 h-3 bg-red-200 rounded line-through"></span>
-                          Delete from TM
-                        </span>
-                      </div>
+                  {/* Entry Type Badge */}
+                  <div className="flex items-center gap-2 mb-2">
+                    {isSentence ? (
+                      <span 
+                        className="inline-flex items-center gap-1 text-xs font-bold px-2.5 py-1 rounded-md bg-blue-300 text-blue-950 border-2 border-blue-500 shadow-md"
+                        title="Silver: This is a sentence-level match - a fragment of the full paragraph"
+                      >
+                        🧩 Sentence
+                      </span>
+                    ) : (
+                      <span 
+                        className="inline-flex items-center gap-1 text-xs font-semibold px-2.5 py-1 rounded-md bg-gray-200 text-gray-900 border border-gray-400 shadow-sm"
+                        title="This is a paragraph-level match - the complete text"
+                      >
+                        📄 Paragraph
+                      </span>
+                    )}
+                    {isPerfectMatch && (
+                      <span className="inline-flex items-center gap-1 text-xs font-bold px-2.5 py-1 rounded-md bg-yellow-300 text-yellow-950 border-2 border-yellow-500 shadow-md">
+                        ⭐ Gold Standard
+                      </span>
+                    )}
+                  </div>
+                  
+                  {/* Source Text - Clean, professional display */}
+                  <div className="mb-2">
+                    <div className="text-xs text-gray-500 mb-1 font-medium">Source:</div>
+                    <div className="text-sm text-gray-700 bg-gray-50 p-2 rounded border border-gray-200">
+                      {stripFormattingMarkers(suggestion.sourceText)}
                     </div>
-                  ) : (
-                    <div className="text-sm text-gray-600 mb-1">{stripFormattingMarkers(suggestion.sourceText)}</div>
-                  )}
-                  <div className="text-sm font-medium text-gray-900 mt-2">{suggestion.targetText}</div>
+                  </div>
+                  
+                  {/* Target Text - Clean, professional display */}
+                  <div>
+                    <div className="text-xs text-gray-500 mb-1 font-medium">Target:</div>
+                    <div className="text-sm font-medium text-gray-900 bg-white p-2 rounded border border-gray-200">
+                      {stripFormattingMarkers(suggestion.targetText)}
+                    </div>
+                  </div>
                 </div>
-              <div className="ml-3 flex flex-col items-end gap-1">
-                <span 
-                  className={`text-sm font-semibold ${
-                    suggestion.searchMethod === 'vector' || suggestion.searchMethod === 'hybrid'
-                      ? 'text-blue-600'
-                      : 'text-green-600'
-                  }`}
-                >
-                  {suggestion.fuzzyScore}%
-                </span>
+              <div className="ml-3 flex flex-col items-end gap-2">
+                {/* Match Score - Prominent */}
+                <div className="text-right">
+                  <div className="text-xs text-gray-500 mb-0.5">Match</div>
+                  <span 
+                    className={`text-lg font-bold ${
+                      suggestion.fuzzyScore === 100
+                        ? 'text-yellow-600'
+                        : suggestion.fuzzyScore >= 95
+                          ? 'text-green-600'
+                          : suggestion.fuzzyScore >= 85
+                            ? 'text-blue-600'
+                            : 'text-gray-600'
+                    }`}
+                  >
+                    {suggestion.fuzzyScore}%
+                  </span>
+                </div>
                 {/* Search Method Badge */}
                 {suggestion.searchMethod && (
                   <span
@@ -971,10 +993,10 @@ export default function TMSuggestionsPanel({
                   e.stopPropagation();
                   handleApply(suggestion);
                 }}
-                className="btn btn-primary text-xs w-full mt-2"
+                className="w-full mt-3 px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md transition-colors shadow-sm hover:shadow-md"
                 type="button"
               >
-                Apply
+                Insert
               </button>
             </div>
           );

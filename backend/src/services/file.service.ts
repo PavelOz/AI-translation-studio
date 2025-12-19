@@ -99,16 +99,13 @@ export const importDocumentFile = async (
   try {
     await bulkUpsertSegments(
       parsed.segments.map((segment) => {
-        const segmentType = segment.type || 'paragraph';
-        
-        
-        
         return {
           documentId: document.id,
           segmentIndex: segment.index,
           sourceText: segment.sourceText,
           targetMt: segment.targetMt ?? null,
-          segmentType, // Save segment type
+          // Note: segmentType is not stored in DB (Segment model doesn't have this field)
+          // Segment type information is only used during parsing/export, not persisted
         };
       }),
     );
@@ -258,7 +255,7 @@ export const exportDocumentFile = async (documentId: string): Promise<Buffer> =>
   const exportSegments = segments.segments.map((seg) => ({
     index: seg.segmentIndex,
     targetText: seg.targetFinal ?? seg.targetMt ?? seg.sourceText,
-    segmentType: seg.segmentType || 'paragraph',
+    segmentType: 'paragraph' as const, // Segment model doesn't store segmentType, default to 'paragraph'
     metadata: {
       sourceText: seg.sourceText, // Include sourceText for verification matching
     },
