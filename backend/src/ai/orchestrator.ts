@@ -261,6 +261,12 @@ export class AIOrchestrator {
       '### STYLE & FORMATTING RULES:',
       formattedStyleRules,
       '',
+      '### FORMATTING MARKERS (CRITICAL):',
+      'If you see numbered tags like {{0}}...{{/0}}, {{1}}...{{/1}}, etc. in the source text,',
+      'you MUST preserve them exactly in the translation to maintain formatting (bold, italic, subscript, etc.).',
+      'Example: "{{0}}Water is {{/0}}{{1}}H2O{{/1}}" should become "{{0}}L\'eau est {{/0}}{{1}}H2O{{/1}}" (French).',
+      'Do NOT remove, modify, or reorder these markers. They are essential for preserving document formatting.',
+      '',
       // Add segments in the required format
       ...batch.map((segment) => [
         `Source Segment: ${segment.sourceText}`,

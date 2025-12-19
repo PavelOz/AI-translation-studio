@@ -201,30 +201,102 @@ export class DocxHandler implements FileHandler {
   }
 
   /**
-   * Extract all text from a paragraph element
+   * Extract all text from a paragraph element with formatting markers
    * 
    * A paragraph can contain multiple <w:r> (runs), each with <w:t> (text) nodes.
-   * We need to concatenate all text from all <w:t> nodes in order.
+   * We track formatting changes between runs and insert markers like {{0}}, {{1}}, etc.
+   * 
+   * CRITICAL: We track which actual run indices belong to each formatting group,
+   * so we can correctly distribute text back to the right runs.
    * 
    * Example structure:
    * <w:p>
-   *   <w:r>
-   *     <w:t>Hello</w:t>
-   *   </w:r>
-   *   <w:r>
-   *     <w:t> World</w:t>
-   *   </w:r>
+   *   <w:r><w:t>Water is </w:t></w:r>
+   *   <w:r><w:rPr><w:vertAlign w:val="subscript"/></w:rPr><w:t>H2O</w:t></w:r>
    * </w:p>
    * 
-   * Result: "Hello World"
+   * Result: "{{0}}Water is {{/0}}{{1}}H2O{{/1}}"
+   * 
+   * This allows us to preserve formatting when translating.
    */
   private extractTextFromParagraph(paragraphElement: Element): string {
-    const textParts: string[] = [];
+    // Find all <w:r> (run) elements in this paragraph
+    const runs = this.getElementsByTagName(paragraphElement, 'w:r');
+    
+    if (runs.length === 0) {
+      // No runs found, try old method as fallback
+      return this.extractTextFromParagraphLegacy(paragraphElement);
+    }
 
-    // Find all <w:t> nodes within this paragraph (recursively)
+    const textParts: string[] = [];
+    let currentFormattingGroupIndex = 0;
+    let previousRunProperties: string | null = null;
+    let hasTextInCurrentMarker = false;
+    let currentRunIndexInParagraph = 0; // Track actual run position in paragraph
+
+    // Process each run in order
+    for (let runIdx = 0; runIdx < runs.length; runIdx++) {
+      const run = runs[runIdx];
+      
+      // Find <w:t> nodes within this run
+      const textNodes = this.getElementsByTagName(run, 'w:t');
+      
+      // Check if this run has text
+      const hasText = textNodes.length > 0 && textNodes.some(tn => {
+        const text = this.getTextNodeContent(tn);
+        return text !== null && text.trim().length > 0;
+      });
+
+      if (!hasText) {
+        currentRunIndexInParagraph++;
+        continue; // Skip runs without text, but track position
+      }
+
+      // Get run properties (formatting)
+      const runProperties = this.getRunProperties(run);
+      
+      // Check if formatting changed (or if it's the first run with text)
+      if (previousRunProperties === null || runProperties !== previousRunProperties) {
+        // Close previous marker if exists and had text
+        if (previousRunProperties !== null && hasTextInCurrentMarker) {
+          textParts.push(`{{/${currentFormattingGroupIndex - 1}}}`);
+        }
+        // Start new marker
+        textParts.push(`{{${currentFormattingGroupIndex}}}`);
+        previousRunProperties = runProperties;
+        hasTextInCurrentMarker = false;
+        currentFormattingGroupIndex++;
+      }
+
+      // Extract text from all <w:t> nodes in this run
+      // Preserve xml:space="preserve" information for later restoration
+      for (const textNode of textNodes) {
+        const text = this.getTextNodeContent(textNode);
+        if (text !== null) {
+          textParts.push(text);
+          hasTextInCurrentMarker = true;
+        }
+      }
+
+      currentRunIndexInParagraph++;
+    }
+
+    // Close the last marker if it had text
+    if (previousRunProperties !== null && hasTextInCurrentMarker) {
+      textParts.push(`{{/${currentFormattingGroupIndex - 1}}}`);
+    }
+
+    return textParts.join('');
+  }
+
+  /**
+   * Legacy method: Extract text without formatting markers
+   * Used as fallback when no runs are found
+   */
+  private extractTextFromParagraphLegacy(paragraphElement: Element): string {
+    const textParts: string[] = [];
     const textNodes = this.findAllTextNodes(paragraphElement);
 
-    // Extract text content from each <w:t> node
     for (const textNode of textNodes) {
       const text = this.getTextNodeContent(textNode);
       if (text !== null) {
@@ -232,9 +304,27 @@ export class DocxHandler implements FileHandler {
       }
     }
 
-    // Join all text parts
-    // Note: We preserve whitespace as-is from the XML
     return textParts.join('');
+  }
+
+  /**
+   * Get run properties as a string for comparison
+   * 
+   * This serializes the <w:rPr> element to detect formatting changes.
+   * Properties include: bold, italic, subscript, superscript, etc.
+   */
+  private getRunProperties(runElement: Element): string {
+    // Find <w:rPr> (run properties) element
+    const rPrElements = this.getElementsByTagName(runElement, 'w:rPr');
+    
+    if (rPrElements.length === 0) {
+      return ''; // No properties = default formatting
+    }
+
+    // Serialize the properties element to a string for comparison
+    // We use a simple approach: get the inner XML structure
+    const serializer = new XMLSerializer();
+    return serializer.serializeToString(rPrElements[0]);
   }
 
   /**
@@ -491,36 +581,255 @@ export class DocxHandler implements FileHandler {
   }
 
   /**
-   * Replace text in a paragraph element
+   * Replace text in a paragraph element with formatting preservation
    * 
    * Strategy:
-   * 1. Find all <w:t> nodes in the paragraph (in order)
-   * 2. Replace text content of FIRST <w:t> node with translated text
-   * 3. Clear (empty) all subsequent <w:t> nodes
+   * 1. Try to parse formatting markers ({{0}}...{{/0}}, {{1}}...{{/1}}, etc.)
+   * 2. If markers are valid, distribute text to corresponding runs
+   * 3. If markers are missing or broken, fallback to old behavior (wipe and replace)
    * 
-   * This handles the case where text is split across multiple runs.
-   * Example:
-   * Original: <w:r><w:t>Hello</w:t></w:r><w:r><w:t> World</w:t></w:r>
-   * After:    <w:r><w:t>Bonjour</w:t></w:r><w:r><w:t></w:t></w:r>
+   * Example with markers:
+   * Input: "{{0}}Water is {{/0}}{{1}}H2O{{/1}}"
+   * Result: First run gets "Water is ", second run gets "H2O"
+   * 
+   * Example without markers (fallback):
+   * Input: "Water is H2O"
+   * Result: First run gets "Water is H2O", other runs cleared
    */
   private replaceTextInParagraph(paragraphElement: Element, translatedText: string): void {
-    // Find all <w:t> nodes in this paragraph (in DOM order)
-    const textNodes = this.findAllTextNodes(paragraphElement);
-
-    if (textNodes.length === 0) {
-      // No text nodes found - this shouldn't happen if we got here
-      // But handle gracefully
+    // Find all <w:r> (run) elements in this paragraph
+    const runs = this.getElementsByTagName(paragraphElement, 'w:r');
+    
+    if (runs.length === 0) {
+      // No runs found, use legacy method
+      this.replaceTextInParagraphLegacy(paragraphElement, translatedText);
       return;
     }
 
-    // Escape XML special characters in translated text
+    // Try to parse formatting markers
+    const parsedSegments = this.parseFormattingMarkers(translatedText);
+    
+    if (parsedSegments && parsedSegments.length > 0) {
+      // Markers found - distribute text to runs
+      this.distributeTextToRuns(runs, parsedSegments);
+    } else {
+      // No valid markers - fallback to old behavior
+      this.replaceTextInParagraphLegacy(paragraphElement, translatedText);
+    }
+  }
+
+  /**
+   * Parse formatting markers from translated text
+   * 
+   * Returns array of { runIndex: number, text: string } or null if parsing fails
+   * 
+   * Example: "{{0}}Hello{{/0}}{{1}}World{{/1}}" -> [{runIndex: 0, text: "Hello"}, {runIndex: 1, text: "World"}]
+   */
+  private parseFormattingMarkers(text: string): Array<{ runIndex: number; text: string }> | null {
+    // Pattern to match: {{n}}...{{/n}}
+    const markerPattern = /\{\{(\d+)\}\}(.*?)\{\{\/\1\}\}/g;
+    const segments: Array<{ runIndex: number; text: string }> = [];
+    let lastIndex = 0;
+    let match;
+
+    // Find all marker pairs
+    while ((match = markerPattern.exec(text)) !== null) {
+      const runIndex = parseInt(match[1], 10);
+      const segmentText = match[2];
+      
+      // Check for text before this marker (shouldn't happen in valid format)
+      if (match.index > lastIndex) {
+        const beforeText = text.substring(lastIndex, match.index);
+        if (beforeText.trim().length > 0) {
+          // Invalid format - text outside markers
+          return null;
+        }
+      }
+      
+      segments.push({ runIndex, text: segmentText });
+      lastIndex = markerPattern.lastIndex;
+    }
+
+    // Check if there's text after the last marker
+    if (lastIndex < text.length) {
+      const afterText = text.substring(lastIndex);
+      if (afterText.trim().length > 0) {
+        // Invalid format - text after markers
+        return null;
+      }
+    }
+
+    // Validate that run indices are sequential starting from 0
+    if (segments.length === 0) {
+      return null; // No markers found
+    }
+
+    for (let i = 0; i < segments.length; i++) {
+      if (segments[i].runIndex !== i) {
+        // Run indices are not sequential - invalid format
+        return null;
+      }
+    }
+
+    return segments;
+  }
+
+  /**
+   * Distribute parsed text segments to corresponding runs
+   * 
+   * CRITICAL: Segments are indexed by formatting group ({{0}}, {{1}}, etc.),
+   * but we need to map them to the actual runs that had text in the original.
+   * 
+   * Strategy:
+   * 1. Identify which runs have text and their formatting groups
+   * 2. Map formatting groups to the runs that belong to them
+   * 3. Distribute segment text to all runs in that formatting group
+   * 
+   * Example: If {{0}} contains "Worker Accommodation Management Plan: "
+   * and runs 0, 1, 2 all have bold formatting, we put the text in run 0
+   * and clear runs 1 and 2 (since they were merged during extraction).
+   */
+  private distributeTextToRuns(
+    runs: Element[],
+    segments: Array<{ runIndex: number; text: string }>
+  ): void {
+    // Step 1: Identify runs with text and their formatting groups
+    const runsWithText: Array<{ runIndex: number; formattingGroup: number; textNodes: Element[] }> = [];
+    let currentFormattingGroup = 0;
+    let previousRunProperties: string | null = null;
+
+    for (let runIdx = 0; runIdx < runs.length; runIdx++) {
+      const run = runs[runIdx];
+      const textNodes = this.getElementsByTagName(run, 'w:t');
+      
+      // Check if this run has text
+      const hasText = textNodes.length > 0 && textNodes.some(tn => {
+        const text = this.getTextNodeContent(tn);
+        return text !== null && text.trim().length > 0;
+      });
+
+      if (!hasText) {
+        continue; // Skip runs without text
+      }
+
+      // Get run properties to determine formatting group
+      const runProperties = this.getRunProperties(run);
+      
+      // Check if formatting changed
+      if (previousRunProperties === null || runProperties !== previousRunProperties) {
+        currentFormattingGroup++;
+        previousRunProperties = runProperties;
+      }
+
+      runsWithText.push({
+        runIndex: runIdx,
+        formattingGroup: currentFormattingGroup - 1, // Adjust to 0-based
+        textNodes,
+      });
+    }
+
+    // Step 2: Map formatting groups to runs
+    const formattingGroupToRuns = new Map<number, Array<{ runIndex: number; textNodes: Element[] }>>();
+    for (const runInfo of runsWithText) {
+      if (!formattingGroupToRuns.has(runInfo.formattingGroup)) {
+        formattingGroupToRuns.set(runInfo.formattingGroup, []);
+      }
+      formattingGroupToRuns.get(runInfo.formattingGroup)!.push({
+        runIndex: runInfo.runIndex,
+        textNodes: runInfo.textNodes,
+      });
+    }
+
+    // Step 3: Distribute segment text to runs
+    for (const segment of segments) {
+      const formattingGroup = segment.runIndex;
+      const runsInGroup = formattingGroupToRuns.get(formattingGroup);
+
+      if (!runsInGroup || runsInGroup.length === 0) {
+        continue; // No runs for this formatting group
+      }
+
+      // Escape XML special characters
+      const escapedText = this.escapeXml(segment.text);
+
+      // Put all text in the first run of the group, clear others
+      // This matches the extraction behavior where we concatenate text from all runs in a group
+      const firstRun = runsInGroup[0];
+      if (firstRun.textNodes.length > 0) {
+        const firstTextNode = firstRun.textNodes[0];
+        
+        // Check if any run in this group had xml:space="preserve"
+        // If so, preserve it on the first text node to maintain spacing
+        let needsPreserveSpace = false;
+        for (const runInfo of runsInGroup) {
+          for (const textNode of runInfo.textNodes) {
+            const xmlSpace = textNode.getAttribute('xml:space');
+            if (xmlSpace === 'preserve') {
+              needsPreserveSpace = true;
+              break;
+            }
+          }
+          if (needsPreserveSpace) break;
+        }
+        
+        // Set xml:space="preserve" if needed
+        if (needsPreserveSpace) {
+          firstTextNode.setAttribute('xml:space', 'preserve');
+        }
+        
+        this.setTextNodeContent(firstTextNode, escapedText);
+        
+        // Clear subsequent text nodes in first run
+        for (let j = 1; j < firstRun.textNodes.length; j++) {
+          this.setTextNodeContent(firstRun.textNodes[j], '');
+        }
+      }
+
+      // Clear all other runs in this formatting group
+      for (let i = 1; i < runsInGroup.length; i++) {
+        const runInfo = runsInGroup[i];
+        for (const textNode of runInfo.textNodes) {
+          this.setTextNodeContent(textNode, '');
+        }
+      }
+    }
+
+    // Step 4: Clear any runs that don't have corresponding segments
+    const usedRunIndices = new Set<number>();
+    for (const segment of segments) {
+      const runsInGroup = formattingGroupToRuns.get(segment.runIndex);
+      if (runsInGroup) {
+        for (const runInfo of runsInGroup) {
+          usedRunIndices.add(runInfo.runIndex);
+        }
+      }
+    }
+
+    // Clear unused runs
+    for (let runIdx = 0; runIdx < runs.length; runIdx++) {
+      if (!usedRunIndices.has(runIdx)) {
+        const textNodes = this.getElementsByTagName(runs[runIdx], 'w:t');
+        for (const textNode of textNodes) {
+          this.setTextNodeContent(textNode, '');
+        }
+      }
+    }
+  }
+
+  /**
+   * Legacy method: Replace text without formatting preservation
+   * Used as fallback when markers are missing or invalid
+   */
+  private replaceTextInParagraphLegacy(paragraphElement: Element, translatedText: string): void {
+    const textNodes = this.findAllTextNodes(paragraphElement);
+
+    if (textNodes.length === 0) {
+      return;
+    }
+
     const escapedText = this.escapeXml(translatedText);
+    this.setTextNodeContent(textNodes[0], escapedText);
 
-    // Replace text in first <w:t> node
-    const firstTextNode = textNodes[0];
-    this.setTextNodeContent(firstTextNode, escapedText);
-
-    // Clear all subsequent <w:t> nodes (set to empty string)
     for (let i = 1; i < textNodes.length; i++) {
       this.setTextNodeContent(textNodes[i], '');
     }
