@@ -6,6 +6,7 @@ import TMImportModal from '../components/TMImportModal';
 import TMEntryModal from '../components/TMEntryModal';
 import { projectsApi } from '../api/projects.api';
 import type { TranslationMemoryEntry, TmSearchResult } from '../api/tm.api';
+import { stripFormattingMarkers } from '../utils/formatting';
 import toast from 'react-hot-toast';
 import apiClient from '../api/client';
 
@@ -773,7 +774,7 @@ export default function TranslationMemoryPage() {
                       <div className="flex-1">
                         <div className="mb-2">
                           <p className="text-sm text-gray-600 mb-1">Source ({entry.sourceLocale}):</p>
-                          <p className="text-gray-900 font-medium">{entry.sourceText}</p>
+                          <p className="text-gray-900 font-medium">{stripFormattingMarkers(entry.sourceText)}</p>
                         </div>
                         <div>
                           <p className="text-sm text-gray-600 mb-1">Target ({entry.targetLocale}):</p>

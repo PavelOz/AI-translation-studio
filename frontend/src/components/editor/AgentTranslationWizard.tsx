@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useQuery } from 'react-query';
 import { aiApi } from '../../api/ai.api';
+import { stripFormattingMarkers } from '../../utils/formatting';
 import toast from 'react-hot-toast';
 
 type AIProvider = 'gemini' | 'openai' | 'yandex';
@@ -230,7 +231,7 @@ export default function AgentTranslationWizard({
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Source Text:</label>
             <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-gray-900 whitespace-pre-wrap min-h-[100px]">
-              {sourceText}
+              {stripFormattingMarkers(sourceText)}
             </div>
           </div>
           <div className="flex justify-end">
@@ -251,7 +252,7 @@ export default function AgentTranslationWizard({
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Draft Translation:</label>
             <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-gray-900 whitespace-pre-wrap min-h-[100px]">
-              {draftText}
+              {stripFormattingMarkers(draftText)}
             </div>
           </div>
           <div className="flex justify-end gap-2">
@@ -404,7 +405,7 @@ export default function AgentTranslationWizard({
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Fixed Translation:</label>
             <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-gray-900 whitespace-pre-wrap min-h-[100px]">
-              {finalText}
+              {stripFormattingMarkers(finalText)}
             </div>
           </div>
           <div className="flex justify-end gap-2">
@@ -658,7 +659,7 @@ export default function AgentTranslationWizard({
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Source Text:</label>
             <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-gray-900 whitespace-pre-wrap min-h-[100px]">
-              {sourceText}
+              {stripFormattingMarkers(sourceText)}
             </div>
           </div>
           <div className="flex justify-end">
@@ -679,7 +680,7 @@ export default function AgentTranslationWizard({
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Draft Translation:</label>
             <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-gray-900 whitespace-pre-wrap min-h-[100px]">
-              {draftText}
+              {stripFormattingMarkers(draftText)}
             </div>
           </div>
           <div className="flex justify-end gap-2">
@@ -832,7 +833,7 @@ export default function AgentTranslationWizard({
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Fixed Translation:</label>
             <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-gray-900 whitespace-pre-wrap min-h-[100px]">
-              {finalText}
+              {stripFormattingMarkers(finalText)}
             </div>
           </div>
           <div className="flex justify-end gap-2">

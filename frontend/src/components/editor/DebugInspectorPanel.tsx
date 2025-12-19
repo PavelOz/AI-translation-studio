@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useQuery } from 'react-query';
 import { segmentsApi } from '../../api/segments.api';
+import { stripFormattingMarkers } from '../../utils/formatting';
 
 interface DebugInspectorPanelProps {
   segmentId: string | null;
@@ -117,7 +118,7 @@ export default function DebugInspectorPanel({ segmentId }: DebugInspectorPanelPr
                         <div className="text-sm text-gray-600 space-y-1">
                           <div>
                             <span className="font-medium">Source:</span>{' '}
-                            <span className="bg-white px-1 rounded">{match.sourceText}</span>
+                            <span className="bg-white px-1 rounded">{stripFormattingMarkers(match.sourceText)}</span>
                           </div>
                           <div>
                             <span className="font-medium">Target:</span>{' '}
@@ -215,7 +216,7 @@ export default function DebugInspectorPanel({ segmentId }: DebugInspectorPanelPr
                         <div>
                           <span className="font-medium">Source:</span>{' '}
                           <span className="bg-white px-1 rounded">
-                            {debugInfo.context.next.sourceText}
+                            {stripFormattingMarkers(debugInfo.context.next.sourceText)}
                           </span>
                         </div>
                         {debugInfo.context.next.targetText && (

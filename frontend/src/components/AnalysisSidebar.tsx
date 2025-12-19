@@ -22,8 +22,40 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
   // Fetch analysis status and results
   const { data: analysis, isLoading, error, refetch } = useQuery({
     queryKey: ['analysis', documentId],
-    queryFn: () => analysisApi.getAnalysis(documentId),
+    queryFn: async () => {
+      try {
+        return await analysisApi.getAnalysis(documentId);
+      } catch (err: any) {
+        // Handle 404 gracefully - it just means analysis hasn't been run yet
+        // Return a default PENDING state instead of throwing
+        if (err?.response?.status === 404) {
+          return {
+            status: 'PENDING' as AnalysisStatus,
+            glossaryExtracted: false,
+            styleRulesExtracted: false,
+            completedAt: null,
+            glossaryCount: 0,
+            styleRulesCount: 0,
+            styleRules: [],
+            glossaryEntries: [],
+            currentStage: null,
+            progressPercentage: 0,
+            currentMessage: null,
+          } as AnalysisResults;
+        }
+        throw err; // Re-throw other errors
+      }
+    },
     enabled: !!documentId,
+    retry: (failureCount, error: any) => {
+      // Don't retry on 404 errors (analysis just hasn't been run)
+      if (error?.response?.status === 404) {
+        return false;
+      }
+      // Retry other errors up to 3 times
+      return failureCount < 3;
+    },
+    useErrorBoundary: false, // Don't use error boundary - handle errors manually
     refetchInterval: (data) => {
       try {
         const currentStatus = data?.status;
@@ -285,33 +317,6 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
     }
   };
 
-  if (error) {
-    // Don't show error if we're still loading or if it's a transient error
-    // This prevents white screen during normal operation
-    if (isLoading) {
-      return (
-        <div className="bg-white rounded-lg shadow p-4">
-          <h3 className="text-lg font-semibold text-gray-900 mb-2">Document Analysis</h3>
-          <div className="text-sm text-gray-500">Loading...</div>
-        </div>
-      );
-    }
-    return (
-      <div className="bg-white rounded-lg shadow p-4">
-        <h3 className="text-lg font-semibold text-gray-900 mb-2">Document Analysis</h3>
-        <div className="text-sm text-red-600">
-          Failed to load analysis: {(error as Error).message}
-        </div>
-        <button
-          onClick={() => refetch()}
-          className="mt-2 btn btn-secondary text-sm"
-        >
-          Retry
-        </button>
-      </div>
-    );
-  }
-
   // Safely get status with fallback
   const status = (analysis?.status || 'PENDING') as AnalysisStatus;
   // Show running state if: status is RUNNING, or mutation is pending (button just clicked)
@@ -340,6 +345,24 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
       console.log('Analysis data is null/undefined', { isLoading, error, timestamp: new Date().toISOString() });
     }
   }, [analysis, isLoading, error]);
+
+  // Show error UI for non-404 errors (after all hooks are called to prevent hook ordering issues)
+  if (error && !isLoading && (error as any)?.response?.status !== 404) {
+    return (
+      <div className="bg-white rounded-lg shadow p-4">
+        <h3 className="text-lg font-semibold text-gray-900 mb-2">Document Analysis</h3>
+        <div className="text-sm text-red-600">
+          Failed to load analysis: {(error as Error).message}
+        </div>
+        <button
+          onClick={() => refetch()}
+          className="mt-2 btn btn-secondary text-sm"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="bg-white rounded-lg shadow p-4">

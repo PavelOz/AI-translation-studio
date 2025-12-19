@@ -7,3 +7,4 @@ ALTER TABLE "DocumentGlossaryEntry" ADD COLUMN IF NOT EXISTS "occurrenceCount" I
 
 
 
+

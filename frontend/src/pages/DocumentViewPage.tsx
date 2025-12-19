@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { documentsApi } from '../api/documents.api';
 import { segmentsApi } from '../api/segments.api';
 import { getLanguageName } from '../utils/languages';
+import { stripFormattingMarkers } from '../utils/formatting';
 import toast from 'react-hot-toast';
 
 export default function DocumentViewPage() {
@@ -85,7 +86,7 @@ export default function DocumentViewPage() {
                 <div key={segment.id} className="border-b border-gray-200 pb-4">
                   <div className="mb-2">
                     <p className="text-sm text-gray-600">Source:</p>
-                    <p className="text-gray-900">{segment.sourceText}</p>
+                    <p className="text-gray-900">{stripFormattingMarkers(segment.sourceText)}</p>
                   </div>
                   {segment.targetFinal && (
                     <div>

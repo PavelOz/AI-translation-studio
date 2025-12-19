@@ -4,6 +4,7 @@ import { segmentsApi } from '../../api/segments.api';
 import { aiApi } from '../../api/ai.api';
 import { tmApi } from '../../api/tm.api';
 import { useAuthStore } from '../../stores/authStore';
+import { stripFormattingMarkers } from '../../utils/formatting';
 import toast from 'react-hot-toast';
 import type { GlossaryMode } from '../../types/glossary';
 
@@ -820,7 +821,7 @@ export default function AITranslationPanel({
                             ? 'text-blue-900 border-blue-200'
                             : 'text-green-900 border-green-200'
                         }`}>
-                          {meta.tmDirectMatch.sourceText}
+                          {stripFormattingMarkers(meta.tmDirectMatch.sourceText)}
                         </p>
                       </div>
                       <div>
@@ -872,7 +873,7 @@ export default function AITranslationPanel({
                           <div className="space-y-1">
                             <div>
                               <p className="text-xs font-semibold text-yellow-800">Source:</p>
-                              <p className="text-yellow-900 text-xs font-mono whitespace-pre-wrap break-words">{ex.sourceText}</p>
+                              <p className="text-yellow-900 text-xs font-mono whitespace-pre-wrap break-words">{stripFormattingMarkers(ex.sourceText)}</p>
                             </div>
                             <div>
                               <p className="text-xs font-semibold text-yellow-800">Target:</p>
@@ -1054,7 +1055,7 @@ export default function AITranslationPanel({
       <div className="mb-4">
         <label className="block text-sm font-medium text-gray-700 mb-1">Source:</label>
         <div className="bg-gray-50 border border-gray-200 rounded p-3 text-sm text-gray-700 whitespace-pre-wrap">
-          {sourceText || <span className="text-gray-400">No source text</span>}
+          {sourceText ? stripFormattingMarkers(sourceText) : <span className="text-gray-400">No source text</span>}
         </div>
       </div>
 
@@ -1195,7 +1196,7 @@ export default function AITranslationPanel({
             )}
           </div>
           <div className="bg-blue-50 border border-blue-200 rounded p-3 text-sm text-gray-900 whitespace-pre-wrap">
-            {translation}
+            {stripFormattingMarkers(translation)}
           </div>
           <button
             type="button"
@@ -1222,7 +1223,7 @@ export default function AITranslationPanel({
             Blind Translation (Control - No Document Context):
           </label>
           <div className="bg-yellow-50 border border-yellow-200 rounded p-3 text-sm text-gray-900 whitespace-pre-wrap">
-            {blindTranslation}
+            {stripFormattingMarkers(blindTranslation)}
           </div>
           <p className="text-xs text-gray-500 mt-2">
             This translation was generated without document-specific glossary terms and style rules for comparison.

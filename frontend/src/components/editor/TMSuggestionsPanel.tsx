@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { tmApi } from '../../api/tm.api';
 import type { TmSearchResult } from '../../api/tm.api';
 import { segmentsApi } from '../../api/segments.api';
+import { stripFormattingMarkers } from '../../utils/formatting';
 import toast from 'react-hot-toast';
 
 interface TMSuggestionsPanelProps {
@@ -886,7 +887,7 @@ export default function TMSuggestionsPanel({
               <div className="flex justify-between items-start mb-2">
                 <div className="flex-1">
                   {isPerfectMatch ? (
-                    <div className="text-sm text-gray-600 mb-1">{suggestion.sourceText}</div>
+                    <div className="text-sm text-gray-600 mb-1">{stripFormattingMarkers(suggestion.sourceText)}</div>
                   ) : differences ? (
                     <div className="text-sm text-gray-600 mb-1">
                       <span className="text-xs text-gray-500 mb-1 block">Differences:</span>
@@ -918,7 +919,7 @@ export default function TMSuggestionsPanel({
                       </div>
                     </div>
                   ) : (
-                    <div className="text-sm text-gray-600 mb-1">{suggestion.sourceText}</div>
+                    <div className="text-sm text-gray-600 mb-1">{stripFormattingMarkers(suggestion.sourceText)}</div>
                   )}
                   <div className="text-sm font-medium text-gray-900 mt-2">{suggestion.targetText}</div>
                 </div>

@@ -301,7 +301,6 @@ export default function ProjectDetailPage() {
                 ? 'Documents will be split by paragraphs (recommended for most documents)'
                 : 'Documents will be split by sentences (useful for detailed editing and alignment)'}
             </p>
->>>>>>> 500edc9 (Add document sorting and import time display; Fix export for sentence-segmented documents)
           </div>
           
           {/* Upload Progress Bar */}
@@ -364,9 +363,6 @@ export default function ProjectDetailPage() {
                     </div>
                     <div className="text-xs text-gray-400 mt-1">
                       Imported: {new Date(doc.createdAt).toLocaleString()}
-                    </div>
-                    <div className="text-xs text-gray-400 mt-1">
-                      Imported: {formatImportDate(doc.createdAt)}
                     </div>
                   </div>
                   <div className="flex items-center gap-2">

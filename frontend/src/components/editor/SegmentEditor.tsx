@@ -3,6 +3,7 @@ import type { Segment } from '../../api/segments.api';
 import { segmentsApi } from '../../api/segments.api';
 import toast from 'react-hot-toast';
 import AgentStepTranslation from './AgentStepTranslation';
+import { stripFormattingMarkers, restoreFormattingMarkers, hasFormattingMarkers } from '../../utils/formatting';
 
 interface SegmentEditorProps {
   segment: Segment;
@@ -90,8 +91,14 @@ const SegmentEditor = memo(function SegmentEditor({
   };
 
   const handleSave = async (value?: string) => {
-    const textToSave = value ?? targetText;
+    let textToSave = value ?? targetText;
     const currentText = segment.targetFinal || segment.targetMt || '';
+    
+    // If user edited text without markers, but original had markers, try to restore them
+    if (value && !hasFormattingMarkers(value) && hasFormattingMarkers(currentText)) {
+      // User edited text that had markers - try to restore markers based on source text
+      textToSave = restoreFormattingMarkers(value, currentText, segment.sourceText);
+    }
     
     // Only save if there are actual changes
     if (textToSave === currentText) {
@@ -107,6 +114,7 @@ const SegmentEditor = memo(function SegmentEditor({
         status: status as any,
       });
       onUpdate(segment.id, { targetFinal: textToSave, status: status as any });
+      setTargetText(textToSave); // Update state with saved text (may have restored markers)
       setLocalStatus(null); // Clear local status override after successful save
       isEditingRef.current = false; // Reset after successful save
     } catch (error: any) {
@@ -141,18 +149,26 @@ const SegmentEditor = memo(function SegmentEditor({
       return;
     }
 
+    // If user edited text without markers, but original had markers, try to restore them
+    let textToConfirm = targetText;
+    const currentText = segment.targetFinal || segment.targetMt || '';
+    if (!hasFormattingMarkers(targetText) && hasFormattingMarkers(currentText)) {
+      textToConfirm = restoreFormattingMarkers(targetText, currentText, segment.sourceText);
+    }
+
     setIsSaving(true);
     try {
       // Update via API
       await segmentsApi.update(segment.id, {
-        targetFinal: targetText.trim(),
+        targetFinal: textToConfirm.trim(),
         status: 'CONFIRMED',
       });
       // Update local state/cache through onUpdate callback to trigger cache invalidation
       onUpdate(segment.id, {
-        targetFinal: targetText.trim(),
+        targetFinal: textToConfirm.trim(),
         status: 'CONFIRMED',
       });
+      setTargetText(textToConfirm); // Update state with confirmed text
       // Move to next segment
       onConfirm();
       toast.success('Segment confirmed');
@@ -225,7 +241,7 @@ const SegmentEditor = memo(function SegmentEditor({
       <div className="mb-3">
         <label className="text-sm font-medium text-gray-700 mb-1 block">Source:</label>
         <div className="bg-gray-50 border border-gray-200 rounded p-3 text-gray-900 whitespace-pre-wrap">
-          {segment.sourceText}
+          {stripFormattingMarkers(segment.sourceText)}
         </div>
       </div>
 
@@ -233,8 +249,15 @@ const SegmentEditor = memo(function SegmentEditor({
         <label className="text-sm font-medium text-gray-700 mb-1 block">Target:</label>
         <textarea
           ref={textareaRef}
-          value={targetText}
-          onChange={(e) => handleChange(e.target.value)}
+          value={stripFormattingMarkers(targetText)}
+          onChange={(e) => {
+            // When user edits text without markers, we need to preserve the original markers
+            // if the original text had them. We'll store the edited text and try to restore
+            // markers on save if the original had them.
+            const editedText = e.target.value;
+            // Store the edited text - if original had markers, we'll try to restore them on save
+            handleChange(editedText);
+          }}
           onKeyDown={handleKeyDown}
           onBlur={(e) => {
             // Don't save if a button is being clicked

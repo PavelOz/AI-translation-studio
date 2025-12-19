@@ -27,27 +27,12 @@ export const importDocumentFile = async (
   file: Express.Multer.File,
   input: ImportDocumentInput,
 ) => {
-  // #region agent log
-  logger.debug({ 
-    fileName: file?.originalname, 
-    hasBuffer: !!file?.buffer, 
-    bufferLength: file?.buffer?.length, 
-    inputSegmentationMode: input.segmentationMode 
-  }, 'importDocumentFile: entry');
-  // #endregion
   
   if (!file) {
     throw ApiError.badRequest('File is required');
   }
 
   const handler = resolveHandler(file.originalname, file.mimetype);
-  
-  // #region agent log
-  logger.debug({ 
-    hasHandler: !!handler, 
-    handlerType: handler?.constructor?.name 
-  }, 'importDocumentFile: handler resolved');
-  // #endregion
   
   if (!handler) {
     throw ApiError.badRequest('Unsupported file format');
@@ -56,30 +41,9 @@ export const importDocumentFile = async (
   let parsed;
   const parseOptions = { segmentationMode: input.segmentationMode || 'paragraphs' };
   
-  // #region agent log
-  logger.debug({ 
-    parseOptions, 
-    hasParseMethod: typeof handler.parse === 'function' 
-  }, 'importDocumentFile: calling handler.parse');
-  // #endregion
-  
   try {
     parsed = await handler.parse(file.buffer, parseOptions);
-    
-    // #region agent log
-    logger.debug({ 
-      segmentsCount: parsed?.segments?.length, 
-      hasMetadata: !!parsed?.metadata, 
-      metadataSegmentationMode: parsed?.metadata?.segmentationMode 
-    }, 'importDocumentFile: handler.parse succeeded');
-    // #endregion
   } catch (error) {
-    // #region agent log
-    logger.error({ 
-      errorMessage: error instanceof Error ? error.message : String(error), 
-      errorStack: error instanceof Error ? error.stack?.substring(0, 500) : undefined 
-    }, 'importDocumentFile: handler.parse failed');
-    // #endregion
     const errorMessage = error instanceof Error ? error.message : String(error);
     logger.error({ error: errorMessage, filename: file.originalname }, 'Failed to parse document file');
     throw ApiError.badRequest(`Failed to parse document: ${errorMessage}`);
@@ -133,48 +97,11 @@ export const importDocumentFile = async (
   }
 
   try {
-    // #region agent log
-    // Log first 20 segments to verify type is being saved correctly
-    const segmentsToLog = parsed.segments.slice(0, 20);
-    logger.debug({
-      totalSegments: parsed.segments.length,
-      segmentsWithType: parsed.segments.filter(s => s.type).length,
-      segmentsWithTableCellType: parsed.segments.filter(s => s.type === 'table-cell').length,
-      segmentsWithParagraphType: parsed.segments.filter(s => s.type === 'paragraph').length,
-      firstFewSegments: segmentsToLog.map(s => ({
-        index: s.index,
-        type: s.type,
-        textPreview: s.sourceText.substring(0, 30)
-      }))
-    }, 'Import: preparing segments for database save');
-    // #endregion
-    
-    // #region agent log
-    const segmentsWithTargetMt = parsed.segments.filter(s => s.targetMt).length;
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'file.service.ts:152',message:'Import: before bulkUpsertSegments',data:{totalSegments:parsed.segments.length,segmentsWithTargetMt,firstFewTargetMt:parsed.segments.slice(0,5).map((s,i)=>({index:s.index,hasTargetMt:!!s.targetMt,targetMtPreview:s.targetMt?.substring(0,30)}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-    // #endregion
-
     await bulkUpsertSegments(
       parsed.segments.map((segment) => {
         const segmentType = segment.type || 'paragraph';
         
-        // #region agent log
-        // Log first 20 segments to verify type is being saved
-        if (segment.index < 20) {
-          logger.debug({
-            segmentIndex: segment.index,
-            segmentTypeFromParse: segment.type,
-            segmentTypeToSave: segmentType,
-            textPreview: segment.sourceText.substring(0, 30)
-          }, 'Import: saving segment to database');
-        }
-        // #endregion
         
-        // #region agent log
-        if (segment.index < 5 && segment.targetMt) {
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'file.service.ts:175',message:'Import: segment with targetMt',data:{index:segment.index,targetMt:segment.targetMt,targetMtLength:segment.targetMt.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-        }
-        // #endregion
         
         return {
           documentId: document.id,
@@ -186,9 +113,6 @@ export const importDocumentFile = async (
       }),
     );
 
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'file.service.ts:180',message:'Import: after bulkUpsertSegments',data:{documentId:document.id,totalSegments:parsed.segments.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-    // #endregion
   } catch (error) {
     // If segment creation fails, log error but don't fail the upload
     console.error('Error creating segments:', error);
@@ -314,6 +238,7 @@ export const importDocumentFile = async (
 };
 
 export const exportDocumentFile = async (documentId: string): Promise<Buffer> => {
+  
   const document = await getDocument(documentId);
   if (!document) {
     throw ApiError.notFound('Document not found');
@@ -324,22 +249,11 @@ export const exportDocumentFile = async (documentId: string): Promise<Buffer> =>
     throw ApiError.badRequest('Export not supported for this file format');
   }
 
+
   const originalBuffer = await fs.readFile(document.storagePath);
   const segments = await getDocumentSegments(documentId, 1, 10000);
 
-  // #region agent log
-  logger.debug({ 
-    totalSegments: segments.segments.length,
-    segmentsWithTargetFinal: segments.segments.filter(s => s.targetFinal).length,
-    segmentsWithTargetMt: segments.segments.filter(s => s.targetMt && !s.targetFinal).length,
-    segmentsWithSourceOnly: segments.segments.filter(s => !s.targetFinal && !s.targetMt).length
-  }, 'Export: preparing segments');
-  // #endregion
 
-  // #region agent log
-  const segmentsWithTargetMt = segments.segments.filter(s => s.targetMt && !s.targetFinal);
-  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'file.service.ts:313',message:'Export: segments from DB',data:{totalSegments:segments.segments.length,segmentsWithTargetMt:segmentsWithTargetMt.length,segmentsWithTargetFinal:segments.segments.filter(s=>s.targetFinal).length,firstFewTargetMt:segmentsWithTargetMt.slice(0,5).map((s,i)=>({index:s.segmentIndex,targetMt:s.targetMt?.substring(0,30),targetMtLength:s.targetMt?.length||0}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-  // #endregion
 
   const exportSegments = segments.segments.map((seg) => ({
     index: seg.segmentIndex,
@@ -352,49 +266,9 @@ export const exportDocumentFile = async (documentId: string): Promise<Buffer> =>
     // Export will use heuristic approach to group sentence segments
   }));
 
-  // #region agent log
-  const exportSegmentsUsingTargetMt = exportSegments.filter((es, i) => {
-    const orig = segments.segments.find(s => s.segmentIndex === es.index);
-    return orig && !orig.targetFinal && orig.targetMt && es.targetText === orig.targetMt;
-  });
-  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'file.service.ts:328',message:'Export: exportSegments created',data:{totalExportSegments:exportSegments.length,exportSegmentsUsingTargetMt:exportSegmentsUsingTargetMt.length,firstFewExportSegments:exportSegments.slice(0,5).map((es,i)=>({index:es.index,targetTextPreview:es.targetText.substring(0,30),isUsingTargetMt:!!segments.segments.find(s=>s.segmentIndex===es.index)?.targetMt&&!segments.segments.find(s=>s.segmentIndex===es.index)?.targetFinal}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-  // #endregion
   
-  // #region agent log
-  logger.debug({ 
-    exportSegmentsCount: exportSegments.length,
-    segmentsUsingSource: exportSegments.filter(s => s.targetText === segments.segments.find(orig => orig.segmentIndex === s.index)?.sourceText).length
-  }, 'Export: exportSegments created');
-  // #endregion
 
-  // #region agent log
-  logger.debug({ 
-    documentId,
-    totalSegments: segments.segments.length,
-    firstFewSegments: segments.segments.slice(0, 3).map(s => ({
-      index: s.segmentIndex,
-      hasTargetFinal: !!s.targetFinal,
-      hasTargetMt: !!s.targetMt,
-      targetFinal: s.targetFinal?.substring(0, 30),
-      targetMt: s.targetMt?.substring(0, 30),
-      sourceText: s.sourceText.substring(0, 30)
-    })),
-    segmentsWithTargetFinal: segments.segments.filter(s => s.targetFinal).length,
-    segmentsWithTargetMt: segments.segments.filter(s => s.targetMt).length
-  }, 'Export: fetched segments from database');
-  // #endregion
 
-  // #region agent log
-  logger.debug({ 
-    totalExportSegments: exportSegments.length,
-    firstFewExportSegments: exportSegments.slice(0, 3).map(s => ({
-      index: s.index,
-      targetText: s.targetText.substring(0, 30),
-      targetTextLength: s.targetText.length
-    })),
-    segmentsWithNonSourceText: exportSegments.filter(s => s.targetText !== segments.segments.find(orig => orig.segmentIndex === s.index)?.sourceText).length
-  }, 'Export: created exportSegments array');
-  // #endregion
 
   // Check if document was segmented by sentences by looking at segment types and patterns
   // Improved heuristic: check multiple indicators
@@ -426,33 +300,9 @@ export const exportDocumentFile = async (documentId: string): Promise<Buffer> =>
     exportSegments.length >= 10 &&
     segmentsPer1000Chars >= 3;
   
-  // #region agent log
-  logger.debug({
-    avgSegmentLength,
-    stdDev,
-    totalSegments: exportSegments.length,
-    totalTextLength,
-    segmentsPer1000Chars,
-    likelySentenceSegmented,
-    heuristic: {
-      avgLengthCheck: avgSegmentLength < 80,
-      stdDevCheck: stdDev < 100,
-      minSegmentsCheck: exportSegments.length >= 10,
-      densityCheck: segmentsPer1000Chars >= 3
-    }
-  }, 'Export: segmentation mode detection');
-  // #endregion
 
   try {
-    // #region agent log
-    logger.debug({
-      documentId: document.id,
-      filename: document.filename ?? document.name,
-      totalSegments: exportSegments.length,
-      likelySentenceSegmented,
-      handlerType: handler.constructor.name
-    }, 'Export: calling handler.export');
-    // #endregion
+    
     
     const exportedBuffer = await handler.export({
       segments: exportSegments,
@@ -464,27 +314,10 @@ export const exportDocumentFile = async (documentId: string): Promise<Buffer> =>
       },
     });
     
-    // #region agent log
-    logger.debug({
-      documentId: document.id,
-      exportedBufferSize: exportedBuffer.length,
-      success: true
-    }, 'Export: handler.export succeeded');
-    // #endregion
+    
     
     return exportedBuffer;
   } catch (error) {
-    // #region agent log
-    logger.error({
-      documentId: document.id,
-      filename: document.filename ?? document.name,
-      errorMessage: error instanceof Error ? error.message : String(error),
-      errorStack: error instanceof Error ? error.stack?.substring(0, 1000) : undefined,
-      totalSegments: exportSegments.length,
-      likelySentenceSegmented,
-      handlerType: handler.constructor.name
-    }, 'Export: handler.export failed');
-    // #endregion
     
     const errorMessage = error instanceof Error ? error.message : String(error);
     logger.error({ 
