@@ -1272,6 +1272,97 @@ const filterCandidates = (phrases: Array<{ term: string; count: number }>, mode:
 };
 
 /**
+ * Clean candidates by removing noise, fragments, and duplicates
+ * 
+ * 1. Remove table artifacts, form fields, sentence fragments, and header noise
+ * 2. "Fuzzy Russian Doll" Deduplication (remove substrings if longer version exists, using normalized comparison)
+ * 
+ * Goal: Reduce term count from 117 to ~50 High-Quality items
+ */
+const cleanCandidates = (candidates: string[]): string[] => {
+  const originalCount = candidates.length;
+  console.log(`[Cleaner] Starting with ${originalCount} raw candidates`);
+  
+  const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+  let clean = candidates
+    .map(c => c.trim())
+    .filter(c => {
+      const lower = c.toLowerCase();
+
+      // 1. REJECT SHORT/EMPTY
+      if (c.length < 5) return false;
+
+      // 2. REJECT IF STARTS WITH LOWERCASE (Unless it's a specific chemical/unit)
+      // Real glossary terms (Questions/Titles) usually start with Uppercase.
+      // Fragments usually start with lowercase because they were cut from the middle of a sentence.
+      if (/^[a-z]/.test(c)) return false; 
+
+      // 3. REJECT BAD ENDINGS (Fragments)
+      // If it ends with " is", " are", " the", " and", " or", " of", " in", " to"
+      if (/( is| are| the| and| or| of| in| to| for| with)$/i.test(c)) return false;
+
+      // 4. REJECT BAD STARTS (Conjunctions)
+      // If it starts with "and ", "or ", "of ", "the "
+      if (/^(and|or|of|the|in|to|with)\s/i.test(c)) return false;
+
+      // 5. REJECT FORM NOISE
+      if (/signature|occupant|inspector|auditor|date of|phone contact|verified by/i.test(c)) return false;
+      if (/_{3,}/.test(c)) return false;
+
+      // 6. REJECT TABLE STATUS
+      if (/^(yes|no|n\/a|remarks|action|status)\b/i.test(c)) return false;
+      if (lower.includes('remarks') && lower.includes('corrective')) return false;
+
+      // 7. REJECT GENERIC SHORT PHRASES (< 3 words)
+      // "Safe drinking water" (3 words) -> OK
+      // "Water available" (2 words) -> Reject if < 20 chars
+      const words = c.split(/\s+/).length;
+      if (words < 3 && c.length < 20) return false;
+
+      return true;
+    })
+    .map(c => c.replace(/\s+\d+$/, '').trim());
+
+  // Step B: "Fuzzy Russian Doll" Deduplication
+  const uniqueSet = Array.from(new Set(clean));
+  uniqueSet.sort((a, b) => a.length - b.length); 
+  
+  const finalKeep: string[] = [];
+  for (let i = 0; i < uniqueSet.length; i++) {
+    const shortTerm = uniqueSet[i];
+    const shortNorm = normalize(shortTerm);
+    let isFragment = false;
+    if (shortTerm.length < 60) {
+      for (let j = i + 1; j < uniqueSet.length; j++) {
+        if (normalize(uniqueSet[j]).includes(shortNorm)) {
+          isFragment = true; break; 
+        }
+      }
+    }
+    if (!isFragment) finalKeep.push(shortTerm);
+  }
+
+  const finalCount = finalKeep.length;
+  console.log(`[Cleaner] Reduced from ${originalCount} to ${finalCount} clean candidates`);
+  
+  // Log cleaning statistics
+  if (originalCount !== finalCount) {
+    logger.debug(
+      {
+        originalCount,
+        finalCount,
+        removed: originalCount - finalCount,
+        reductionRate: ((originalCount - finalCount) / originalCount * 100).toFixed(1) + '%',
+      },
+      'Candidate cleaning pipeline: noise and fragments removed',
+    );
+  }
+
+  return finalKeep;
+};
+
+/**
  * REFACTOR: Distinct Candidate Selection
  * This function selects which terms to send to the AI. Deep Mode must be "Brute Force."
  * 
@@ -1346,10 +1437,16 @@ const selectCandidates = (text: string, mode: 'fast' | 'deep', documentId?: stri
     fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1296',message:'Table row candidates result',data:{tableRowCount:tableRowCandidates.length,first5Candidates:tableRowCandidates.slice(0,5).map(c=>c.substring(0,80))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})}).catch(()=>{});
     // #endregion
     
-    tableRowCount = tableRowCandidates.length;
+    // Clean table row candidates before merging
+    const cleanedTableRows = cleanCandidates(tableRowCandidates);
+    tableRowCount = cleanedTableRows.length;
 
     // Merge: Put Table Rows AT THE TOP of the list
-    candidates = [...tableRowCandidates, ...candidates];
+    candidates = [...cleanedTableRows, ...candidates];
+    
+    // Final cleaning pass: Clean the entire merged list to remove any remaining noise/fragments
+    // This catches cases where N-grams might be fragments of table rows or vice versa
+    candidates = cleanCandidates(candidates);
   }
 
   // Stage 2 Validation: Log candidate metrics
