@@ -7618,15 +7618,67 @@ export const listDocumentGlossary = async (
       throw ApiError.notFound('Document not found');
     }
 
-    // Get all document glossary entries
+    // Get all document glossary entries (including status field)
+    // Note: Prisma client needs to be regenerated after adding status field to schema
     const documentEntries = await prisma.documentGlossaryEntry.findMany({
       where: { documentId },
       orderBy: { occurrenceCount: 'desc' },
     });
 
     // For each entry, check if it exists in GlossaryEntry to determine status
+    // Priority: DocumentGlossaryEntry.status (user's review decision) > GlossaryEntry existence
     const entriesWithStatus = await Promise.all(
       documentEntries.map(async (entry) => {
+        // Read status directly from database using raw SQL (since Prisma client may be out of sync)
+        const statusResult = await prisma.$queryRawUnsafe<Array<{ status: string | null }>>(
+          `SELECT "status" FROM "DocumentGlossaryEntry" WHERE "id" = $1`,
+          entry.id
+        );
+        const entryStatus = statusResult[0]?.status as string | null | undefined;
+        // If DocumentGlossaryEntry has an explicit status (from user review), use it
+        // This allows rejected/approved/candidate terms to maintain their status even if GlossaryEntry exists
+        if (entryStatus && (entryStatus === 'DEPRECATED' || entryStatus === 'APPROVED' || entryStatus === 'CANDIDATE')) {
+          let source: 'global' | 'project' | 'new' = 'new';
+          
+          // Determine source based on GlossaryEntry existence
+          let glossaryEntry = await prisma.glossaryEntry.findFirst({
+            where: {
+              projectId: null,
+              sourceTerm: { equals: entry.sourceTerm, mode: 'insensitive' },
+              sourceLocale: document.sourceLocale,
+              targetLocale: document.targetLocale,
+            },
+            select: { id: true },
+          });
+
+          if (glossaryEntry) {
+            source = 'global';
+          } else if (document.projectId) {
+            glossaryEntry = await prisma.glossaryEntry.findFirst({
+              where: {
+                projectId: document.projectId,
+                sourceTerm: { equals: entry.sourceTerm, mode: 'insensitive' },
+                sourceLocale: document.sourceLocale,
+                targetLocale: document.targetLocale,
+              },
+              select: { id: true },
+            });
+            if (glossaryEntry) {
+              source = 'project';
+            }
+          }
+
+          return {
+            id: entry.id,
+            sourceTerm: entry.sourceTerm,
+            targetTerm: entry.targetTerm,
+            frequency: entry.occurrenceCount,
+            status: entryStatus as 'CANDIDATE' | 'APPROVED' | 'DEPRECATED',
+            source,
+          };
+        }
+
+        // No explicit status - determine from GlossaryEntry existence
         // Check global glossary first
         let glossaryEntry = await prisma.glossaryEntry.findFirst({
           where: {
@@ -7708,71 +7760,215 @@ export const updateDocumentGlossaryEntry = async (
   status: 'CANDIDATE' | 'APPROVED' | 'DEPRECATED';
 }> => {
   try {
-    // Get the document glossary entry
-    const entry = await prisma.documentGlossaryEntry.findFirst({
+    // Get the document glossary entry with document info
+    const documentEntry = await prisma.documentGlossaryEntry.findFirst({
       where: {
         id: entryId,
         documentId,
       },
+      include: {
+        document: {
+          select: {
+            sourceLocale: true,
+            targetLocale: true,
+            projectId: true,
+          },
+        },
+      },
     });
 
-    if (!entry) {
+    if (!documentEntry) {
       throw ApiError.notFound('Document glossary entry not found');
     }
 
-    // Update targetTerm if provided
-    if (data.targetTerm !== undefined) {
+    const { document } = documentEntry;
+
+    // Find or create the corresponding GlossaryEntry
+    // When approving (PREFERRED), we want to save to Global Glossary (projectId: null)
+    // When rejecting (DEPRECATED) or setting to CANDIDATE, we can save to project scope
+    
+    // First check global (projectId: null) - this is where approved terms should be
+    let glossaryEntry = await prisma.glossaryEntry.findFirst({
+      where: {
+        projectId: null,
+        sourceTerm: { equals: documentEntry.sourceTerm, mode: 'insensitive' },
+        sourceLocale: document.sourceLocale,
+        targetLocale: document.targetLocale,
+      },
+    });
+
+    // If not found in global, check project-specific
+    if (!glossaryEntry) {
+      glossaryEntry = await prisma.glossaryEntry.findFirst({
+        where: {
+          projectId: document.projectId,
+          sourceTerm: { equals: documentEntry.sourceTerm, mode: 'insensitive' },
+          sourceLocale: document.sourceLocale,
+          targetLocale: document.targetLocale,
+        },
+      });
+    }
+
+    // If still not found, create a new GlossaryEntry (only if status is being set)
+    if (!glossaryEntry && data.status !== undefined) {
+      // IMPORTANT: Only create in Global Glossary when approving (PREFERRED)
+      // CANDIDATE terms go to project scope (if project exists)
+      // DEPRECATED terms should NOT have a GlossaryEntry
+      if (data.status === 'PREFERRED') {
+        // Create in global glossary
+        glossaryEntry = await prisma.glossaryEntry.create({
+          data: {
+            sourceTerm: documentEntry.sourceTerm,
+            targetTerm: data.targetTerm || documentEntry.targetTerm,
+            sourceLocale: document.sourceLocale,
+            targetLocale: document.targetLocale,
+            direction: `${document.sourceLocale}-${document.targetLocale}`,
+            projectId: null, // Global scope
+          },
+        });
+        logger.info(
+          {
+            documentId: documentEntry.documentId,
+            sourceTerm: documentEntry.sourceTerm,
+            targetTerm: data.targetTerm || documentEntry.targetTerm,
+          },
+          'Created term in Global Glossary after approval in Glossary Review',
+        );
+      } else if (data.status === 'CANDIDATE' && document.projectId) {
+        // Create in project glossary when setting to CANDIDATE (if project exists)
+        glossaryEntry = await prisma.glossaryEntry.create({
+          data: {
+            sourceTerm: documentEntry.sourceTerm,
+            targetTerm: data.targetTerm || documentEntry.targetTerm,
+            sourceLocale: document.sourceLocale,
+            targetLocale: document.targetLocale,
+            direction: `${document.sourceLocale}-${document.targetLocale}`,
+            projectId: document.projectId, // Project scope
+          },
+        });
+        logger.info(
+          {
+            documentId: documentEntry.documentId,
+            sourceTerm: documentEntry.sourceTerm,
+          },
+          'Created term in Project Glossary after reset to candidate',
+        );
+      }
+      // DEPRECATED status: do not create GlossaryEntry
+    } else if (glossaryEntry && data.status !== undefined) {
+      // Update existing GlossaryEntry
+      const updateData: any = {};
+      
+      // If approving (PREFERRED) and entry is in project scope, move to global scope
+      if (data.status === 'PREFERRED' && glossaryEntry.projectId !== null) {
+        updateData.projectId = null; // Move to global
+        logger.info(
+          {
+            documentId: documentEntry.documentId,
+            sourceTerm: documentEntry.sourceTerm,
+            previousProjectId: glossaryEntry.projectId,
+          },
+          'Moving term from project to Global Glossary after approval',
+        );
+      }
+      
+      // If rejecting (DEPRECATED), delete the GlossaryEntry so it's not used in translations
+      if (data.status === 'DEPRECATED') {
+        await prisma.glossaryEntry.delete({
+          where: { id: glossaryEntry.id },
+        });
+        glossaryEntry = null; // Mark as deleted
+        logger.info(
+          {
+            documentId: documentEntry.documentId,
+            sourceTerm: documentEntry.sourceTerm,
+          },
+          'Deleted term from Glossary (rejected/deprecated)',
+        );
+      } else if (data.status === 'CANDIDATE') {
+        // Setting to CANDIDATE: move from global to project scope if needed
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:7895',message:'Setting status to CANDIDATE',data:{entryId,glossaryEntryId:glossaryEntry.id,currentProjectId:glossaryEntry.projectId,documentProjectId:document.projectId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+        // #endregion
+        if (glossaryEntry.projectId === null) {
+          // If setting to CANDIDATE and entry is in global scope, move to project scope
+          updateData.projectId = document.projectId; // Move to project scope
+          logger.info(
+            {
+              documentId: documentEntry.documentId,
+              sourceTerm: documentEntry.sourceTerm,
+            },
+            'Moving term from Global Glossary to project scope (set to candidate)',
+          );
+        }
+        // If already in project scope, no change needed
+      } else {
+        // For other status changes, update the entry
+        
+        if (data.targetTerm !== undefined) {
+          updateData.targetTerm = data.targetTerm;
+        }
+
+        if (Object.keys(updateData).length > 0) {
+          glossaryEntry = await prisma.glossaryEntry.update({
+            where: { id: glossaryEntry.id },
+            data: updateData,
+          });
+        } else if (data.targetTerm !== undefined) {
+          // Just update targetTerm if no other changes
+          glossaryEntry = await prisma.glossaryEntry.update({
+            where: { id: glossaryEntry.id },
+            data: { targetTerm: data.targetTerm },
+          });
+        }
+      }
+    } else if (glossaryEntry && data.targetTerm !== undefined) {
+      // Just update targetTerm if no status change
+      glossaryEntry = await prisma.glossaryEntry.update({
+        where: { id: glossaryEntry.id },
+        data: { targetTerm: data.targetTerm },
+      });
+    }
+
+    // Update the DocumentGlossaryEntry with status and/or targetTerm
+    // Use raw SQL for status field until Prisma client is regenerated
+    if (data.status !== undefined) {
+      // Map PREFERRED to APPROVED for DocumentGlossaryEntry status
+      const statusValue = data.status === 'PREFERRED' ? 'APPROVED' : data.status;
+      await prisma.$executeRawUnsafe(
+        `UPDATE "DocumentGlossaryEntry" SET "status" = $1 WHERE "id" = $2`,
+        statusValue,
+        entryId
+      );
+    }
+    
+    if (data.targetTerm !== undefined && data.targetTerm !== documentEntry.targetTerm) {
       await prisma.documentGlossaryEntry.update({
         where: { id: entryId },
         data: { targetTerm: data.targetTerm },
       });
     }
 
-    // Note: DocumentGlossaryEntry doesn't have a status field
-    // Status is determined by whether a corresponding GlossaryEntry exists
-    // If status is being set to PREFERRED, we could create/update a GlossaryEntry
-    // For now, we'll just return the current status based on GlossaryEntry existence
-
-    // Get document to check GlossaryEntry
-    const document = await prisma.document.findUnique({
-      where: { id: documentId },
-      select: {
-        sourceLocale: true,
-        targetLocale: true,
-        projectId: true,
-      },
-    });
-
-    if (!document) {
-      throw ApiError.notFound('Document not found');
+    // Determine final status based on GlossaryEntry location and requested status
+    // Status mapping:
+    // - Global Glossary (projectId: null) = APPROVED/PREFERRED
+    // - Project Glossary (projectId: set) = CANDIDATE
+    // - If status was explicitly set to DEPRECATED, return DEPRECATED
+    let finalStatus: 'CANDIDATE' | 'APPROVED' | 'DEPRECATED';
+    if (data.status === 'DEPRECATED') {
+      finalStatus = 'DEPRECATED';
+    } else if (glossaryEntry && glossaryEntry.projectId === null) {
+      // In Global Glossary = APPROVED
+      finalStatus = 'APPROVED';
+    } else if (glossaryEntry && glossaryEntry.projectId !== null) {
+      // In Project Glossary = CANDIDATE
+      finalStatus = 'CANDIDATE';
+    } else {
+      // No GlossaryEntry exists = CANDIDATE
+      finalStatus = 'CANDIDATE';
     }
 
-    // Check if GlossaryEntry exists
-    let glossaryEntry = await prisma.glossaryEntry.findFirst({
-      where: {
-        projectId: null,
-        sourceTerm: { equals: entry.sourceTerm, mode: 'insensitive' },
-        sourceLocale: document.sourceLocale,
-        targetLocale: document.targetLocale,
-      },
-      select: { id: true },
-    });
-
-    if (!glossaryEntry && document.projectId) {
-      glossaryEntry = await prisma.glossaryEntry.findFirst({
-        where: {
-          projectId: document.projectId,
-          sourceTerm: { equals: entry.sourceTerm, mode: 'insensitive' },
-          sourceLocale: document.sourceLocale,
-          targetLocale: document.targetLocale,
-        },
-        select: { id: true },
-      });
-    }
-
-    const status: 'CANDIDATE' | 'APPROVED' | 'DEPRECATED' = glossaryEntry ? 'APPROVED' : 'CANDIDATE';
-
-    // Get updated entry
+    // Get updated document entry
     const updatedEntry = await prisma.documentGlossaryEntry.findUnique({
       where: { id: entryId },
     });
@@ -7781,11 +7977,24 @@ export const updateDocumentGlossaryEntry = async (
       throw ApiError.notFound('Entry not found after update');
     }
 
+    // Read status directly from database using raw SQL (since Prisma client may be out of sync)
+    const statusResult = await prisma.$queryRawUnsafe<Array<{ status: string }>>(
+      `SELECT "status" FROM "DocumentGlossaryEntry" WHERE "id" = $1`,
+      entryId
+    );
+    const dbStatus = statusResult[0]?.status as 'CANDIDATE' | 'APPROVED' | 'DEPRECATED' | undefined;
+
+    // Get the final target term (from GlossaryEntry if it exists, otherwise from DocumentGlossaryEntry)
+    const finalTargetTerm = glossaryEntry?.targetTerm || updatedEntry.targetTerm;
+
+    // Use status from database if available, otherwise fall back to logic-based finalStatus
+    const returnStatus = dbStatus || finalStatus;
+
     return {
       id: updatedEntry.id,
       sourceTerm: updatedEntry.sourceTerm,
-      targetTerm: updatedEntry.targetTerm,
-      status,
+      targetTerm: finalTargetTerm,
+      status: returnStatus,
     };
   } catch (error: any) {
     logger.error(

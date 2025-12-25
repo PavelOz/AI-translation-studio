@@ -33,7 +33,7 @@ export default function GlossaryReviewTable({ documentId }: GlossaryReviewTableP
       glossaryApi.updateDocumentGlossaryEntry(documentId, entryId, data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['document-glossary', documentId] });
-      toast.success('Glossary entry updated');
+      // Toast messages are handled in individual handlers (handleApprove/handleReject)
     },
     onError: (error: any) => {
       toast.error(`Failed to update: ${error.response?.data?.message || error.message || 'Unknown error'}`);
@@ -41,17 +41,45 @@ export default function GlossaryReviewTable({ documentId }: GlossaryReviewTableP
   });
 
   const handleApprove = async (entry: GlossaryEntry) => {
-    updateMutation.mutate({
-      entryId: entry.id,
-      data: { status: 'PREFERRED' },
-    });
+    updateMutation.mutate(
+      {
+        entryId: entry.id,
+        data: { status: 'PREFERRED' },
+      },
+      {
+        onSuccess: () => {
+          toast.success(`Term "${entry.sourceTerm}" approved and added to glossary`);
+        },
+      }
+    );
   };
 
   const handleReject = async (entry: GlossaryEntry) => {
-    updateMutation.mutate({
-      entryId: entry.id,
-      data: { status: 'DEPRECATED' },
-    });
+    updateMutation.mutate(
+      {
+        entryId: entry.id,
+        data: { status: 'DEPRECATED' },
+      },
+      {
+        onSuccess: () => {
+          toast.error(`Term "${entry.sourceTerm}" rejected and removed from glossary`);
+        },
+      }
+    );
+  };
+
+  const handleResetToCandidate = async (entry: GlossaryEntry) => {
+    updateMutation.mutate(
+      {
+        entryId: entry.id,
+        data: { status: 'CANDIDATE' },
+      },
+      {
+        onSuccess: () => {
+          toast.success(`Term "${entry.sourceTerm}" reset to candidate status`);
+        },
+      }
+    );
   };
 
   const handleEditStart = (entry: GlossaryEntry) => {
@@ -100,7 +128,7 @@ export default function GlossaryReviewTable({ documentId }: GlossaryReviewTableP
         );
       case 'DEPRECATED':
         return (
-          <span className={`${baseClasses} bg-gray-100 text-gray-800`}>
+          <span className={`${baseClasses} bg-red-100 text-red-800 border border-red-300`}>
             Deprecated
           </span>
         );
@@ -183,8 +211,12 @@ export default function GlossaryReviewTable({ documentId }: GlossaryReviewTableP
               <tr
                 key={entry.id}
                 className={`hover:bg-gray-50 transition-all ${
-                  entryStatus === 'APPROVED' ? 'bg-green-50' : ''
-                } ${entryStatus === 'DEPRECATED' ? 'opacity-50' : ''}`}
+                  entryStatus === 'APPROVED' 
+                    ? 'bg-green-50 border-l-4 border-green-500' 
+                    : entryStatus === 'DEPRECATED'
+                    ? 'opacity-70 bg-red-50 border-l-4 border-red-400'
+                    : ''
+                }`}
               >
                 <td className="px-6 py-4">
                   <div className="flex flex-col">
@@ -247,31 +279,45 @@ export default function GlossaryReviewTable({ documentId }: GlossaryReviewTableP
                     <button
                       onClick={() => handleApprove(entry)}
                       disabled={entryStatus === 'APPROVED' || updateMutation.isPending}
-                      className={`p-1.5 rounded-md ${
+                      className={`p-1.5 rounded-md transition-all ${
                         entryStatus === 'APPROVED'
-                          ? 'text-gray-400 cursor-not-allowed'
-                          : 'text-green-600 hover:bg-green-50 hover:text-green-700'
-                      } transition-colors disabled:opacity-50`}
-                      title="Approve term"
+                          ? 'text-gray-400 cursor-not-allowed bg-gray-100'
+                          : entryStatus === 'DEPRECATED'
+                          ? 'text-green-600 hover:bg-green-50 hover:text-green-700 hover:scale-110 active:scale-95'
+                          : 'text-green-600 hover:bg-green-50 hover:text-green-700 hover:scale-110 active:scale-95'
+                      } disabled:opacity-50`}
+                      title={entryStatus === 'DEPRECATED' ? 'Restore term (approve)' : entryStatus === 'APPROVED' ? 'Already approved' : 'Approve term'}
                     >
-                      <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                      <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                       </svg>
                     </button>
                     <button
                       onClick={() => handleReject(entry)}
                       disabled={entryStatus === 'DEPRECATED' || updateMutation.isPending}
-                      className={`p-1.5 rounded-md ${
+                      className={`p-1.5 rounded-md transition-all ${
                         entryStatus === 'DEPRECATED'
-                          ? 'text-gray-400 cursor-not-allowed'
-                          : 'text-red-600 hover:bg-red-50 hover:text-red-700'
-                      } transition-colors disabled:opacity-50`}
-                      title="Reject term"
+                          ? 'text-gray-400 cursor-not-allowed bg-gray-100'
+                          : 'text-red-600 hover:bg-red-50 hover:text-red-700 hover:scale-110 active:scale-95'
+                      } disabled:opacity-50`}
+                      title={entryStatus === 'DEPRECATED' ? 'Already rejected' : 'Reject term (remove from glossary)'}
                     >
-                      <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                      <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
                       </svg>
                     </button>
+                    {entryStatus !== 'CANDIDATE' && (
+                      <button
+                        onClick={() => handleResetToCandidate(entry)}
+                        disabled={updateMutation.isPending}
+                        className="p-1.5 rounded-md transition-all text-yellow-600 hover:bg-yellow-50 hover:text-yellow-700 hover:scale-110 active:scale-95 disabled:opacity-50"
+                        title="Reset to candidate status"
+                      >
+                        <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                      </button>
+                    )}
                   </div>
                 </td>
               </tr>

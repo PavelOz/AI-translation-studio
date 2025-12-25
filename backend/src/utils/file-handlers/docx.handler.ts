@@ -241,38 +241,41 @@ export class DocxHandler implements FileHandler {
       // Find <w:t> nodes within this run
       const textNodes = this.getElementsByTagName(run, 'w:t');
       
-      // Check if this run has text
-      const hasText = textNodes.length > 0 && textNodes.some(tn => {
+      // Check if this run has any content (including spaces)
+      // CRITICAL: We must preserve spaces even if they're the only content
+      const hasContent = textNodes.length > 0 && textNodes.some(tn => {
         const text = this.getTextNodeContent(tn);
-        return text !== null && text.trim().length > 0;
+        return text !== null && text.length > 0; // Changed from trim().length > 0 to length > 0
       });
 
-      if (!hasText) {
-        currentRunIndexInParagraph++;
-        continue; // Skip runs without text, but track position
-      }
-
-      // Get run properties (formatting)
+      // Get run properties (formatting) - needed even for space-only runs
       const runProperties = this.getRunProperties(run);
       
-      // Check if formatting changed (or if it's the first run with text)
+      // Check if formatting changed (or if it's the first run with content)
       if (previousRunProperties === null || runProperties !== previousRunProperties) {
-        // Close previous marker if exists and had text
+        // Close previous marker if exists and had content
         if (previousRunProperties !== null && hasTextInCurrentMarker) {
           textParts.push(`{{/${currentFormattingGroupIndex - 1}}}`);
         }
-        // Start new marker
-        textParts.push(`{{${currentFormattingGroupIndex}}}`);
-        previousRunProperties = runProperties;
-        hasTextInCurrentMarker = false;
-        currentFormattingGroupIndex++;
+        // Start new marker (even for space-only runs to preserve formatting context)
+        if (hasContent) {
+          textParts.push(`{{${currentFormattingGroupIndex}}}`);
+          previousRunProperties = runProperties;
+          hasTextInCurrentMarker = false;
+          currentFormattingGroupIndex++;
+        } else {
+          // No content, but track position
+          currentRunIndexInParagraph++;
+          continue;
+        }
       }
 
       // Extract text from all <w:t> nodes in this run
+      // CRITICAL: Preserve ALL text including spaces
       // Preserve xml:space="preserve" information for later restoration
       for (const textNode of textNodes) {
         const text = this.getTextNodeContent(textNode);
-        if (text !== null) {
+        if (text !== null && text.length > 0) {
           textParts.push(text);
           hasTextInCurrentMarker = true;
         }
@@ -388,11 +391,15 @@ export class DocxHandler implements FileHandler {
     const xmlSpace = textElement.getAttribute('xml:space');
     const preserveSpace = xmlSpace === 'preserve';
 
-    // Trim only if xml:space is not "preserve"
-    if (!preserveSpace && text.trim().length === 0) {
+    // CRITICAL FIX: Preserve spaces even if they're the only content
+    // In DOCX, spaces are important for word separation and should never be discarded
+    // Only return null if the text node is completely empty (not just whitespace)
+    if (text.length === 0) {
       return null;
     }
 
+    // Always return the text as-is, preserving all spaces
+    // The xml:space="preserve" attribute is handled during export, not import
     return text;
   }
 

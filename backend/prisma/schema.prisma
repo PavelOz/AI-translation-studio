@@ -336,10 +336,12 @@ model DocumentGlossaryEntry {
   sourceTerm      String
   targetTerm      String
   occurrenceCount Int      @default(1)
+  status          String?  // 'CANDIDATE' | 'APPROVED' | 'DEPRECATED' - tracks user's review decision
   createdAt       DateTime @default(now())
 
   @@index([documentId])
   @@index([sourceTerm])
+  @@index([status])
 }
 
 model DocumentStyleRule {
