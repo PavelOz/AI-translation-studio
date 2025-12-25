@@ -35,15 +35,57 @@ export type AnalysisResults = {
   currentMessage: string | null;
 };
 
+export type LogEntry = {
+  timestamp: string;
+  stage: string;
+  level: 'info' | 'warn' | 'error' | 'debug';
+  message: string;
+  data?: Record<string, any>;
+};
+
+export type StageInfo = {
+  id: string;
+  name: string;
+  description: string;
+  progressRange: [number, number];
+  status?: 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED';
+  progress?: number;
+};
+
+export type StageMonitoringData = {
+  documentId: string;
+  documentName?: string;
+  status: AnalysisStatus;
+  currentStage: string | null;
+  currentStageInfo: {
+    id: string;
+    name: string;
+    progress: number;
+  };
+  stages: StageInfo[];
+  progress: {
+    overall: number;
+    currentStage: string | null;
+    message: string;
+    updatedAt: string;
+  };
+  glossaryExtracted: boolean;
+  glossaryCount: number;
+  totalSegments: number;
+  sourceLocale: string;
+  targetLocale: string;
+  logs: LogEntry[];
+};
+
 export const analysisApi = {
-  triggerAnalysis: async (documentId: string, forceReset: boolean = false): Promise<{
+  triggerAnalysis: async (documentId: string, forceReset: boolean = false, glossaryMode: 'fast' | 'deep' = 'fast'): Promise<{
     status: string;
     message?: string;
   }> => {
     const response = await apiClient.post<{
       status: string;
       message?: string;
-    }>(`/documents/${documentId}/analyze`, { forceReset });
+    }>(`/documents/${documentId}/analyze`, { forceReset, glossaryMode });
     return response.data;
   },
 
@@ -64,6 +106,11 @@ export const analysisApi = {
 
   cleanupStaleAnalyses: async (): Promise<{ message: string; count: number }> => {
     const response = await apiClient.post<{ message: string; count: number }>('/documents/analysis/cleanup-stale');
+    return response.data;
+  },
+
+  getStageMonitoring: async (documentId: string): Promise<StageMonitoringData> => {
+    const response = await apiClient.get<StageMonitoringData>(`/documents/${documentId}/analysis/monitoring`);
     return response.data;
   },
 };

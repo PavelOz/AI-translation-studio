@@ -1,5 +1,6 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
+import { Link } from 'react-router-dom';
 import { analysisApi, type AnalysisResults, type AnalysisStatus } from '../api/analysis.api';
 import toast from 'react-hot-toast';
 
@@ -9,6 +10,9 @@ interface AnalysisSidebarProps {
 
 export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
   const queryClient = useQueryClient();
+  
+  // Glossary mode selection state
+  const [glossaryMode, setGlossaryMode] = useState<'fast' | 'deep'>('fast');
 
   // Track previous status to detect status changes
   const previousStatusRef = useRef<AnalysisStatus | undefined>(undefined);
@@ -173,7 +177,7 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
 
   // Trigger analysis mutation
   const triggerAnalysisMutation = useMutation({
-    mutationFn: () => analysisApi.triggerAnalysis(documentId),
+    mutationFn: () => analysisApi.triggerAnalysis(documentId, false, glossaryMode),
     onSuccess: () => {
       toast.success('Analysis started! This may take a moment...');
       console.log('Analysis started, invalidating queries and starting polling');
@@ -209,7 +213,7 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
 
   // Force reset mutation (wipes all data and re-runs analysis)
   const forceResetMutation = useMutation({
-    mutationFn: () => analysisApi.triggerAnalysis(documentId, true),
+    mutationFn: () => analysisApi.triggerAnalysis(documentId, true, glossaryMode),
     onSuccess: () => {
       toast.success('Force reset analysis started! All existing data will be cleared...');
       // Immediately invalidate glossary queries (data is being flushed on backend)
@@ -385,6 +389,13 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
               {resetAnalysisMutation.isPending ? 'Resetting...' : 'Reset'}
             </button>
           )}
+          <Link
+            to={`/documents/${documentId}/monitoring`}
+            className="text-xs text-blue-600 hover:text-blue-800 underline font-medium"
+            title="Open detailed stage monitoring dashboard"
+          >
+            📊 Monitor
+          </Link>
         </div>
       </div>
 
@@ -394,6 +405,44 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
           <p className="text-sm text-gray-600 mb-4">
             Run full document analysis to extract glossary terms and style rules automatically.
           </p>
+          
+          {/* Glossary Mode Selection */}
+          <div className="mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
+            <label className="block text-xs font-medium text-gray-700 mb-2">
+              Glossary Extraction Mode:
+            </label>
+            <div className="flex gap-4 justify-center">
+              <label className="flex items-center cursor-pointer">
+                <input
+                  type="radio"
+                  name="glossaryMode"
+                  value="fast"
+                  checked={glossaryMode === 'fast'}
+                  onChange={(e) => setGlossaryMode(e.target.value as 'fast' | 'deep')}
+                  className="mr-2"
+                />
+                <span className="text-sm text-gray-700">
+                  Fast
+                  <span className="block text-xs text-gray-500 mt-0.5">Quick extraction</span>
+                </span>
+              </label>
+              <label className="flex items-center cursor-pointer">
+                <input
+                  type="radio"
+                  name="glossaryMode"
+                  value="deep"
+                  checked={glossaryMode === 'deep'}
+                  onChange={(e) => setGlossaryMode(e.target.value as 'fast' | 'deep')}
+                  className="mr-2"
+                />
+                <span className="text-sm text-gray-700">
+                  Deep
+                  <span className="block text-xs text-gray-500 mt-0.5">Thorough analysis</span>
+                </span>
+              </label>
+            </div>
+          </div>
+          
           <button
             onClick={handleStartAnalysis}
             disabled={isRunning || forceResetMutation.isPending}
@@ -557,6 +606,44 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
             </svg>
           </div>
           <p className="text-sm text-gray-700 mb-4">Analysis was cancelled.</p>
+          
+          {/* Glossary Mode Selection */}
+          <div className="mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
+            <label className="block text-xs font-medium text-gray-700 mb-2">
+              Glossary Extraction Mode:
+            </label>
+            <div className="flex gap-4 justify-center">
+              <label className="flex items-center cursor-pointer">
+                <input
+                  type="radio"
+                  name="glossaryMode"
+                  value="fast"
+                  checked={glossaryMode === 'fast'}
+                  onChange={(e) => setGlossaryMode(e.target.value as 'fast' | 'deep')}
+                  className="mr-2"
+                />
+                <span className="text-sm text-gray-700">
+                  Fast
+                  <span className="block text-xs text-gray-500 mt-0.5">Quick extraction</span>
+                </span>
+              </label>
+              <label className="flex items-center cursor-pointer">
+                <input
+                  type="radio"
+                  name="glossaryMode"
+                  value="deep"
+                  checked={glossaryMode === 'deep'}
+                  onChange={(e) => setGlossaryMode(e.target.value as 'fast' | 'deep')}
+                  className="mr-2"
+                />
+                <span className="text-sm text-gray-700">
+                  Deep
+                  <span className="block text-xs text-gray-500 mt-0.5">Thorough analysis</span>
+                </span>
+              </label>
+            </div>
+          </div>
+          
           <button
             onClick={handleStartAnalysis}
             disabled={triggerAnalysisMutation.isPending}
@@ -584,6 +671,44 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
             <div className="inline-block animate-spin rounded-full h-4 w-4 border-2 border-primary-300 border-t-primary-600"></div>
             <span className="text-xs text-gray-500">Monitoring...</span>
           </div>
+          
+          {/* Glossary Mode Selection */}
+          <div className="mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
+            <label className="block text-xs font-medium text-gray-700 mb-2">
+              Glossary Extraction Mode:
+            </label>
+            <div className="flex gap-4 justify-center">
+              <label className="flex items-center cursor-pointer">
+                <input
+                  type="radio"
+                  name="glossaryMode"
+                  value="fast"
+                  checked={glossaryMode === 'fast'}
+                  onChange={(e) => setGlossaryMode(e.target.value as 'fast' | 'deep')}
+                  className="mr-2"
+                />
+                <span className="text-sm text-gray-700">
+                  Fast
+                  <span className="block text-xs text-gray-500 mt-0.5">Quick extraction</span>
+                </span>
+              </label>
+              <label className="flex items-center cursor-pointer">
+                <input
+                  type="radio"
+                  name="glossaryMode"
+                  value="deep"
+                  checked={glossaryMode === 'deep'}
+                  onChange={(e) => setGlossaryMode(e.target.value as 'fast' | 'deep')}
+                  className="mr-2"
+                />
+                <span className="text-sm text-gray-700">
+                  Deep
+                  <span className="block text-xs text-gray-500 mt-0.5">Thorough analysis</span>
+                </span>
+              </label>
+            </div>
+          </div>
+          
           <button
             onClick={handleStartAnalysis}
             disabled={isRunning}
@@ -674,6 +799,45 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
               No style rules detected in this document.
             </div>
           )}
+
+          {/* Glossary Mode Selection */}
+          <div className="pt-2 border-t border-gray-200">
+            <div className="mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
+              <label className="block text-xs font-medium text-gray-700 mb-2">
+                Glossary Extraction Mode:
+              </label>
+              <div className="flex gap-4 justify-center">
+                <label className="flex items-center cursor-pointer">
+                  <input
+                    type="radio"
+                    name="glossaryMode"
+                    value="fast"
+                    checked={glossaryMode === 'fast'}
+                    onChange={(e) => setGlossaryMode(e.target.value as 'fast' | 'deep')}
+                    className="mr-2"
+                  />
+                  <span className="text-sm text-gray-700">
+                    Fast
+                    <span className="block text-xs text-gray-500 mt-0.5">Quick extraction</span>
+                  </span>
+                </label>
+                <label className="flex items-center cursor-pointer">
+                  <input
+                    type="radio"
+                    name="glossaryMode"
+                    value="deep"
+                    checked={glossaryMode === 'deep'}
+                    onChange={(e) => setGlossaryMode(e.target.value as 'fast' | 'deep')}
+                    className="mr-2"
+                  />
+                  <span className="text-sm text-gray-700">
+                    Deep
+                    <span className="block text-xs text-gray-500 mt-0.5">Thorough analysis</span>
+                  </span>
+                </label>
+              </div>
+            </div>
+          </div>
 
           {/* Action Button */}
           <div className="pt-2 border-t border-gray-200">

@@ -12,6 +12,7 @@ import ReportsPage from './pages/ReportsPage';
 import TranslationMemoryPage from './pages/TranslationMemoryPage';
 import GlossaryPage from './pages/GlossaryPage';
 import ClusteringPage from './pages/ClusteringPage';
+import StageMonitoringDashboard from './components/StageMonitoringDashboard';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore();
@@ -67,6 +68,14 @@ function App() {
         element={
           <PrivateRoute>
             <EditorPage />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/documents/:documentId/monitoring"
+        element={
+          <PrivateRoute>
+            <StageMonitoringDashboard />
           </PrivateRoute>
         }
       />

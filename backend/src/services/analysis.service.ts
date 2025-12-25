@@ -2,6 +2,8 @@ import { prisma } from '../db/prisma';
 import { ApiError } from '../utils/apiError';
 import { logger } from '../utils/logger';
 import type { Prisma } from '@prisma/client';
+// @ts-ignore - compromise doesn't have TypeScript types
+import nlp from 'compromise';
 
 // In-memory cancellation flags for analysis (similar to pretranslation)
 const analysisCancellationFlags = new Set<string>();
@@ -1371,6 +1373,53 @@ const cleanCandidates = (candidates: string[]): string[] => {
  * - N-grams complement whole lines (not replace them)
  * - Candidate list prioritized: table rows first, then N-grams
  */
+/**
+ * Fast Mode: NLP-Based Extraction using compromise
+ * Uses part-of-speech tagging to extract noun phrases (research-based approach)
+ * Target: High-level keywords like "Waste Management", "PPE", "Safety Officer"
+ */
+const extractFastCandidatesWithNLP = (text: string): Array<{ term: string; count: number }> => {
+  try {
+    const doc = nlp(text);
+    
+    // Extract noun phrases: matches patterns like "Technical Safety", "Safety Officer", "Department of Defense"
+    // Pattern: (#Adjective|#Noun)+ (of #Noun)? - captures noun phrases with optional "of" preposition
+    const nounPhrases = doc.match('(#Adjective|#Noun)+ (of #Noun)?').out('array');
+    
+    // Statistical filter: count frequency and filter noise
+    const frequency: Record<string, number> = {};
+    const stopWords = new Set(['the', 'and', 'or', 'of', 'in', 'to', 'for', 'with', 'a', 'an']);
+    
+    nounPhrases.forEach((term: string) => {
+      const clean = term.toLowerCase().trim();
+      
+      // Filter noise
+      if (clean.length < 4) return; // Too short
+      if (stopWords.has(clean)) return; // Just a stopword
+      
+      // Re-check for hidden verbs (compromise might miss some)
+      try {
+        const termDoc = nlp(clean);
+        if (termDoc.has('#Verb')) return; // Reject if contains verbs
+      } catch (e) {
+        // If NLP parsing fails, continue (better to include than exclude)
+      }
+      
+      frequency[clean] = (frequency[clean] || 0) + 1;
+    });
+    
+    // Convert to array format compatible with existing filterCandidates function
+    return Object.entries(frequency).map(([term, count]) => ({
+      term,
+      count,
+    }));
+  } catch (error: any) {
+    logger.warn({ error: error?.message }, 'NLP extraction failed, falling back to N-grams');
+    // Fallback to traditional N-grams if compromise fails
+    return extractNGrams(text);
+  }
+};
+
 const selectCandidates = (text: string, mode: 'fast' | 'deep', documentId?: string): string[] => {
   // #region agent log
   fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1268',message:'selectCandidates entry',data:{mode,textLength:text.length,hasNewlines:text.includes('\n'),newlineCount:(text.match(/\n/g)||[]).length,textSample:text.slice(0,500)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
@@ -1380,8 +1429,20 @@ const selectCandidates = (text: string, mode: 'fast' | 'deep', documentId?: stri
   fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1269',message:'Raw text sample logged to console',data:{textSample:text.slice(0,500)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
   // #endregion
   
-  // 1. Standard N-Grams (Keep existing logic for compatibility)
-  const allPhrases = extractNGrams(text);
+  // 1. Candidate Extraction: Use NLP for Fast Mode, N-grams for Deep Mode
+  let allPhrases: Array<{ term: string; count: number }>;
+  if (mode === 'fast') {
+    // Fast Mode: Use compromise NLP for research-based linguistic extraction
+    allPhrases = extractFastCandidatesWithNLP(text);
+    logger.info(
+      { documentId, mode, nlpCandidatesCount: allPhrases.length },
+      'Fast Mode: Using NLP-based extraction (compromise)',
+    );
+  } else {
+    // Deep Mode: Keep existing N-grams approach (works well for table rows)
+    allPhrases = extractNGrams(text);
+  }
+  
   let candidates = filterCandidates(allPhrases, mode, documentId);
   
   // Stage 2 Metrics: Count candidates by type
@@ -1806,10 +1867,20 @@ Your job is to REPAIR them using the Source Text.
    - *Good:* "плащ непромокаемый"
   `;
 
+  const verbatimVerificationRules = `
+🔍 **VERBATIM VERIFICATION (CRITICAL - MANDATORY):**
+- Before adding ANY term to your output, you MUST verify it appears VERBATIM in the Source Text.
+- Extract terms EXACTLY as they appear in the source text (keep original case, plural, grammar).
+- Do NOT create or invent terms that don't exist in the source text.
+- Do NOT extract placeholder terms like "sample term", "another term", or "technical term".
+- If a term does not appear VERBATIM in the source text, DO NOT extract it.
+- The "sourceTerm" field MUST match the exact string found in the source text.
+  `;
+
   // Add domain context if available
   const domainSection = domain ? `\n**DOMAIN CONTEXT:** ${domain}\nExtract terminology specific to this domain.` : '';
   
-  const fullPrompt = `${baseInstructions}\n${mode === 'deep' ? deepInstructions : ''}\n${antiPatterns}\n${dataCleaningRules}${domainSection}`;
+  const fullPrompt = `${baseInstructions}\n${mode === 'deep' ? deepInstructions : ''}\n${antiPatterns}\n${dataCleaningRules}\n${verbatimVerificationRules}${domainSection}`;
   
   // Stage 4 Validation: Log prompt metrics (without logging full prompt text to avoid noise)
   const hasTableRowInstructions = fullPrompt.includes('TABLE ROW') || fullPrompt.includes('table row');
@@ -2005,17 +2076,25 @@ const executeDeepMode = async (
   provider: any,
   model: string,
   maxResponseTokens: number,
+  systemPrompt?: string,
+  allSegments?: any[],
+  samplingDescription?: string,
+  domain?: string | null,
 ): Promise<any[]> => {
-  console.log(`[Stage 5] Starting Batch Translation for ${candidates.length} candidates...`);
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2012',message:'executeDeepMode ENTRY',data:{candidatesCount:candidates.length,hasSystemPrompt:!!systemPrompt,systemPromptLength:systemPrompt?.length||0,hasAllSegments:!!allSegments,allSegmentsCount:allSegments?.length||0,hasSamplingDescription:!!samplingDescription,hasDomain:!!domain,textLength:text.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
+  console.log(`[Stage 5] Starting Batch Extraction for ${candidates.length} candidates...`);
 
   // 1. Sort & Slice: Prioritize the Longest Rows (The Annex Data)
-  // Take Top 150 candidates (3 batches of 50)
+  // Take Top 150 candidates (will be split into smaller batches to avoid timeouts)
   const topCandidates = candidates
     .sort((a, b) => b.length - a.length)
     .slice(0, 150);
 
   // 2. Chunking
-  const CHUNK_SIZE = 50;
+  // Reduced from 50 to 20 to prevent timeouts with larger "Translation-First" prompts
+  const CHUNK_SIZE = 20;
   const chunks: string[][] = [];
   for (let i = 0; i < topCandidates.length; i += CHUNK_SIZE) {
     chunks.push(topCandidates.slice(i, i + CHUNK_SIZE));
@@ -2023,10 +2102,16 @@ const executeDeepMode = async (
 
   console.log(`[Stage 5] Processing ${chunks.length} batches of ~${CHUNK_SIZE} items.`);
 
+  // Get system prompt if not provided
+  const finalSystemPrompt = systemPrompt || getSystemPrompt('deep', domain);
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2031',message:'executeDeepMode: System prompt check',data:{hasSystemPromptParam:!!systemPrompt,usedFallback:!systemPrompt,finalSystemPromptLength:finalSystemPrompt.length,hasVerbatimInSystem:finalSystemPrompt.includes('VERBATIM')||finalSystemPrompt.includes('verbatim'),hasVerbatimInSystemUpper:finalSystemPrompt.includes('VERBATIM'),hasVerbatimInSystemLower:finalSystemPrompt.includes('verbatim'),systemPromptPreview:finalSystemPrompt.substring(0,200)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+  // #endregion
+
   await addExecutionLog(documentId, {
     stage: 'Stage 5: AI Response & Parsing',
     level: 'info',
-    message: `Starting Translation-First batch processing: ${chunks.length} batches`,
+    message: `Starting batch extraction processing: ${chunks.length} batches`,
     data: {
       chunksCount: chunks.length,
       chunkSize: CHUNK_SIZE,
@@ -2034,7 +2119,7 @@ const executeDeepMode = async (
     },
   });
 
-  // 3. Parallel Execution with "Translation-Focused" Prompt
+  // 3. Parallel Execution with Proper Extraction Prompt (with verbatim verification)
   const chunkResults = await Promise.all(
     chunks.map(async (chunk, index) => {
       try {
@@ -2043,30 +2128,20 @@ const executeDeepMode = async (
           throw new Error('Analysis cancelled by user');
         }
 
-        // Build a Specialized "Translator" Prompt (Not Extractor)
-        const batchPrompt = `
-You are a Technical Translator for an Energy Grid Company (KEGOC).
-I have extracted ${chunk.length} technical terms from a "Collective Agreement" document.
-Your task is to TRANSLATE them from Russian to English.
-
-CONTEXT (Use this for terminology reference only):
-"""
-${text.slice(0, 10000)} ... [truncated]
-"""
-
-INSTRUCTIONS:
-1. Translate the provided list of "SOURCE TERMS" below.
-2. Return a strict JSON array.
-3. If a term is a full sentence/description, translate it fully.
-
-SOURCE TERMS TO TRANSLATE:
-${JSON.stringify(chunk)}
-
-RETURN FORMAT:
-[
-  { "sourceTerm": "Original Russian String", "targetTerm": "English Translation" }
-]
-`;
+        // Build proper extraction prompt with verbatim verification
+        const userPrompt = buildUserPromptForChunk(
+          'deep',
+          chunk,
+          index,
+          chunks.length,
+          text,
+          allSegments || [],
+          samplingDescription || 'full text',
+          topCandidates.length,
+        );
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2054',message:'executeDeepMode: User prompt built',data:{batch:index+1,userPromptLength:userPrompt.length,hasVerbatimInUser:userPrompt.includes('VERBATIM')||userPrompt.includes('verbatim'),chunkSize:chunk.length,textLength:text.length,userPromptPreview:userPrompt.substring(0,300)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+        // #endregion
 
         logger.info(
           {
@@ -2074,15 +2149,16 @@ RETURN FORMAT:
             batch: index + 1,
             totalBatches: chunks.length,
             chunkSize: chunk.length,
-            promptLength: batchPrompt.length,
+            promptLength: userPrompt.length,
+            systemPromptLength: finalSystemPrompt.length,
           },
-          `[Stage 5] Processing Batch ${index + 1}/${chunks.length} (Translation-First)`,
+          `[Stage 5] Processing Batch ${index + 1}/${chunks.length} (Extraction with Verbatim Verification)`,
         );
 
         await addExecutionLog(documentId, {
           stage: 'Stage 5: AI Response & Parsing',
           level: 'info',
-          message: `Processing Batch ${index + 1}/${chunks.length} (Translation-First)`,
+          message: `Processing Batch ${index + 1}/${chunks.length} (Extraction with Verbatim Verification)`,
           data: {
             batch: index + 1,
             totalBatches: chunks.length,
@@ -2090,11 +2166,13 @@ RETURN FORMAT:
           },
         });
 
-        // Call AI directly with this specific prompt
-        // Note: We skip the generic 'getSystemPrompt' to avoid confusion
+        // Call AI with proper extraction prompt (includes verbatim verification)
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2089',message:'executeDeepMode: Before AI call',data:{batch:index+1,userPromptLength:userPrompt.length,systemPromptLength:finalSystemPrompt.length,totalPromptLength:userPrompt.length+finalSystemPrompt.length,model,maxTokens:maxResponseTokens,chunkSize:chunk.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+        // #endregion
         const chunkAiCallPromise = provider.callModel({
-          prompt: batchPrompt,
-          systemPrompt: '', // Empty system prompt for translation-focused approach
+          prompt: userPrompt,
+          systemPrompt: finalSystemPrompt,
           model,
           temperature: 0,
           maxTokens: maxResponseTokens,
@@ -2130,6 +2208,9 @@ RETURN FORMAT:
 
         // Log raw length to ensure it's working
         console.log(`[Stage 5] Batch ${index + 1}/${chunks.length} Response Length: ${chunkResponseText.length} chars`);
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2127',message:'executeDeepMode: AI response received',data:{batch:index+1,responseLength:chunkResponseText.length,responsePreview:chunkResponseText.substring(0,500),responseFirst500:chunkResponseText.substring(0,500),hasJsonArray:chunkResponseText.includes('['),hasJsonObject:chunkResponseText.includes('{')},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+        // #endregion
 
         // Parse - handle response wrapped in JSON object with outputText field
         let terms: any[] = [];
@@ -2166,6 +2247,9 @@ RETURN FORMAT:
             // Step 4: Try parseJsonArray function (handles incomplete JSON)
             terms = parseJsonArray(jsonContent, documentId);
           }
+          // #region agent log
+          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2162',message:'executeDeepMode: Terms parsed',data:{batch:index+1,termsCount:terms.length,termsSample:terms.slice(0,3).map(t=>({sourceTerm:t.sourceTerm||t.term,hasSourceTerm:!!(t.sourceTerm||t.term),hasTargetTerm:!!t.targetTerm}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+          // #endregion
         } catch (parseError: any) {
           logger.error(
             {
@@ -2231,7 +2315,7 @@ RETURN FORMAT:
       totalTerms: allTerms.length,
       chunksProcessed: chunks.length,
     },
-    `[Stage 5] Translation-First batch processing completed: ${allTerms.length} terms from ${chunks.length} batches`,
+    `[Stage 5] Batch extraction processing completed: ${allTerms.length} terms from ${chunks.length} batches`,
   );
 
   return allTerms;
@@ -2939,10 +3023,13 @@ Return a JSON array of terms that pass ALL checks above.`;
             chunkSize: CHUNK_SIZE,
             totalCandidatesInChunks: topCandidates.length,
           },
-          `[Stage 5] Starting Translation-First Batch Processing: ${chunks.length} batches of ~${CHUNK_SIZE} items each`,
+          `[Stage 5] Starting Batch Extraction Processing: ${chunks.length} batches of ~${CHUNK_SIZE} items each`,
         );
         
-        // Call executeDeepMode with Translation-First logic
+        // Call executeDeepMode with proper extraction prompt (includes verbatim verification)
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2939',message:'Before executeDeepMode call',data:{attempt,topCandidatesCount:topCandidates.length,hasSystemPrompt:!!systemPrompt,systemPromptLength:systemPrompt?.length||0,hasAllSegments:!!allSegments,allSegmentsCount:allSegments?.length||0,sourceTextLength:sourceTextForAI.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
         const allParsedTerms = await executeDeepMode(
           sourceTextForAI,
           topCandidates,
@@ -2950,7 +3037,14 @@ Return a JSON array of terms that pass ALL checks above.`;
           provider,
           model,
           maxResponseTokens,
+          systemPrompt,
+          allSegments,
+          samplingDescription,
+          domain,
         );
+        // #region agent log
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2951',message:'After executeDeepMode call',data:{attempt,allParsedTermsCount:allParsedTerms.length,termsSample:allParsedTerms.slice(0,3).map(t=>({sourceTerm:t.sourceTerm||t.term,hasSourceTerm:!!(t.sourceTerm||t.term)}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
+        // #endregion
         
         // Create a merged response object
         responseText = JSON.stringify(allParsedTerms);
@@ -2969,13 +3063,13 @@ Return a JSON array of terms that pass ALL checks above.`;
             totalTermsExtracted: allParsedTerms.length,
             batchesProcessed: chunks.length,
           },
-          `[Stage 5] Translation-First batch processing completed: ${allParsedTerms.length} terms extracted from ${chunks.length} batches`,
+          `[Stage 5] Batch extraction processing completed: ${allParsedTerms.length} terms extracted from ${chunks.length} batches`,
         );
         
         await addExecutionLog(documentId, {
           stage: 'Stage 5: AI Response & Parsing',
           level: 'info',
-          message: `Translation-First batch processing completed: ${allParsedTerms.length} terms from ${chunks.length} batches`,
+          message: `Batch extraction processing completed: ${allParsedTerms.length} terms from ${chunks.length} batches`,
           data: {
             totalBatches: chunks.length,
             totalTermsExtracted: allParsedTerms.length,

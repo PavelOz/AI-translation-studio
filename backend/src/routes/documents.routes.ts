@@ -8,10 +8,12 @@ import { requireAuth } from '../utils/authMiddleware';
 import { listDocuments, getDocument, updateDocumentStatus, updateDocument, deleteDocument } from '../services/document.service';
 import { importDocumentFile, exportDocumentFile } from '../services/file.service';
 import { ApiError } from '../utils/apiError';
+import { logger } from '../utils/logger';
 import { getDocumentSegments } from '../services/segment.service';
 import { runDocumentMachineTranslation, pretranslateDocument } from '../services/ai.service';
 import { getDocumentMetricsSummary, runDocumentQualityCheck } from '../services/quality.service';
 import { getProgress, cancelProgress, clearProgress } from '../services/pretranslateProgress';
+import { runFullAnalysis, getAnalysisResults, cancelAnalysis, resetAnalysisStatus, getStageMonitoringData, listDocumentGlossary, updateDocumentGlossaryEntry } from '../services/analysis.service';
 
 // Configure multer to preserve UTF-8 encoding for filenames (including Cyrillic)
 // Multer handles UTF-8 filenames correctly when sent from modern browsers
@@ -270,6 +272,81 @@ documentRoutes.get(
         throw ApiError.notFound('File not found on disk');
       }
     }
+  }),
+);
+
+// Analysis routes
+const analyzeSchema = z.object({
+  forceReset: z.boolean().optional(),
+  glossaryMode: z.enum(['fast', 'deep']).optional(),
+});
+
+documentRoutes.post(
+  '/:documentId/analyze',
+  asyncHandler(async (req, res) => {
+    const payload = analyzeSchema.parse(req.body ?? {});
+    const forceReset = payload.forceReset === true;
+    const glossaryMode = (payload.glossaryMode === 'deep' ? 'deep' : 'fast') as 'fast' | 'deep';
+    runFullAnalysis(req.params.documentId, forceReset, glossaryMode)
+      .then(() => {})
+      .catch((error) => {
+        logger.error({ documentId: req.params.documentId, error }, 'Analysis failed');
+      });
+    res.json({ status: 'started', documentId: req.params.documentId, glossaryMode });
+  }),
+);
+
+documentRoutes.get(
+  '/:documentId/analysis',
+  asyncHandler(async (req, res) => {
+    const results = await getAnalysisResults(req.params.documentId);
+    res.json(results);
+  }),
+);
+
+documentRoutes.delete(
+  '/:documentId/analysis',
+  asyncHandler(async (req, res) => {
+    await cancelAnalysis(req.params.documentId);
+    res.json({ message: 'Analysis cancelled' });
+  }),
+);
+
+documentRoutes.post(
+  '/:documentId/analysis/reset',
+  asyncHandler(async (req, res) => {
+    const result = await resetAnalysisStatus(req.params.documentId);
+    res.json(result);
+  }),
+);
+
+documentRoutes.get(
+  '/:documentId/analysis/monitoring',
+  asyncHandler(async (req, res) => {
+    const result = await getStageMonitoringData(req.params.documentId);
+    res.json(result);
+  }),
+);
+
+// Document Glossary routes
+documentRoutes.get(
+  '/:documentId/glossary',
+  asyncHandler(async (req, res) => {
+    const entries = await listDocumentGlossary(req.params.documentId);
+    res.json(entries);
+  }),
+);
+
+documentRoutes.patch(
+  '/:documentId/glossary/:entryId',
+  asyncHandler(async (req, res) => {
+    const payload = req.body;
+    const result = await updateDocumentGlossaryEntry(
+      req.params.documentId,
+      req.params.entryId,
+      payload,
+    );
+    res.json(result);
   }),
 );
 
