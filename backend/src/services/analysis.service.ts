@@ -6901,6 +6901,13 @@ export const cleanupStaleAnalyses = async (): Promise<number> => {
  */
 export const getAnalysisResults = async (documentId: string) => {
   try {
+    // Check if documentAnalysis model exists in Prisma client
+    // This handles the case where Prisma client hasn't been regenerated after schema changes
+    if (!prisma.documentAnalysis) {
+      logger.warn('DocumentAnalysis model not available in Prisma client. Please run: npx prisma generate');
+      throw ApiError.badRequest('DocumentAnalysis model not available. Please run: npx prisma generate');
+    }
+
     const analysis = await prisma.documentAnalysis.findUnique({
       where: { documentId },
       select: {
@@ -7101,6 +7108,12 @@ export const getAnalysisResults = async (documentId: string) => {
  */
 export const getStageMonitoringData = async (documentId: string) => {
   try {
+    // Check if documentAnalysis model exists in Prisma client
+    if (!prisma.documentAnalysis) {
+      logger.warn('DocumentAnalysis model not available in Prisma client. Please run: npx prisma generate');
+      throw ApiError.badRequest('DocumentAnalysis model not available. Please run: npx prisma generate');
+    }
+
     // Query analysis - don't include executionLogs in select to avoid errors if field doesn't exist
     const analysis = await prisma.documentAnalysis.findUnique({
       where: { documentId },
@@ -7584,6 +7597,12 @@ export const listDocumentGlossary = async (
   source: 'global' | 'project' | 'new';
 }>> => {
   try {
+    // Check if documentGlossaryEntry model exists in Prisma client
+    if (!prisma.documentGlossaryEntry) {
+      logger.warn('DocumentGlossaryEntry model not available in Prisma client. Please run: npx prisma generate');
+      throw ApiError.badRequest('DocumentGlossaryEntry model not available. Please run: npx prisma generate');
+    }
+
     // Get document with project info
     const document = await prisma.document.findUnique({
       where: { id: documentId },

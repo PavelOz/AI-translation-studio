@@ -120,10 +120,24 @@ export const updateProject = async (projectId: string, data: UpdateProjectInput)
 };
 
 export const deleteProject = async (projectId: string) => {
-  const project = await prisma.project.findUnique({ where: { id: projectId } });
+  const project = await prisma.project.findUnique({ 
+    where: { id: projectId },
+    include: { documents: true } // Include documents to delete their files
+  });
   if (!project) {
     throw ApiError.notFound('Project not found');
   }
+  
+  // Delete all document files before deleting the project
+  const fs = await import('fs/promises');
+  for (const document of project.documents) {
+    try {
+      await fs.unlink(document.storagePath);
+    } catch (error) {
+      // File may not exist, continue with deletion
+    }
+  }
+  
   return prisma.project.delete({ where: { id: projectId } });
 };
 
