@@ -63,8 +63,8 @@ export class AIOrchestrator {
     let i = 0;
     
     while (i < text.length) {
-      // Check for opening tag: <t i="n">
-      const openTagMatch = text.substring(i).match(/^<t i="(\d+)">/);
+      // Check for opening tag: <t i="n"> or <t i='n'> (handle both single and double quotes)
+      const openTagMatch = text.substring(i).match(/^<t i=["'](\d+)["']>/);
       if (openTagMatch) {
         const tagId = parseInt(openTagMatch[1], 10);
         tagStack.push(tagId);
@@ -767,6 +767,8 @@ export class AIOrchestrator {
           const systemPersona = `You are an expert linguist. TRANSLATION DIRECTION: ${sourceLangCode} → ${targetLangCode}. You translate FROM ${sourceLangCode} (${sourceLang}, source/input) TO ${targetLangCode} (${targetLang}, target/output). CRITICAL: Your output MUST be in ${targetLangCode} only. Never return text in ${sourceLangCode}. If you see text in ${sourceLangCode}, translate it to ${targetLangCode}. If you see text in ${targetLangCode}, keep it as-is. Your translations must be accurate, natural, and idiomatic. Avoid literal calques and word-for-word translations. Prioritize meaning and fluency while maintaining technical precision.`;
           
           // Debug: Write raw prompt with XML tags to file for inspection
+          // DISABLED: Uncomment to enable debug file writing
+          /*
           try {
             // Use workspace root (.cursor) instead of backend/.cursor
             // process.cwd() returns backend directory, so go up one level
@@ -788,6 +790,7 @@ export class AIOrchestrator {
             logger.error({ error: errorMessage, stack: errorStack }, 'Failed to write debug prompt file');
             console.error(`[DEBUG ERROR] Failed to write XML prompt file:`, errorMessage);
           }
+          */
           
           const response = await provider.callModel({
             prompt,
