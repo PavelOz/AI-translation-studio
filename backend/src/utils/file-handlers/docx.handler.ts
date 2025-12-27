@@ -359,12 +359,8 @@ export class DocxHandler implements FileHandler {
 
     const textParts: string[] = [];
     
-    // Add bullet point prefix if this is a list item
-    if (isListItem) {
-      // Use bullet character for list items (could be enhanced to detect numbered lists)
-      const indent = '  '.repeat(listLevel); // Indent based on list level
-      textParts.push(`${indent}• `);
-    }
+    // Don't add bullet point prefix for list items - Word will add it automatically on export
+    // We'll strip any existing bullets from the text instead
     
     let currentFormattingGroupIndex = 0;
     let previousRunProperties: string | null = null;
@@ -477,6 +473,15 @@ export class DocxHandler implements FileHandler {
 
     let result = textParts.join('');
     
+    // For list items, strip any leading bullet characters (•, -, *, etc.) from the text
+    // Word will automatically add the bullet on export based on w:numPr property
+    // This prevents "• Overview" from appearing when the bullet is already in the text
+    if (isListItem && result.trim().length > 0) {
+      // Remove leading bullet characters and whitespace
+      // Match: bullet char (•, -, *, etc.) followed by optional whitespace at the start
+      result = result.replace(/^[\s\u2022\u2023\u25E6\u2043\u2219\-\*]\s*/, '');
+    }
+    
     // Don't append shape text to paragraph text - return them separately
     // This allows creating separate segments for textbox content
     // Return paragraph text and shape text separately
@@ -562,16 +567,13 @@ export class DocxHandler implements FileHandler {
 
     let result = textParts.join('');
     
-    // Add bullet point prefix if this is a list item AND text doesn't already start with a bullet
-    // Some documents have bullets already in the text, so we check to avoid duplication
+    // For list items, strip any leading bullet characters (•, -, *, etc.) from the text
+    // Word will automatically add the bullet on export based on w:numPr property
+    // This prevents "• Overview" from appearing when the bullet is already in the text
     if (isListItem && result.trim().length > 0) {
-      const trimmed = result.trim();
-      // Check if text already starts with a bullet (•, -, *, etc.)
-      const alreadyHasBullet = /^[•\-\*]\s/.test(trimmed);
-      if (!alreadyHasBullet) {
-        const indent = '  '.repeat(listLevel);
-        result = `${indent}• ${result}`;
-      }
+      // Remove leading bullet characters and whitespace
+      // Match: bullet char (•, -, *, etc.) followed by optional whitespace at the start
+      result = result.replace(/^[\s\u2022\u2023\u25E6\u2043\u2219\-\*]\s*/, '');
     }
 
     return result;

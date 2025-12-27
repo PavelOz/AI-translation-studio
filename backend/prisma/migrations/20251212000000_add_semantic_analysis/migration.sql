@@ -7,3 +7,4 @@ ALTER TABLE "DocumentAnalysis" ADD COLUMN IF NOT EXISTS "translationStrategy" TE
 
 
 
+

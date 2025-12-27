@@ -17,3 +17,4 @@ UPDATE "Segment" SET "segmentType" = 'paragraph' WHERE "segmentType" IS NULL;
 
 
 
+

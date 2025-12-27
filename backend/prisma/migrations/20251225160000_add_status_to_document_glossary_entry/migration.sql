@@ -8,3 +8,4 @@ CREATE INDEX IF NOT EXISTS "DocumentGlossaryEntry_status_idx" ON "DocumentGlossa
 
 
 
+

@@ -1,4 +1,6 @@
 import { randomUUID } from 'crypto';
+import { promises as fs } from 'fs';
+import { join, resolve } from 'path';
 import { logger } from '../utils/logger';
 import { getProvider } from './providers/registry';
 import { env } from '../utils/env';
@@ -36,6 +38,61 @@ export class AIOrchestrator {
   // ==========================================
   // 1. PROMPT BUILDING HELPERS
   // ==========================================
+
+  /**
+   * Convert formatting tags {{n}} to XML format <t i="n"> for AI-friendly processing
+   * Example: {{12}}word{{/12}} -> <t i="12">word</t>
+   */
+  private convertTagsToXml(text: string): string {
+    if (!text) return text;
+    return text
+      .replace(/\{\{(\d+)\}\}/g, '<t i="$1">')
+      .replace(/\{\{\/(\d+)\}\}/g, '</t>');
+  }
+
+  /**
+   * Convert XML format <t i="n"> back to formatting tags {{n}}
+   * Example: <t i="12">word</t> -> {{12}}word{{/12}}
+   */
+  private convertXmlToTags(text: string): string {
+    if (!text) return text;
+    
+    // Process the string to match opening and closing tags in order
+    const tagStack: number[] = [];
+    let result = '';
+    let i = 0;
+    
+    while (i < text.length) {
+      // Check for opening tag: <t i="n">
+      const openTagMatch = text.substring(i).match(/^<t i="(\d+)">/);
+      if (openTagMatch) {
+        const tagId = parseInt(openTagMatch[1], 10);
+        tagStack.push(tagId);
+        result += `{{${tagId}}}`;
+        i += openTagMatch[0].length;
+        continue;
+      }
+      
+      // Check for closing tag: </t>
+      const closeTagMatch = text.substring(i).match(/^<\/t>/);
+      if (closeTagMatch) {
+        const tagId = tagStack.pop();
+        if (tagId !== undefined) {
+          result += `{{/${tagId}}}`;
+        } else {
+          result += '{{/0}}'; // Fallback if stack is empty
+        }
+        i += closeTagMatch[0].length;
+        continue;
+      }
+      
+      // Regular character
+      result += text[i];
+      i++;
+    }
+    
+    return result;
+  }
 
   private buildGuidelineSection(guidelines?: string[]) {
     if (!guidelines || guidelines.length === 0) {
@@ -279,12 +336,21 @@ export class AIOrchestrator {
       'Use these similar past translations to guide your style and terminology:',
       examplesText || '(No similar past translations found for this segment)',
       '',
+      '=== FORMATTING PRESERVATION ===',
+      'The source text may contain XML formatting tags like <t i="1">word</t>.',
+      'CRITICAL: Preserve these XML tags in your translation output. Place them around the corresponding translated words.',
+      'Example:',
+      '  Source: <t i="1">Hello</t> world',
+      '  Output: <t i="1">Привет</t> мир',
+      '',
       '=== OUTPUT FORMAT ===',
       'Return ONLY valid JSON array matching this schema:',
       `[{"segment_id":"<id>","target_mt":"<translation>"}]`,
       '',
       '=== SOURCE SEGMENTS TO TRANSLATE ===',
       ...batch.map((segment) => {
+        // Convert formatting tags to XML for AI-friendly processing
+        const sourceTextXml = this.convertTagsToXml(segment.sourceText);
         // #region agent log
         // Simple heuristic: check if text contains Cyrillic characters (Russian/Kazakh/etc)
         const hasCyrillic = /[а-яёА-ЯЁҚқҒғҢңҰұҮүӘәІіӨөҺһ]/.test(segment.sourceText);
@@ -298,7 +364,7 @@ export class AIOrchestrator {
         // #endregion
         return [
           `ID: ${segment.segmentId}`,
-          `Source: ${segment.sourceText}`,
+          `Source: ${sourceTextXml}`,
           '---'
         ];
       }),
@@ -599,6 +665,9 @@ export class AIOrchestrator {
         targetText = targetText.replace(/\s*\[synthetic\]\s*/gi, '').trim();
         targetText = targetText.replace(/\s*\[\s*\]\s*$/, '').trim();
         
+        // Convert XML tags back to formatting tags
+        targetText = this.convertXmlToTags(targetText);
+        
         map.set(entry.segment_id, targetText);
       }
     });
@@ -696,9 +765,29 @@ export class AIOrchestrator {
           
           // Build system persona for explicit injection with clear translation direction
           const systemPersona = `You are an expert linguist. TRANSLATION DIRECTION: ${sourceLangCode} → ${targetLangCode}. You translate FROM ${sourceLangCode} (${sourceLang}, source/input) TO ${targetLangCode} (${targetLang}, target/output). CRITICAL: Your output MUST be in ${targetLangCode} only. Never return text in ${sourceLangCode}. If you see text in ${sourceLangCode}, translate it to ${targetLangCode}. If you see text in ${targetLangCode}, keep it as-is. Your translations must be accurate, natural, and idiomatic. Avoid literal calques and word-for-word translations. Prioritize meaning and fluency while maintaining technical precision.`;
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:700',message:'translateSegments: System persona constructed',data:{sourceLangCode,targetLangCode,sourceLang,targetLang,systemPersonaLength:systemPersona.length,systemPersonaPreview:systemPersona.substring(0,200),providerName:provider.name},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-          // #endregion
+          
+          // Debug: Write raw prompt with XML tags to file for inspection
+          try {
+            // Use workspace root (.cursor) instead of backend/.cursor
+            // process.cwd() returns backend directory, so go up one level
+            const debugDir = resolve(process.cwd(), '..', '.cursor');
+            await fs.mkdir(debugDir, { recursive: true });
+            const timestamp = Date.now();
+            const debugFilePath = join(debugDir, `debug-xml-prompt-${timestamp}.log`);
+            await fs.writeFile(debugFilePath, prompt, 'utf-8');
+            logger.info({ 
+              debugFilePath, 
+              promptLength: prompt.length,
+              hasXmlTags: prompt.includes('<t i='),
+              timestamp 
+            }, 'DEBUG: Wrote raw prompt with XML tags to file');
+            console.log(`[DEBUG] XML Prompt written to: ${debugFilePath}`);
+          } catch (debugError) {
+            const errorMessage = debugError instanceof Error ? debugError.message : String(debugError);
+            const errorStack = debugError instanceof Error ? debugError.stack : undefined;
+            logger.error({ error: errorMessage, stack: errorStack }, 'Failed to write debug prompt file');
+            console.error(`[DEBUG ERROR] Failed to write XML prompt file:`, errorMessage);
+          }
           
           const response = await provider.callModel({
             prompt,
@@ -977,9 +1066,13 @@ export class AIOrchestrator {
       '=== GLOSSARY ENTRIES ===',
       glossaryText || 'No glossary terms provided.',
       '',
+      '=== FORMATTING PRESERVATION ===',
+      'The source and draft texts may contain XML formatting tags like <t i="1">word</t>.',
+      'These tags preserve formatting information. When checking glossary compliance, ignore these tags and focus on the actual text content.',
+      '',
       '=== TEXTS TO CHECK ===',
-      `Source (${sourceLang}): "${sourceText}"`,
-      `Draft (${targetLang}): "${draftText}"`,
+      `Source (${sourceLang}): "${this.convertTagsToXml(sourceText)}"`,
+      `Draft (${targetLang}): "${this.convertTagsToXml(draftText)}"`,
       '',
       '=== CRITICAL: TERM EXTRACTION FROM COMPOUND PHRASES ===',
       'When a glossary entry contains multiple words (e.g., "Отдел строительства и реконструкции ПС" => "substation construction and rehabilitation unit"):',
@@ -1376,17 +1469,21 @@ export class AIOrchestrator {
       '',
       '=== SOURCE TEXT (Original) ===',
       `Language: ${sourceLang}`,
-      sourceText,
+      this.convertTagsToXml(sourceText),
       '',
       '=== DRAFT TRANSLATION (Current) ===',
       `Language: ${targetLang} (but may contain errors)`,
-      draftText,
+      this.convertTagsToXml(draftText),
       '',
       '=== GLOSSARY REFERENCE ===',
       glossaryText,
       '',
       '=== ERRORS TO FIX ===',
       errorList,
+      '',
+      '=== FORMATTING PRESERVATION ===',
+      'The source and draft texts may contain XML formatting tags like <t i="1">word</t>.',
+      'CRITICAL: Preserve these XML tags in your corrected translation. Place them around the corresponding translated words.',
       '',
       '=== INSTRUCTION ===',
       `Return ONLY the corrected translation in ${targetLang} as a raw text string.`,
@@ -1398,7 +1495,7 @@ export class AIOrchestrator {
       '- Do NOT add quotes around the text',
       '- Return ONLY the translation text itself',
       '- Do not add explanations or comments',
-      '- Preserve all tags and formatting exactly',
+      '- Preserve all XML tags (like <t i="1">word</t>) exactly as they appear in the source',
       '',
       'Example of CORRECT output:',
       'The corrected translation text here',
@@ -1466,6 +1563,9 @@ export class AIOrchestrator {
 
       // Parse response - AI might return JSON array or plain string
       let final = response.outputText.trim();
+      
+      // Convert XML tags back to formatting tags
+      final = this.convertXmlToTags(final);
       
       if (!final || final.length === 0) {
         logger.warn('fixTranslation: Response is empty after trim, returning draft');

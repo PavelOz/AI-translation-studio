@@ -23,3 +23,4 @@ ALTER TABLE "GlossaryEntry" ALTER COLUMN "status" SET NOT NULL;
 
 
 
+
