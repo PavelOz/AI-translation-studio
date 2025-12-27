@@ -1,6 +1,7 @@
 import { prisma } from '../db/prisma';
 import { ApiError } from '../utils/apiError';
 import { logger } from '../utils/logger';
+import { stripFormattingTags } from '../utils/segmentation';
 import type { Prisma } from '@prisma/client';
 // @ts-ignore - compromise doesn't have TypeScript types
 import nlp from 'compromise';
@@ -766,7 +767,7 @@ const getSampledText = (allSegments: Array<{ sourceText: string; orderIndex: num
   
   const fullText = filteredSegments
     .sort((a, b) => (a.orderIndex ?? 0) - (b.orderIndex ?? 0))
-    .map(s => s.sourceText)
+    .map(s => stripFormattingTags(s.sourceText))
     .join('\n');
 
   const totalLen = fullText.length;
@@ -2129,12 +2130,14 @@ const executeDeepMode = async (
         }
 
         // Build proper extraction prompt with verbatim verification
+        // Clean text to remove formatting tags before sending to AI
+        const cleanedText = stripFormattingTags(text);
         const userPrompt = buildUserPromptForChunk(
           'deep',
           chunk,
           index,
           chunks.length,
-          text,
+          cleanedText,
           allSegments || [],
           samplingDescription || 'full text',
           topCandidates.length,
