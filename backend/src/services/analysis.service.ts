@@ -8005,3 +8005,157 @@ export const updateDocumentGlossaryEntry = async (
   }
 };
 
+/**
+ * Translate a single term on-demand
+ * 
+ * @param sourceTerm - The term to translate
+ * @param targetLang - Target language code (default: 'ru')
+ * @param sourceLang - Source language code (optional, will try to auto-detect if not provided)
+ * @param projectId - Optional project ID to use project-specific AI settings
+ * @returns The translated term
+ */
+export const translateSingleTerm = async (
+  sourceTerm: string,
+  targetLang: string = 'ru',
+  sourceLang?: string,
+  projectId?: string,
+): Promise<string> => {
+  try {
+    if (!sourceTerm || sourceTerm.trim().length === 0) {
+      throw ApiError.badRequest('Source term is required');
+    }
+
+    // Auto-detect source language if not provided (simple heuristic)
+    let detectedSourceLang = sourceLang;
+    if (!detectedSourceLang) {
+      // Check if text contains Cyrillic characters (Russian/Kazakh/etc)
+      const hasCyrillic = /[а-яёА-ЯЁҚқҒғҢңҰұҮүӘәІіӨөҺһ]/.test(sourceTerm);
+      const hasLatin = /[a-zA-Z]/.test(sourceTerm);
+      detectedSourceLang = hasCyrillic && !hasLatin ? 'ru' : 'en';
+    }
+
+    // Get AI provider and settings
+    const { getProvider } = await import('../ai/providers/registry');
+    const { getProjectAISettings } = await import('./ai.service');
+    
+    let provider: any;
+    let model: string;
+    let apiKey: string | undefined;
+    let yandexFolderId: string | undefined;
+
+    if (projectId) {
+      // Use project-specific settings
+      const aiSettings = await getProjectAISettings(projectId);
+      
+      if (aiSettings?.provider && aiSettings?.model) {
+        provider = getProvider(aiSettings.provider as 'gemini' | 'openai' | 'yandex', undefined, undefined);
+        model = aiSettings.model;
+        
+        // Extract API key from project settings config
+        if (aiSettings.config && typeof aiSettings.config === 'object' && !Array.isArray(aiSettings.config)) {
+          const config = aiSettings.config as Record<string, unknown>;
+          const providerName = aiSettings.provider?.toLowerCase();
+          
+          const providerKeyName = providerName ? `${providerName}ApiKey` : null;
+          if (providerKeyName && providerKeyName in config) {
+            apiKey = config[providerKeyName] as string;
+          } else if ('apiKey' in config) {
+            apiKey = config.apiKey as string;
+          }
+          
+          if ('yandexFolderId' in config) {
+            yandexFolderId = config.yandexFolderId as string;
+          }
+        }
+        
+        // Re-instantiate provider with API key if available
+        if (apiKey || yandexFolderId) {
+          provider = getProvider(aiSettings.provider as 'gemini' | 'openai' | 'yandex', apiKey, yandexFolderId);
+        }
+      } else {
+        // Fallback to default provider
+        provider = getProvider('gemini');
+        model = 'gemini-2.0-flash';
+      }
+    } else {
+      // Use default provider
+      provider = getProvider('gemini');
+      model = 'gemini-2.0-flash';
+    }
+
+    // Build translation prompt
+    const translationPrompt = `You are a technical translator. Translate this technical term into ${targetLang}. Term: ${sourceTerm}. Return ONLY the translation.`;
+
+    // Use a model without thoughts for simple translation tasks
+    let translationModel = model;
+    if (model.includes('2.5-pro') || model.includes('2.5-flash')) {
+      translationModel = 'gemini-2.0-flash';
+    }
+
+    const response = await provider.callModel({
+      prompt: translationPrompt,
+      systemPrompt: 'You are a professional translator. Translate technical terms accurately and concisely. Return only the translation, no explanations.',
+      model: translationModel,
+      temperature: 0.1,
+      maxTokens: translationModel.includes('2.5-pro') ? 2000 : (translationModel.includes('2.5-flash') ? 1000 : 200),
+      segments: [],
+    });
+
+    let translated = response.outputText.trim();
+    
+    // Clean up response: remove "THINK:" leakage, explanations, etc.
+    if (translated.includes('THINK:') || translated.includes('Thinking:')) {
+      const lines = translated.split('\n');
+      let cleanedTranslation = '';
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i].trim();
+        if (line && !line.startsWith('THINK:') && !line.startsWith('Thinking:') && !line.toLowerCase().includes('the user wants')) {
+          if (line.length < 200 && !line.includes('means') && !line.includes('refers to')) {
+            cleanedTranslation = line;
+            break;
+          }
+        }
+      }
+      if (cleanedTranslation) {
+        translated = cleanedTranslation;
+      } else {
+        // Fallback: try to extract text after quotes
+        const quoteMatch = translated.match(/"([^"]+)"/);
+        if (quoteMatch) {
+          translated = quoteMatch[1];
+        }
+      }
+    }
+    
+    // Handle JSON response format
+    if (translated.startsWith('[') && translated.endsWith(']')) {
+      try {
+        const parsed = JSON.parse(translated);
+        if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].target_mt) {
+          translated = parsed[0].target_mt.trim();
+        }
+      } catch (e) {
+        // If JSON parsing fails, use original response
+      }
+    }
+
+    // Final cleanup: remove markdown, quotes, etc.
+    translated = translated
+      .replace(/^["']|["']$/g, '') // Remove surrounding quotes
+      .replace(/^\*\*|\*\*$/g, '') // Remove markdown bold
+      .trim();
+
+    if (!translated || translated.length === 0) {
+      throw ApiError.badRequest('Translation failed: empty response from AI');
+    }
+
+    return translated;
+  } catch (error: any) {
+    logger.error(
+      { sourceTerm, targetLang, sourceLang, projectId, error: error.message, stack: error.stack },
+      'Error in translateSingleTerm',
+    );
+    throw ApiError.badRequest(`Failed to translate term: ${error.message}`);
+  }
+};
+

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { glossaryApi } from '../../api/glossary.api';
+import { documentsApi } from '../../api/documents.api';
 import toast from 'react-hot-toast';
 
 interface GlossaryReviewTableProps {
@@ -24,6 +25,13 @@ export default function GlossaryReviewTable({ documentId }: GlossaryReviewTableP
   const { data: glossaryEntries = [], isLoading, error } = useQuery({
     queryKey: ['document-glossary', documentId],
     queryFn: () => glossaryApi.getGlossary(documentId),
+    enabled: !!documentId,
+  });
+
+  // Fetch document data to get target locale and project ID
+  const { data: documentData } = useQuery({
+    queryKey: ['documents', documentId],
+    queryFn: () => documentsApi.getDocument(documentId!),
     enabled: !!documentId,
   });
 
@@ -108,6 +116,42 @@ export default function GlossaryReviewTable({ documentId }: GlossaryReviewTableP
       handleEditSave(entryId);
     } else if (e.key === 'Escape') {
       handleEditCancel();
+    }
+  };
+
+  // Translate term mutation
+  const translateMutation = useMutation({
+    mutationFn: ({ term, lang, sourceLang, projectId }: { term: string; lang?: string; sourceLang?: string; projectId?: string }) =>
+      glossaryApi.translateTerm(term, lang, sourceLang, projectId),
+    onError: (error: any) => {
+      toast.error(`Translation failed: ${error.response?.data?.message || error.message || 'Unknown error'}`);
+    },
+  });
+
+  const handleTranslate = async (entry: GlossaryEntry) => {
+    try {
+      const targetLang = documentData?.targetLocale || 'en';
+      const sourceLang = documentData?.sourceLocale;
+      const projectId = documentData?.projectId;
+
+      const result = await translateMutation.mutateAsync({
+        term: entry.sourceTerm,
+        lang: targetLang,
+        sourceLang,
+        projectId,
+      });
+
+      // Update the entry with the translation
+      updateMutation.mutate({
+        entryId: entry.id,
+        data: { targetTerm: result.translation },
+      }, {
+        onSuccess: () => {
+          toast.success(`Translated "${entry.sourceTerm}"`);
+        },
+      });
+    } catch (error) {
+      // Error is already handled by translateMutation.onError
     }
   };
 
@@ -246,25 +290,45 @@ export default function GlossaryReviewTable({ documentId }: GlossaryReviewTableP
                   </div>
                 </td>
                 <td className="px-6 py-4">
-                  {editingId === entry.id ? (
-                    <input
-                      type="text"
-                      value={editValue}
-                      onChange={(e) => setEditValue(e.target.value)}
-                      onBlur={() => handleEditSave(entry.id)}
-                      onKeyDown={(e) => handleEditKeyDown(e, entry.id)}
-                      className="w-full px-2 py-1 text-sm border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      autoFocus
-                    />
-                  ) : (
-                    <div
-                      className="text-sm text-gray-700 cursor-pointer hover:text-blue-600 hover:underline"
-                      onClick={() => handleEditStart(entry)}
-                      title="Click to edit"
-                    >
-                      {entry.targetTerm}
-                    </div>
-                  )}
+                  <div className="flex items-center space-x-2">
+                    {editingId === entry.id ? (
+                      <input
+                        type="text"
+                        value={editValue}
+                        onChange={(e) => setEditValue(e.target.value)}
+                        onBlur={() => handleEditSave(entry.id)}
+                        onKeyDown={(e) => handleEditKeyDown(e, entry.id)}
+                        className="flex-1 px-2 py-1 text-sm border border-blue-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        autoFocus
+                      />
+                    ) : (
+                      <>
+                        <div
+                          className="flex-1 text-sm text-gray-700 cursor-pointer hover:text-blue-600 hover:underline"
+                          onClick={() => handleEditStart(entry)}
+                          title="Click to edit"
+                        >
+                          {entry.targetTerm}
+                        </div>
+                        <button
+                          onClick={() => handleTranslate(entry)}
+                          disabled={translateMutation.isPending || updateMutation.isPending}
+                          className="p-1.5 rounded-md transition-all text-blue-600 hover:bg-blue-50 hover:text-blue-700 hover:scale-110 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+                          title="Translate term with AI"
+                        >
+                          {translateMutation.isPending ? (
+                            <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                            </svg>
+                          ) : (
+                            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M3 5h12M9 3v2m1.048 9.5A18.022 18.022 0 016.412 9m6.088 9h7M11 21l5-10 5 10M12.751 5C11.783 10.77 8.07 15.61 3 18.129" />
+                            </svg>
+                          )}
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </td>
                 <td className="px-6 py-4 whitespace-nowrap text-center">
                   <span className="text-sm text-gray-500">

@@ -20,3 +20,5 @@ FOREIGN KEY ("documentId")
 REFERENCES "Document"("id") 
 ON DELETE CASCADE;
 
+
+

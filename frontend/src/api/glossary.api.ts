@@ -156,6 +156,21 @@ export const glossaryApi = {
     }>('/glossary/embedding-stats', { params });
     return response.data;
   },
+
+  translateTerm: async (
+    term: string,
+    lang?: string,
+    sourceLang?: string,
+    projectId?: string,
+  ): Promise<{ translation: string }> => {
+    const response = await apiClient.post<{ translation: string }>('/documents/translate-term', {
+      term,
+      lang,
+      sourceLang,
+      projectId,
+    });
+    return response.data;
+  },
 };
 
 

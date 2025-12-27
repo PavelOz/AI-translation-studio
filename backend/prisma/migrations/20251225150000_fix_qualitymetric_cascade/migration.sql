@@ -9,3 +9,5 @@ FOREIGN KEY ("segmentId")
 REFERENCES "Segment"("id") 
 ON DELETE CASCADE;
 
+
+

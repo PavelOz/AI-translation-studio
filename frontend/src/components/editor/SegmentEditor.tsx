@@ -268,7 +268,7 @@ const SegmentEditor = memo(function SegmentEditor({
             // Save on blur only if it's a real blur (not caused by button click)
             handleSave();
           }}
-          className="input w-full min-h-[100px] font-medium"
+          className="input w-full min-h-[100px] font-medium whitespace-pre-wrap"
           placeholder="Enter translation..."
         />
         <div className="mt-2 flex justify-between items-center">

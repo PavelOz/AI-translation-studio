@@ -60,3 +60,5 @@ FOREIGN KEY ("projectId")
 REFERENCES "Project"("id") 
 ON DELETE CASCADE;
 
+
+

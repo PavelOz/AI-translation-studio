@@ -31,6 +31,7 @@ async function fixExecutionLogs() {
         LIMIT 5
       `);
       
+      
       console.log(`📊 Found ${result.length} recent analyses:\n`);
       result.forEach((row, i) => {
         const logs = row.executionLogs;
@@ -84,5 +85,7 @@ async function fixExecutionLogs() {
 }
 
 fixExecutionLogs();
+
+
 
 

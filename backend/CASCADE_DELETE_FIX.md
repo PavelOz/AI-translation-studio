@@ -29,3 +29,5 @@ After regenerating Prisma client, all cascade deletes should work:
 - Delete Project → Cascades to Documents → Cascades to Segments → Cascades to QualityMetrics
 - Delete Document → Cascades to Segments, AIRequests, DocumentAnalysis, etc.
 
+
+

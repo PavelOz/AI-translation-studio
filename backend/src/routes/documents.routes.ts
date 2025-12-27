@@ -13,7 +13,7 @@ import { getDocumentSegments } from '../services/segment.service';
 import { runDocumentMachineTranslation, pretranslateDocument } from '../services/ai.service';
 import { getDocumentMetricsSummary, runDocumentQualityCheck } from '../services/quality.service';
 import { getProgress, cancelProgress, clearProgress } from '../services/pretranslateProgress';
-import { runFullAnalysis, getAnalysisResults, cancelAnalysis, resetAnalysisStatus, getStageMonitoringData, listDocumentGlossary, updateDocumentGlossaryEntry } from '../services/analysis.service';
+import { runFullAnalysis, getAnalysisResults, cancelAnalysis, resetAnalysisStatus, getStageMonitoringData, listDocumentGlossary, updateDocumentGlossaryEntry, translateSingleTerm } from '../services/analysis.service';
 
 // Configure multer to preserve UTF-8 encoding for filenames (including Cyrillic)
 // Multer handles UTF-8 filenames correctly when sent from modern browsers
@@ -347,6 +347,28 @@ documentRoutes.patch(
       payload,
     );
     res.json(result);
+  }),
+);
+
+// Single term translation endpoint
+const translateTermSchema = z.object({
+  term: z.string().min(1),
+  lang: z.string().optional(),
+  sourceLang: z.string().optional(),
+  projectId: z.string().uuid().optional(),
+});
+
+documentRoutes.post(
+  '/translate-term',
+  asyncHandler(async (req, res) => {
+    const payload = translateTermSchema.parse(req.body);
+    const translation = await translateSingleTerm(
+      payload.term,
+      payload.lang || 'ru',
+      payload.sourceLang,
+      payload.projectId,
+    );
+    res.json({ translation });
   }),
 );
 
