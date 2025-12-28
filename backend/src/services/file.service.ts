@@ -15,6 +15,7 @@ import {
   assignDocumentToCluster,
   updateClusterSummary,
 } from './document-clustering.service';
+import { analyzeDocumentContext } from '../ai/documentAnalyzer';
 
 export type ImportDocumentInput = {
   projectId: string;
@@ -76,6 +77,37 @@ export const importDocumentFile = async (
   // Preserve original filename with proper encoding
   const originalFilename = Buffer.from(file.originalname, 'latin1').toString('utf8');
   
+  // Extract full text from segments for context analysis
+  // Combine all segment texts to create a full document text
+  const fullText = parsed.segments
+    .map((segment) => segment.sourceText)
+    .join('\n\n')
+    .trim();
+
+  // Analyze document context using DocumentAnalyzer
+  // This provides genre, tone, and key terminology for better translation quality
+  let summary = '';
+  try {
+    logger.info(
+      { filename: originalFilename, textLength: fullText.length },
+      'Analyzing document context...',
+    );
+    summary = await analyzeDocumentContext(originalFilename, fullText);
+    logger.info(
+      { filename: originalFilename, summaryLength: summary.length },
+      'Document context analysis completed',
+    );
+  } catch (error) {
+    // Log warning but don't fail the upload - context analysis is helpful but not critical
+    logger.warn(
+      {
+        error: error instanceof Error ? error.message : String(error),
+        filename: originalFilename,
+      },
+      'Auto-summary failed, continuing without it',
+    );
+  }
+  
   const document = await createDocument({
     projectId: input.projectId,
     name: originalFilename,
@@ -87,6 +119,7 @@ export const importDocumentFile = async (
     wordCount: totalWords,
     totalSegments,
     totalWords,
+    summary: summary || undefined, // Only include if summary was generated
   });
 
   // Store segmentation mode in document metadata (if available)

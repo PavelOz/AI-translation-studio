@@ -1072,6 +1072,8 @@ export const generateSegmentSuggestions = async (documentId: string): Promise<Se
       project: context.projectMeta,
       document: documentWithSummary ? {
         name: documentWithSummary.name,
+        summary: documentWithSummary.summary ?? undefined,
+        clusterSummary: documentWithSummary.clusterSummary ?? undefined,
       } : undefined,
       sourceLocale: document.sourceLocale, // Pass explicit source locale from document
       targetLocale: document.targetLocale, // Pass explicit target locale from document
@@ -1583,6 +1585,16 @@ export const runSegmentMachineTranslationWithCritic = async (
     source: 'translateSegment:before-translateWithCritic',
   }, 'translateSegment: Calling translateWithCritic with dynamic maxTokens');
 
+  // Fetch document with summary fields for context
+  const documentWithSummary = await prisma.document.findUnique({
+    where: { id: segment.document.id },
+    select: {
+      name: true,
+      summary: true,
+      clusterSummary: true,
+    },
+  });
+
   const aiResult = await orchestrator.translateWithCritic(
     buildOrchestratorSegment(segment, previous, next, segment.document.name),
     {
@@ -1594,6 +1606,11 @@ export const runSegmentMachineTranslationWithCritic = async (
       guidelines: context.guidelines,
       tmExamples, // TM examples used for RAG, but we always generate fresh translation
       project: context.projectMeta,
+      document: documentWithSummary ? {
+        name: documentWithSummary.name,
+        summary: documentWithSummary.summary ?? undefined,
+        clusterSummary: documentWithSummary.clusterSummary ?? undefined,
+      } : undefined,
       // #region agent log
       sourceLocale: (()=>{fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:1596',message:'runSegmentMachineTranslationWithCritic: Document locales before passing to orchestrator',data:{documentSourceLocale:segment.document.sourceLocale,documentTargetLocale:segment.document.targetLocale,segmentId:segment.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});return segment.document.sourceLocale;})(), // Pass explicit source locale from document
       targetLocale: segment.document.targetLocale, // Pass explicit target locale from document
@@ -1798,6 +1815,8 @@ export const runDocumentMachineTranslation = async (
       where: { id: document.id },
       select: {
         name: true,
+        summary: true,
+        clusterSummary: true,
       },
     });
 
@@ -1834,6 +1853,8 @@ export const runDocumentMachineTranslation = async (
       segments: orchestratorSegments,
       document: documentWithSummary ? {
         name: documentWithSummary.name,
+        summary: documentWithSummary.summary ?? undefined,
+        clusterSummary: documentWithSummary.clusterSummary ?? undefined,
       } : undefined,
       glossary: filteredGlossary,
       guidelines: context.guidelines,
@@ -2160,6 +2181,8 @@ export const pretranslateDocument = async (
               where: { id: document.id },
               select: {
                 name: true,
+                summary: true,
+                clusterSummary: true,
               },
             });
 
@@ -2175,6 +2198,8 @@ export const pretranslateDocument = async (
                 guidelines: context.guidelines,
                 document: documentWithSummary ? {
                   name: documentWithSummary.name,
+                  summary: documentWithSummary.summary ?? undefined,
+                  clusterSummary: documentWithSummary.clusterSummary ?? undefined,
                 } : undefined,
                 project: context.projectMeta,
                 sourceLocale: document.sourceLocale,
@@ -2310,6 +2335,8 @@ export const pretranslateDocument = async (
             yandexFolderId: context.yandexFolderId,
             document: documentWithSummary ? {
               name: documentWithSummary.name,
+              summary: documentWithSummary.summary ?? undefined,
+              clusterSummary: documentWithSummary.clusterSummary ?? undefined,
             } : undefined,
             segments: orchestratorSegments,
             glossary: filteredGlossary,
@@ -3305,6 +3332,8 @@ export const getSegmentDebugInfo = async (segmentId: string) => {
     where: { id: segment.document.id },
     select: {
       name: true,
+      summary: true,
+      clusterSummary: true,
     },
   });
 
@@ -3319,6 +3348,8 @@ export const getSegmentDebugInfo = async (segmentId: string) => {
     targetLocale: segment.document.targetLocale,
     document: documentWithSummary ? {
       name: documentWithSummary.name,
+      summary: documentWithSummary.summary ?? undefined,
+      clusterSummary: documentWithSummary.clusterSummary ?? undefined,
     } : undefined,
   });
 

@@ -13,6 +13,7 @@ export type CreateDocumentInput = {
   wordCount: number;
   totalSegments?: number;
   totalWords?: number;
+  summary?: string;
 };
 
 export const listDocuments = (projectId?: string) =>
@@ -30,6 +31,7 @@ export const createDocument = (input: CreateDocumentInput) =>
       totalSegments: input.totalSegments ?? 0,
       totalWords: input.totalWords ?? input.wordCount,
       status: 'NEW',
+      summary: input.summary,
     },
   });
 

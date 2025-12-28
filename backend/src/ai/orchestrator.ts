@@ -94,6 +94,95 @@ export class AIOrchestrator {
     return result;
   }
 
+  /**
+   * Estimate token count for a given text using simple heuristic
+   * Approximation: ~4 characters per token
+   */
+  private estimateTokens(text: string): number {
+    return Math.ceil(text.length / 4);
+  }
+
+  /**
+   * Plan token-based batches to prevent token limit exceeded errors
+   * Returns array of batch ranges {start, end} where end is exclusive
+   */
+  private planBatches(segments: OrchestratorSegment[], maxInputTokens: number = 3000): Array<{start: number, end: number}> {
+    const batches: Array<{start: number, end: number}> = [];
+    let currentStart = 0;
+    let currentTokens = 0;
+    // Fixed overhead buffer (System prompt + Guidelines ~ 800 tokens)
+    const PROMPT_OVERHEAD = 800; 
+
+    for (let i = 0; i < segments.length; i++) {
+      const segTokens = this.estimateTokens(segments[i].sourceText) + 100; // +100 for JSON overhead
+      
+      // If this single segment exceeds limit, create a batch with just this segment
+      if (segTokens + PROMPT_OVERHEAD > maxInputTokens) {
+        // If we have accumulated segments, save them first
+        if (i > currentStart) {
+          batches.push({ start: currentStart, end: i });
+        }
+        // Create a batch with just this oversized segment
+        batches.push({ start: i, end: i + 1 });
+        currentStart = i + 1;
+        currentTokens = 0;
+        continue;
+      }
+      
+      // If adding this segment exceeds limit AND we have at least one segment in batch
+      if (currentTokens + segTokens + PROMPT_OVERHEAD > maxInputTokens && i > currentStart) {
+        batches.push({ start: currentStart, end: i });
+        currentStart = i;
+        currentTokens = 0;
+      }
+      currentTokens += segTokens;
+    }
+    // Add final batch
+    if (currentStart < segments.length) {
+      batches.push({ start: currentStart, end: segments.length });
+    }
+    return batches;
+  }
+
+  /**
+   * Filter guidelines/style rules to prevent "Runglish" formatting issues
+   * When translating to English, removes formatting rules (date, number, punctuation, etc.)
+   * but keeps semantic rules (tone, terminology, style)
+   */
+  private filterGuidelinesForTranslation(
+    styleRules: Array<{ ruleType: string; pattern: string; description: string | null; examples: any; force?: boolean }>,
+    targetLang: string
+  ): Array<{ ruleType: string; pattern: string; description: string | null; examples: any; force?: boolean }> {
+    // If target language is NOT English, return rules as-is
+    if (!targetLang.toLowerCase().startsWith('en')) {
+      return styleRules;
+    }
+
+    // For English: Filter out formatting rules, keep semantic rules
+    const formattingRuleTypes = ['date_format', 'number_format', 'punctuation', 'spacing', 'list_style', 'capitalization'];
+    const semanticRuleTypes = ['tone', 'terminology', 'gender_neutrality', 'style'];
+
+    return styleRules.filter((rule) => {
+      // Exception: If rule has force: true, always keep it
+      if (rule.force === true) {
+        return true;
+      }
+
+      // Keep semantic rules
+      if (semanticRuleTypes.includes(rule.ruleType)) {
+        return true;
+      }
+
+      // Filter out formatting rules
+      if (formattingRuleTypes.includes(rule.ruleType)) {
+        return false;
+      }
+
+      // For unknown rule types, keep them (safe default)
+      return true;
+    });
+  }
+
   private buildGuidelineSection(guidelines?: string[]) {
     if (!guidelines || guidelines.length === 0) {
       return '1. Follow standard professional translation practices.\n2. Preserve formatting, tags, and placeholders.';
@@ -241,7 +330,12 @@ export class AIOrchestrator {
     ].join('\n');
   }
 
-  private buildBatchPrompt(batch: OrchestratorSegment[], options: TranslateSegmentsOptions): string {
+  private buildBatchPrompt(
+    batch: OrchestratorSegment[], 
+    options: TranslateSegmentsOptions,
+    prevContext?: string | null,
+    nextContext?: string | null
+  ): string {
     const project = options.project ?? {};
     const guidelineText = this.buildGuidelineSection(options.guidelines);
     const examplesText = this.buildTranslationExamplesSection(options.tmExamples);
@@ -251,7 +345,6 @@ export class AIOrchestrator {
       options.documentGlossary,
       options.glossary
     );
-    const formattedStyleRules = this.formatStyleRulesForHierarchy(options.documentStyleRules);
     
     const segmentsPayload = batch.map((segment) => ({
       segment_id: segment.segmentId,
@@ -279,8 +372,43 @@ export class AIOrchestrator {
     const isUSEnglish = targetLangCode.toLowerCase() === 'en-us' || targetLangCode.toLowerCase() === 'en_us';
     const isEnglish = targetLangCode.toLowerCase().startsWith('en');
 
+    // Smart Guidelines Filtering: Filter out formatting rules when translating to English
+    // This prevents "Runglish" issues (e.g., "Dates are formatted with dots" when target is English)
+    const filteredStyleRules = options.documentStyleRules 
+      ? this.filterGuidelinesForTranslation(options.documentStyleRules, targetLangCode)
+      : undefined;
+    
+    // Log filtering decision for debugging
+    if (options.documentStyleRules && options.documentStyleRules.length > 0) {
+      const filteredCount = filteredStyleRules?.length || 0;
+      const originalCount = options.documentStyleRules.length;
+      const removedCount = originalCount - filteredCount;
+      console.log('Guidelines filtering:', {
+        targetLang: targetLangCode,
+        originalCount,
+        filteredCount,
+        removedCount,
+        isEnglish: isEnglish
+      });
+    }
+
     // Check if address formatting rules exist for this language pair
     const hasAddressRules = hasAddressFormattingRule(sourceLangCode, targetLangCode);
+    
+    // Smart Injection: Detect if batch contains addresses before including address rules
+    // Keywords detecting generic address components (RU/EN/KZ context)
+    const addressKeywords = /адрес|address|ул\.|st\.|street|просп|пр\.|ave\.|avenue|мкр\.|microdistrict|бц|офис|office|бин|bin|дом\s+\d|house\s+\d|расположен|located|находится|по\s+адресу/i;
+    
+    // Check if ANY segment in the batch contains address keywords
+    const containsAddress = batch.some(seg => addressKeywords.test(seg.sourceText));
+    
+    // Log the decision for debugging
+    console.log('Address rules injection:', { 
+      hasRules: hasAddressRules, 
+      detected: containsAddress,
+      willInject: hasAddressRules && containsAddress,
+      batchSize: batch.length
+    });
     
     // Build natural language quality instructions
     const naturalLanguageInstructions = this.buildNaturalLanguageInstructions(
@@ -288,27 +416,23 @@ export class AIOrchestrator {
       isUSEnglish,
       isEnglish,
       targetLangCode,
-      hasAddressRules,
+      hasAddressRules && containsAddress, // Only inject if rules exist AND addresses detected
       sourceLangCode,
       targetLangCode
     );
 
     const document = options.document ?? {};
     
-    // Build document context section
-    const documentContextParts: string[] = [];
-    if (document.name) {
-      documentContextParts.push(`Document: ${document.name}`);
-    }
-    if (document.summary) {
-      documentContextParts.push(`Document summary: ${document.summary}`);
-    }
-    if (document.clusterSummary) {
-      documentContextParts.push(`Cluster context: ${document.clusterSummary}`);
-    }
-    const documentContext = documentContextParts.length > 0 
-      ? `\n${documentContextParts.join('\n')}` 
-      : '';
+    // Build document context string for System Persona (Top Priority)
+    // This ensures the AI understands the document genre and context before translating
+    const docContext = document ? [
+      document.name ? `DOCUMENT NAME: "${document.name}"` : '',
+      document.summary ? `DOCUMENT CONTEXT: ${document.summary}` : '',
+      document.clusterSummary ? `SECTION CONTEXT: ${document.clusterSummary}` : ''
+    ].filter(Boolean).join('\n') : '';
+
+    // Format style rules using filtered rules (prevents Runglish formatting issues)
+    const formattedStyleRules = this.formatStyleRulesForHierarchy(filteredStyleRules);
 
     // NEW HIERARCHICAL PROMPT STRUCTURE with Context Anchors
     // Ordering follows "Static-First" rule for KV-Caching efficiency:
@@ -317,8 +441,10 @@ export class AIOrchestrator {
     // 3. TM Examples (Dynamic Context)
     // 4. Source Segments (Highly Dynamic)
     return [
-      // 1. CLEAR PERSONA (Reinforced for models that ignore system prompt)
-      `You are a professional technical translator specializing in ${sourceLangCode} to ${targetLangCode}. Your goal is to produce a translation that flows naturally in the target language while preserving the original technical meaning.`,
+      // 1. SYSTEM PERSONA WITH CONTEXT (Top Priority - AI sees this first)
+      `You are a professional technical translator specializing in ${sourceLangCode} to ${targetLangCode}.`,
+      docContext ? `\n=== GLOBAL DOCUMENT CONTEXT (CRITICAL) ===\n${docContext}\n` : '',
+      `Your goal is to produce a translation that flows naturally in the target language while preserving the original technical meaning.`,
       '',
       '### 👑 CONTEXT HIERARCHY & PRIORITIES:',
       '1. **TERMINOLOGY (NON-NEGOTIABLE):** Strict adherence to the Glossary below is mandatory.',
@@ -347,6 +473,12 @@ export class AIOrchestrator {
       'Return ONLY valid JSON array matching this schema:',
       `[{"segment_id":"<id>","target_mt":"<translation>"}]`,
       '',
+      // Previous context (if provided)
+      ...(prevContext ? [
+        '=== PREVIOUS CONTEXT (FOR REFERENCE ONLY - DO NOT TRANSLATE) ===',
+        prevContext,
+        ''
+      ] : []),
       '=== SOURCE SEGMENTS TO TRANSLATE ===',
       ...batch.map((segment) => {
         // Convert formatting tags to XML for AI-friendly processing
@@ -368,6 +500,12 @@ export class AIOrchestrator {
           '---'
         ];
       }),
+      // Next context (if provided)
+      ...(nextContext ? [
+        '',
+        '=== NEXT CONTEXT (FOR REFERENCE ONLY - DO NOT TRANSLATE) ===',
+        nextContext
+      ] : []),
     ].join('\n');
   }
 
@@ -518,12 +656,13 @@ export class AIOrchestrator {
     isUSEnglish: boolean,
     isEnglish: boolean,
     targetLangCode: string,
-    hasAddressRules: boolean = false,
+    shouldIncludeAddressRules: boolean = false, // True only if rules exist AND addresses detected in batch
     sourceLocale: string = '',
     targetLocale: string = ''
   ): string {
     // Build address standardization section dynamically based on language pair
-    const addressStandardizationSection = hasAddressRules 
+    // Smart Injection: Only include if addresses were detected in the batch
+    const addressStandardizationSection = shouldIncludeAddressRules 
       ? this.buildAddressStandardizationRules(sourceLocale, targetLocale) 
       : '';
     
@@ -699,9 +838,7 @@ export class AIOrchestrator {
     }
     const provider = getProvider(options.provider, options.apiKey, options.yandexFolderId);
     const model = options.model ?? provider.defaultModel;
-    const batchSize = options.batchSize ?? env.aiBatchSize ?? 20;
     const retries = options.retries ?? env.aiMaxRetries ?? 3;
-    const batches = chunkSegments(options.segments, batchSize);
     const results: OrchestratorResult[] = [];
 
     // Extract language codes and names for translation direction
@@ -720,12 +857,72 @@ export class AIOrchestrator {
     fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:655',message:'translateSegments: Language names from getLanguageName',data:{sourceLangCode,sourceLang,targetLangCode,targetLang},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
     // #endregion
 
-    for (const job of batches) {
+    // Plan token-based batches to prevent token limit exceeded errors
+    const batchRanges = this.planBatches(options.segments, 4000); // 4k token safety limit
+    
+    // Process each batch
+    for (const range of batchRanges) {
+      const batchSegments = options.segments.slice(range.start, range.end);
+      const chunkId = randomUUID();
+      
+      // Get neighboring segments for context
+      // prevSegment: segment before this batch (range.start - 1)
+      // nextSegment: segment after this batch (range.end, since slice is exclusive)
+      const prevSegment = range.start > 0 ? options.segments[range.start - 1] : null;
+      const nextSegment = range.end < options.segments.length ? options.segments[range.end] : null;
+      
+      // Extract and truncate context strings
+      let prevContextString: string | null = null;
+      if (prevSegment) {
+        const prevText = prevSegment.sourceText;
+        if (prevText.length > 1000) {
+          prevContextString = '[...]' + prevText.slice(-1000);
+        } else {
+          prevContextString = prevText;
+        }
+        // Convert tags to XML for format consistency
+        prevContextString = this.convertTagsToXml(prevContextString);
+      } else if (batchSegments.length > 0 && batchSegments[0].previousText) {
+        // Fallback: Use segment's previousText property when array neighbor is unavailable
+        const prevText = batchSegments[0].previousText;
+        if (prevText.length > 1000) {
+          prevContextString = '[...]' + prevText.slice(-1000);
+        } else {
+          prevContextString = prevText;
+        }
+        // Convert tags to XML for format consistency
+        prevContextString = this.convertTagsToXml(prevContextString);
+      }
+      
+      let nextContextString: string | null = null;
+      if (nextSegment) {
+        const nextText = nextSegment.sourceText;
+        if (nextText.length > 1000) {
+          nextContextString = nextText.slice(0, 1000) + '[...]';
+        } else {
+          nextContextString = nextText;
+        }
+        // Convert tags to XML for format consistency
+        nextContextString = this.convertTagsToXml(nextContextString);
+      } else if (batchSegments.length > 0) {
+        // Fallback: Use segment's nextText property when array neighbor is unavailable
+        const lastSegment = batchSegments[batchSegments.length - 1];
+        const nextText = lastSegment.nextText;
+        if (nextText) {
+          if (nextText.length > 1000) {
+            nextContextString = nextText.slice(0, 1000) + '[...]';
+          } else {
+            nextContextString = nextText;
+          }
+          // Convert tags to XML for format consistency
+          nextContextString = this.convertTagsToXml(nextContextString);
+        }
+      }
       let attempt = 0;
       let success = false;
       while (attempt < retries && !success) {
         try {
-          const prompt = this.buildBatchPrompt(job.segments, options);
+          const prompt = this.buildBatchPrompt(batchSegments, options, prevContextString, nextContextString);
           
           // Log prompt for YandexGPT debugging
           if (provider.name === 'yandex') {
@@ -743,9 +940,9 @@ export class AIOrchestrator {
           let maxTokens = options.maxTokens;
           if (!maxTokens || maxTokens < 2048) {
             // For batch, use the longest segment
-            const longestSegment = job.segments.reduce((longest, seg) => 
+            const longestSegment = batchSegments.reduce((longest, seg) => 
               seg.sourceText.length > longest.sourceText.length ? seg : longest,
-              job.segments[0]
+              batchSegments[0]
             );
             const sourceTextLength = longestSegment.sourceText.length;
             const estimatedInputTokens = Math.ceil(sourceTextLength / 4);
@@ -755,7 +952,7 @@ export class AIOrchestrator {
             );
             maxTokens = Math.min(calculatedMaxTokens, 8192);
             logger.debug({
-              batchSize: job.segments.length,
+              batchSize: batchSegments.length,
               longestSegmentLength: sourceTextLength,
               estimatedInputTokens,
               calculatedMaxTokens,
@@ -767,8 +964,6 @@ export class AIOrchestrator {
           const systemPersona = `You are an expert linguist. TRANSLATION DIRECTION: ${sourceLangCode} → ${targetLangCode}. You translate FROM ${sourceLangCode} (${sourceLang}, source/input) TO ${targetLangCode} (${targetLang}, target/output). CRITICAL: Your output MUST be in ${targetLangCode} only. Never return text in ${sourceLangCode}. If you see text in ${sourceLangCode}, translate it to ${targetLangCode}. If you see text in ${targetLangCode}, keep it as-is. Your translations must be accurate, natural, and idiomatic. Avoid literal calques and word-for-word translations. Prioritize meaning and fluency while maintaining technical precision.`;
           
           // Debug: Write raw prompt with XML tags to file for inspection
-          // DISABLED: Uncomment to enable debug file writing
-          /*
           try {
             // Use workspace root (.cursor) instead of backend/.cursor
             // process.cwd() returns backend directory, so go up one level
@@ -790,7 +985,6 @@ export class AIOrchestrator {
             logger.error({ error: errorMessage, stack: errorStack }, 'Failed to write debug prompt file');
             console.error(`[DEBUG ERROR] Failed to write XML prompt file:`, errorMessage);
           }
-          */
           
           const response = await provider.callModel({
             prompt,
@@ -798,7 +992,7 @@ export class AIOrchestrator {
             temperature: options.temperature ?? 0.4, // Increased from 0.2 to 0.4 for better fluency
             maxTokens,
             systemPrompt: systemPersona, // Explicit system prompt injection
-            segments: job.segments.map((segment) => ({ segmentId: segment.segmentId, sourceText: segment.sourceText })),
+            segments: batchSegments.map((segment) => ({ segmentId: segment.segmentId, sourceText: segment.sourceText })),
           });
           // #region agent log
           fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:710',message:'translateSegments: Provider callModel completed',data:{providerName:provider.name,responseLength:response.outputText?.length||0,responsePreview:response.outputText?.substring(0,100)||'',hasSystemPrompt:!!systemPersona},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
@@ -814,7 +1008,7 @@ export class AIOrchestrator {
             }, 'YandexGPT translation response');
           }
           
-          const parsed = this.parseProviderResponse(response.outputText, job.segments);
+          const parsed = this.parseProviderResponse(response.outputText, batchSegments);
           parsed.forEach((item) =>
             results.push({
               segmentId: item.segmentId,
@@ -827,13 +1021,13 @@ export class AIOrchestrator {
               fallback: false
             }),
           );
-          logger.info({ provider: provider.name, chunkId: job.chunkId }, 'AI translation chunk completed');
+          logger.info({ provider: provider.name, chunkId }, 'AI translation chunk completed');
           success = true;
         } catch (error) {
           attempt += 1;
-          logger.warn({ provider: provider.name, chunkId: job.chunkId, attempt, error: (error as Error).message }, 'AI translation chunk failed');
+          logger.warn({ provider: provider.name, chunkId, attempt, error: (error as Error).message }, 'AI translation chunk failed');
           if (attempt >= retries) {
-            const fallback = this.ruleBasedBatch(job.segments);
+            const fallback = this.ruleBasedBatch(batchSegments);
             results.push(...fallback);
           } else {
             await new Promise((resolve) => setTimeout(resolve, 300 * attempt));
@@ -891,6 +1085,7 @@ export class AIOrchestrator {
   async generateDraft(
     sourceText: string,
     options: Omit<TranslateSegmentsOptions, 'segments'>,
+    context?: { previous?: string; next?: string },
   ): Promise<{ draftText: string; modelUsed: string; usage?: ProviderUsage }> {
     const provider = getProvider(options.provider, options.apiKey, options.yandexFolderId);
     const model = options.model ?? provider.defaultModel;
@@ -918,7 +1113,12 @@ export class AIOrchestrator {
     const [result] = await this.translateSegments({
       ...options,
       maxTokens,
-      segments: [{ segmentId: 'draft', sourceText }],
+      segments: [{ 
+        segmentId: 'draft', 
+        sourceText,
+        previousText: context?.previous ?? null,
+        nextText: context?.next ?? null,
+      }],
     });
 
     // Remove mock/synthetic translation markers from draft
@@ -1664,6 +1864,7 @@ export class AIOrchestrator {
     segment: OrchestratorSegment,
     options: Omit<TranslateSegmentsOptions, 'segments'>,
     onProgress?: (stage: 'draft' | 'critic' | 'editor' | 'complete', message?: string) => void,
+    context?: { previous?: string; next?: string },
   ): Promise<OrchestratorResult> {
     const provider = getProvider(options.provider, options.apiKey, options.yandexFolderId);
     
@@ -1677,7 +1878,12 @@ export class AIOrchestrator {
     
     // 1. Draft
     onProgress?.('draft', 'Generating draft translation...');
-    const draft = await this.generateDraft(segment.sourceText, options);
+    // Use context parameter if provided, otherwise fall back to segment properties
+    const draftContext = context ?? {
+      previous: segment.previousText ?? undefined,
+      next: segment.nextText ?? undefined,
+    };
+    const draft = await this.generateDraft(segment.sourceText, options, draftContext);
     
     // 2. Critic
     onProgress?.('critic', 'Running critique analysis...');
