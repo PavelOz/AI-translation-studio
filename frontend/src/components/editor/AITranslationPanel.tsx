@@ -30,7 +30,7 @@ const TM_PROFILES = {
   },
 };
 
-type AIProvider = 'gemini' | 'openai' | 'yandex';
+type AIProvider = 'gemini' | 'openai' | 'yandex' | 'deepseek';
 
 interface AITranslationPanelProps {
   sourceText: string;
@@ -68,7 +68,7 @@ export default function AITranslationPanel({
     if (typeof window !== 'undefined') {
       try {
         const saved = localStorage.getItem('ai-translation-provider');
-        if (saved && ['gemini', 'openai', 'yandex'].includes(saved)) {
+        if (saved && ['gemini', 'openai', 'yandex', 'deepseek'].includes(saved)) {
           return saved as AIProvider;
         }
       } catch (error) {
@@ -80,7 +80,7 @@ export default function AITranslationPanel({
 
   // Update selected provider when project settings load
   useEffect(() => {
-    if (aiSettings?.provider && ['gemini', 'openai', 'yandex'].includes(aiSettings.provider)) {
+    if (aiSettings?.provider && ['gemini', 'openai', 'yandex', 'deepseek'].includes(aiSettings.provider)) {
       setSelectedProvider(aiSettings.provider as AIProvider);
     }
     
@@ -93,6 +93,15 @@ export default function AITranslationPanel({
   const [modelInfo, setModelInfo] = useState<{ provider?: string; model?: string } | null>(null);
   const [showGlassBox, setShowGlassBox] = useState<boolean>(false);
   const [useCritic, setUseCritic] = useState(false);
+  // Temperature state - defaults based on provider
+  const [temperature, setTemperature] = useState<number>(() => {
+    // Default temperature based on provider
+    const provider = typeof window !== 'undefined' 
+      ? localStorage.getItem('ai-translation-provider') || 'gemini'
+      : 'gemini';
+    if (provider === 'deepseek') return 0.0; // DeepSeek defaults to 0.0 for stability
+    return 0.3; // Default for other providers
+  });
   // Blind translation state (control test)
   const [blindTranslation, setBlindTranslation] = useState<string>('');
   const [isBlindTranslating, setIsBlindTranslating] = useState(false);
@@ -397,6 +406,7 @@ export default function AITranslationPanel({
             body: JSON.stringify({
               useCritic: true,
               glossaryMode,
+              temperature,
               tmRagSettings: tmRagSettings || undefined, // Convert null to undefined
             }),
             signal: abortController.signal,
@@ -726,6 +736,8 @@ export default function AITranslationPanel({
         return 'OpenAI (ChatGPT)';
       case 'yandex':
         return 'Yandex GPT';
+      case 'deepseek':
+        return 'DeepSeek';
       default:
         return provider;
     }
@@ -972,10 +984,40 @@ export default function AITranslationPanel({
           <option value="gemini">Google Gemini</option>
           <option value="openai">OpenAI (ChatGPT)</option>
           <option value="yandex">Yandex GPT</option>
+          <option value="deepseek">DeepSeek</option>
         </select>
         <p className="text-xs text-gray-500 mt-1">
           Using: {getProviderDisplayName(selectedProvider)}
           {aiSettings?.model && ` (${aiSettings.model})`}
+        </p>
+      </div>
+
+      {/* Temperature/Creativity Slider */}
+      <div className="mb-4">
+        <label htmlFor="temperature-slider" className="block text-sm font-medium text-gray-700 mb-2">
+          Temperature / Creativity
+        </label>
+        <div className="flex items-center gap-4">
+          <input
+            id="temperature-slider"
+            type="range"
+            min="0"
+            max="1"
+            step="0.1"
+            value={temperature}
+            onChange={(e) => setTemperature(parseFloat(e.target.value))}
+            className="flex-1 h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-primary-600"
+            disabled={isTranslating}
+          />
+          <span className="text-sm font-medium text-gray-700 min-w-[3rem] text-right">
+            {temperature.toFixed(1)}
+          </span>
+        </div>
+        <p className="text-xs text-gray-500 mt-1">
+          <span className="font-medium">0.0</span> = Strict (Deterministic) • <span className="font-medium">1.0</span> = Creative (Variable)
+        </p>
+        <p className="text-xs text-gray-400 mt-0.5">
+          Controls Draft and Fix steps. Critic always uses 0.0 for strict validation.
         </p>
       </div>
 

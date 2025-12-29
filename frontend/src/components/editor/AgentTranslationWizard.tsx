@@ -4,7 +4,7 @@ import { aiApi } from '../../api/ai.api';
 import { stripFormattingMarkers } from '../../utils/formatting';
 import toast from 'react-hot-toast';
 
-type AIProvider = 'gemini' | 'openai' | 'yandex';
+type AIProvider = 'gemini' | 'openai' | 'yandex' | 'deepseek';
 
 interface AgentTranslationWizardProps {
   sourceText: string;
@@ -47,14 +47,14 @@ export default function AgentTranslationWizard({
     if (typeof window !== 'undefined') {
       try {
         const saved = localStorage.getItem('ai-translation-provider');
-        if (saved && ['gemini', 'openai', 'yandex'].includes(saved)) {
+        if (saved && ['gemini', 'openai', 'yandex', 'deepseek'].includes(saved)) {
           return saved as AIProvider;
         }
       } catch (error) {
         console.warn('Failed to load AI provider from localStorage:', error);
       }
     }
-    return aiSettings?.provider && ['gemini', 'openai', 'yandex'].includes(aiSettings.provider)
+    return aiSettings?.provider && ['gemini', 'openai', 'yandex', 'deepseek'].includes(aiSettings.provider)
       ? (aiSettings.provider as AIProvider)
       : 'gemini';
   };
@@ -432,7 +432,7 @@ export default function AgentTranslationWizard({
 import { aiApi } from '../../api/ai.api';
 import toast from 'react-hot-toast';
 
-type AIProvider = 'gemini' | 'openai' | 'yandex';
+type AIProvider = 'gemini' | 'openai' | 'yandex' | 'deepseek';
 
 interface AgentTranslationWizardProps {
   sourceText: string;
@@ -475,14 +475,14 @@ export default function AgentTranslationWizard({
     if (typeof window !== 'undefined') {
       try {
         const saved = localStorage.getItem('ai-translation-provider');
-        if (saved && ['gemini', 'openai', 'yandex'].includes(saved)) {
+        if (saved && ['gemini', 'openai', 'yandex', 'deepseek'].includes(saved)) {
           return saved as AIProvider;
         }
       } catch (error) {
         console.warn('Failed to load AI provider from localStorage:', error);
       }
     }
-    return aiSettings?.provider && ['gemini', 'openai', 'yandex'].includes(aiSettings.provider)
+    return aiSettings?.provider && ['gemini', 'openai', 'yandex', 'deepseek'].includes(aiSettings.provider)
       ? (aiSettings.provider as AIProvider)
       : 'gemini';
   };

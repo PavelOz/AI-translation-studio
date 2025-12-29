@@ -69,7 +69,8 @@ export type TranslateSegmentsOptions = {
 export type TranslationProvider = 
   | 'gemini' 
   | 'openai' 
-  | 'yandex' 
+  | 'yandex'
+  | 'deepseek'
   | 'rule-based' 
   | 'rule'
   | 'project-tm' 

@@ -8051,7 +8051,7 @@ export const translateSingleTerm = async (
       const aiSettings = await getProjectAISettings(projectId);
       
       if (aiSettings?.provider && aiSettings?.model) {
-        provider = getProvider(aiSettings.provider as 'gemini' | 'openai' | 'yandex', undefined, undefined);
+        provider = getProvider(aiSettings.provider as 'gemini' | 'openai' | 'yandex' | 'deepseek', undefined, undefined);
         model = aiSettings.model;
         
         // Extract API key from project settings config
@@ -8073,7 +8073,7 @@ export const translateSingleTerm = async (
         
         // Re-instantiate provider with API key if available
         if (apiKey || yandexFolderId) {
-          provider = getProvider(aiSettings.provider as 'gemini' | 'openai' | 'yandex', apiKey, yandexFolderId);
+          provider = getProvider(aiSettings.provider as 'gemini' | 'openai' | 'yandex' | 'deepseek', apiKey, yandexFolderId);
         }
       } else {
         // Fallback to default provider

@@ -51,6 +51,7 @@ const mtSchema = z.object({
   minScore: z.number().min(0).max(100).optional(),
   glossaryMode: z.enum(['off', 'strict_source', 'strict_semantic']).optional(),
   useCritic: z.boolean().optional(), // Enable critic workflow
+  temperature: z.number().min(0).max(1).optional(), // Temperature for AI translation
   tmRagSettings: z.object({
     minScore: z.number().min(0).max(100).optional(),
     vectorSimilarity: z.number().min(0).max(100).optional(),
@@ -179,6 +180,7 @@ segmentRoutes.post(
               applyTm: payload.applyTm,
               minScore: payload.minScore,
               glossaryMode: payload.glossaryMode ?? 'strict_source',
+              temperature: payload.temperature,
               tmRagSettings: payload.tmRagSettings,
             },
             sendProgress,

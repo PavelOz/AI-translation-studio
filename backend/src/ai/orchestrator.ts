@@ -799,7 +799,7 @@ export class AIOrchestrator {
         let targetText = entry.target_mt.trim();
         
         // Remove mock/synthetic translation markers
-        targetText = targetText.replace(/\s*\[(?:gemini|openai|yandex|gpt|ai)\s+synthetic\s+translation\]\s*/gi, '').trim();
+        targetText = targetText.replace(/\s*\[(?:gemini|openai|yandex|deepseek|gpt|ai)\s+synthetic\s+translation\]\s*/gi, '').trim();
         targetText = targetText.replace(/\s*\[mock\s+translation\]\s*/gi, '').trim();
         targetText = targetText.replace(/\s*\[synthetic\]\s*/gi, '').trim();
         targetText = targetText.replace(/\s*\[\s*\]\s*$/, '').trim();
@@ -989,7 +989,7 @@ export class AIOrchestrator {
           const response = await provider.callModel({
             prompt,
             model,
-            temperature: options.temperature ?? 0.4, // Increased from 0.2 to 0.4 for better fluency
+            temperature: options.temperature !== undefined ? options.temperature : 0.4, // Explicit check ensures 0.0 is preserved
             maxTokens,
             systemPrompt: systemPersona, // Explicit system prompt injection
             segments: batchSegments.map((segment) => ({ segmentId: segment.segmentId, sourceText: segment.sourceText })),
@@ -1108,10 +1108,20 @@ export class AIOrchestrator {
       }, 'generateDraft: Calculated dynamic maxTokens');
     }
 
-    logger.info({ sourceLength: sourceText.length, maxTokens }, 'Step 1: Generating Draft');
+    // Explicit temperature handling to ensure 0.0 is preserved
+    const finalTemperature = options.temperature !== undefined ? options.temperature : 0.3;
+    
+    logger.info({ 
+      sourceLength: sourceText.length, 
+      maxTokens, 
+      requestedTemp: options.temperature,
+      finalTemp: finalTemperature,
+      isUndefined: options.temperature === undefined,
+    }, 'Step 1: Generating Draft');
 
     const [result] = await this.translateSegments({
       ...options,
+      temperature: finalTemperature, // Explicit check ensures 0.0 is preserved
       maxTokens,
       segments: [{ 
         segmentId: 'draft', 
@@ -1123,7 +1133,7 @@ export class AIOrchestrator {
 
     // Remove mock/synthetic translation markers from draft
     let draftText = result.targetText;
-    draftText = draftText.replace(/\s*\[(?:gemini|openai|yandex|gpt|ai)\s+synthetic\s+translation\]\s*/gi, '').trim();
+    draftText = draftText.replace(/\s*\[(?:gemini|openai|yandex|deepseek|gpt|ai)\s+synthetic\s+translation\]\s*/gi, '').trim();
     draftText = draftText.replace(/\s*\[mock\s+translation\]\s*/gi, '').trim();
     draftText = draftText.replace(/\s*\[synthetic\]\s*/gi, '').trim();
     draftText = draftText.replace(/\s*\[\s*\]\s*$/, '').trim();
@@ -1460,7 +1470,7 @@ export class AIOrchestrator {
     const response = await provider.callModel({
       prompt,
       model,
-      temperature: 0.1, // Keep it cold and logical
+      temperature: 0.0, // Deterministic and strict - no creativity allowed for validation
       maxTokens: criticMaxTokens,
       systemPrompt: systemPersona, // Explicit system prompt injection
       segments: [{ segmentId: 'critique', sourceText }],
@@ -1748,7 +1758,7 @@ export class AIOrchestrator {
       const response = await provider.callModel({
         prompt,
         model,
-        temperature: options.temperature ?? 0.4, // Increased from 0.2 to 0.4 for better fluency
+        temperature: options.temperature !== undefined ? options.temperature : 0.4, // Explicit check ensures 0.0 is preserved
         maxTokens: editorMaxTokens,
         systemPrompt: systemPersona, // Explicit system prompt injection
         segments: [{ segmentId: 'fix', sourceText }],
@@ -1823,7 +1833,7 @@ export class AIOrchestrator {
       
       // Remove mock/synthetic translation markers (e.g., "[gemini synthetic translation]", "[openai synthetic translation]")
       // These are added by the mock response when API keys are missing
-      final = final.replace(/\s*\[(?:gemini|openai|yandex|gpt|ai)\s+synthetic\s+translation\]\s*/gi, '').trim();
+      final = final.replace(/\s*\[(?:gemini|openai|yandex|deepseek|gpt|ai)\s+synthetic\s+translation\]\s*/gi, '').trim();
       
       // Also remove any other common mock markers
       final = final.replace(/\s*\[mock\s+translation\]\s*/gi, '').trim();

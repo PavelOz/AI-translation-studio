@@ -5,7 +5,14 @@ import { glossaryApi, type GlossaryEntry } from '../../api/glossary.api';
 import { stripFormattingMarkers } from '../../utils/formatting';
 import toast from 'react-hot-toast';
 
-type AIProvider = 'gemini' | 'openai' | 'yandex';
+type AIProvider = 'gemini' | 'openai' | 'yandex' | 'deepseek';
+
+// Model presets for quick selection
+const MODEL_PRESETS = [
+  { id: 'deepseek-reasoner', name: '🧠 DeepSeek R1 (Thinking)', provider: 'deepseek' as AIProvider, model: 'deepseek-reasoner', defaultTemp: 0.0 },
+  { id: 'gemini-flash', name: '⚡ Gemini 2.0 Flash (Fast)', provider: 'gemini' as AIProvider, model: 'gemini-2.0-flash-exp', defaultTemp: 0.3 },
+  { id: 'gpt-4o', name: '🤖 GPT-4o (Standard)', provider: 'openai' as AIProvider, model: 'gpt-4o', defaultTemp: 0.3 },
+];
 
 interface AgentStepTranslationProps {
   sourceText: string;
@@ -80,7 +87,7 @@ export default function AgentStepTranslation({
     if (typeof window !== 'undefined') {
       try {
         const saved = localStorage.getItem('ai-translation-provider');
-        if (saved && ['gemini', 'openai', 'yandex'].includes(saved)) {
+        if (saved && ['gemini', 'openai', 'yandex', 'deepseek'].includes(saved)) {
           return saved as AIProvider;
         }
       } catch (error) {
@@ -88,7 +95,7 @@ export default function AgentStepTranslation({
       }
     }
     // Fallback to project settings
-    if (aiSettings?.provider && ['gemini', 'openai', 'yandex'].includes(aiSettings.provider)) {
+    if (aiSettings?.provider && ['gemini', 'openai', 'yandex', 'deepseek'].includes(aiSettings.provider)) {
       return aiSettings.provider as AIProvider;
     }
     return 'gemini'; // Default
@@ -125,7 +132,7 @@ export default function AgentStepTranslation({
       if (e.key === 'ai-translation-provider') {
         // Force re-render by reading from localStorage again
         const saved = e.newValue;
-        if (saved && ['gemini', 'openai', 'yandex'].includes(saved)) {
+        if (saved && ['gemini', 'openai', 'yandex', 'deepseek'].includes(saved)) {
           setSelectedProvider(saved as AIProvider);
         }
       }
@@ -165,6 +172,31 @@ export default function AgentStepTranslation({
   const [criticModelUsed, setCriticModelUsed] = useState<string>('');
   const [fixModelUsed, setFixModelUsed] = useState<string>('');
   const [glossaryCompliance, setGlossaryCompliance] = useState<GlossaryCompliance[]>([]);
+  
+  // Model preset selection state
+  const [selectedPreset, setSelectedPreset] = useState<typeof MODEL_PRESETS[0]>(() => {
+    // Initialize from localStorage provider, or default to deepseek-reasoner
+    if (typeof window !== 'undefined') {
+      try {
+        const savedProvider = localStorage.getItem('ai-translation-provider');
+        if (savedProvider) {
+          const matchingPreset = MODEL_PRESETS.find(p => p.provider === savedProvider);
+          if (matchingPreset) return matchingPreset;
+        }
+      } catch (error) {
+        console.warn('Failed to load preset from localStorage:', error);
+      }
+    }
+    return MODEL_PRESETS[0]; // Default to deepseek-reasoner
+  });
+
+  // Temperature state - syncs with selected preset's defaultTemp
+  const [temperature, setTemperature] = useState<number>(selectedPreset.defaultTemp);
+
+  // Sync temperature when preset changes
+  useEffect(() => {
+    setTemperature(selectedPreset.defaultTemp);
+  }, [selectedPreset]);
 
   // Step 1: Generate Draft
   const handleGenerateDraft = async () => {
@@ -173,8 +205,9 @@ export default function AgentStepTranslation({
       sourceLocale,
       targetLocale,
       projectId,
-      currentProvider,
-      model: aiSettings?.model,
+      selectedPreset: selectedPreset.id,
+      provider: selectedPreset.provider,
+      model: selectedPreset.model,
     });
 
     // Validate required parameters
@@ -190,9 +223,9 @@ export default function AgentStepTranslation({
       return;
     }
 
-    if (!currentProvider) {
-      console.error('Validation failed: provider not configured');
-      toast.error('AI provider is not configured. Please select a provider in settings.');
+    if (!selectedPreset) {
+      console.error('Validation failed: preset not selected');
+      toast.error('AI model preset is not selected.');
       return;
     }
 
@@ -204,18 +237,19 @@ export default function AgentStepTranslation({
         projectId,
         sourceLocale,
         targetLocale,
-        provider: currentProvider,
-        model: aiSettings?.model,
+        provider: selectedPreset.provider,
+        model: selectedPreset.model,
       });
 
-      // Use the current provider (from localStorage or project settings)
+      // Use the selected preset (provider + model)
       const result = await aiApi.generateDraft({
         sourceText,
         projectId,
         sourceLocale,
         targetLocale,
-        provider: currentProvider, // Pass current provider from localStorage/project settings
-        model: aiSettings?.model, // Pass model from project settings
+        provider: selectedPreset.provider,
+        model: selectedPreset.model,
+        temperature,
       });
 
       console.log('Draft generated successfully', {
@@ -636,15 +670,15 @@ export default function AgentStepTranslation({
       const compliance = checkGlossaryCompliance(sourceText, editedDraftText);
       setGlossaryCompliance(compliance);
 
-      // Use the current provider (from localStorage or project settings)
+      // Use the selected preset (provider + model)
       const result = await aiApi.runCritique({
         sourceText,
         draftText: editedDraftText,
         projectId,
         sourceLocale, // Pass source locale for correct glossary filtering
         targetLocale, // Pass target locale for correct glossary filtering
-        provider: currentProvider, // Pass current provider from localStorage/project settings
-        model: aiSettings?.model, // Pass model from project settings
+        provider: selectedPreset.provider,
+        model: selectedPreset.model,
       });
       setCritiqueErrors(result.errors);
       setCritiqueReasoning(result.reasoning);
@@ -693,7 +727,7 @@ export default function AgentStepTranslation({
         return;
       }
       
-      // Use the current provider (from localStorage or project settings)
+      // Use the selected preset (provider + model)
       const result = await aiApi.fixTranslation({
         sourceText,
         draftText: editedDraftText,
@@ -701,8 +735,9 @@ export default function AgentStepTranslation({
         projectId,
         sourceLocale,
         targetLocale,
-        provider: currentProvider, // Pass current provider from localStorage/project settings
-        model: aiSettings?.model, // Pass model from project settings
+        provider: selectedPreset.provider,
+        model: selectedPreset.model,
+        temperature,
       });
       setFinalText(result.finalText);
       setFixModelUsed(result.modelUsed || '');
@@ -740,11 +775,10 @@ export default function AgentStepTranslation({
         <div>
           <h2 className="text-2xl font-bold text-gray-900">Deep Agent Debugger</h2>
           <div className="flex items-center gap-4 mt-2">
-            {currentProvider && (
+            {selectedPreset && (
               <p className="text-sm text-gray-600">
-                Provider: <span className="font-medium capitalize text-primary-600">{currentProvider}</span>
-                {modelUsed && <span className="ml-1 text-gray-500">({modelUsed})</span>}
-                {aiSettings?.model && !modelUsed && <span className="ml-1 text-gray-500">({aiSettings.model})</span>}
+                Model: <span className="font-medium text-primary-600">{selectedPreset.name}</span>
+                {modelUsed && <span className="ml-1 text-gray-500">(used: {modelUsed})</span>}
               </p>
             )}
             {glossaryEntries && glossaryEntries.length > 0 && (
@@ -797,12 +831,76 @@ export default function AgentStepTranslation({
         <div className="space-y-4">
           <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
             <p className="text-sm text-blue-800">
-              <strong>Step 1:</strong> The AI will generate an initial draft translation using the selected provider ({currentProvider}).
+              <strong>Step 1:</strong> The AI will generate an initial draft translation using the selected model.
               {glossaryEntries && glossaryEntries.length > 0 && (
                 <> Glossary terms will be considered during translation.</>
               )}
             </p>
           </div>
+          
+          {/* Model Preset Selector */}
+          <div>
+            <label htmlFor="model-preset" className="block text-sm font-medium text-gray-700 mb-2">
+              AI Model
+            </label>
+            <select
+              id="model-preset"
+              value={selectedPreset.id}
+              onChange={(e) => {
+                const preset = MODEL_PRESETS.find(p => p.id === e.target.value);
+                if (preset) {
+                  setSelectedPreset(preset);
+                  // Sync provider to localStorage for consistency with other panels
+                  try {
+                    localStorage.setItem('ai-translation-provider', preset.provider);
+                  } catch (error) {
+                    console.warn('Failed to save provider to localStorage:', error);
+                  }
+                }
+              }}
+              className="input w-full bg-white border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+              disabled={isLoading}
+            >
+              {MODEL_PRESETS.map((preset) => (
+                <option key={preset.id} value={preset.id}>
+                  {preset.name}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-gray-500 mt-1">
+              Provider: <span className="font-medium capitalize">{selectedPreset.provider}</span> • Model: <span className="font-medium">{selectedPreset.model}</span>
+            </p>
+          </div>
+
+          {/* Temperature/Creativity Slider */}
+          <div>
+            <label htmlFor="temperature-slider" className="block text-sm font-medium text-gray-700 mb-2">
+              Temperature / Creativity
+            </label>
+            <div className="flex items-center gap-4">
+              <input
+                id="temperature-slider"
+                type="range"
+                min="0"
+                max="1"
+                step="0.1"
+                value={temperature}
+                onChange={(e) => setTemperature(parseFloat(e.target.value))}
+                className="flex-1 h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-primary-600"
+                disabled={isLoading}
+              />
+              <span className="text-sm font-medium text-gray-700 min-w-[3rem] text-right">
+                {temperature.toFixed(1)}
+              </span>
+            </div>
+            <p className="text-xs text-gray-500 mt-1">
+              <span className="font-medium">0.0</span> = Strict (Deterministic) • <span className="font-medium">1.0</span> = Creative (Variable)
+            </p>
+            <p className="text-xs text-gray-400 mt-0.5">
+              Controls Draft and Fix steps. Critic always uses 0.0 for strict validation.
+            </p>
+          </div>
+          
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Source Text:</label>
             <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 text-gray-900 whitespace-pre-wrap min-h-[100px]">
@@ -812,12 +910,12 @@ export default function AgentStepTranslation({
           <div className="flex justify-end">
             <button
               onClick={handleGenerateDraft}
-              disabled={isLoading || !sourceText?.trim() || !sourceLocale || !targetLocale || !currentProvider}
+              disabled={isLoading || !sourceText?.trim() || !sourceLocale || !targetLocale || !selectedPreset}
               className="btn btn-primary"
               title={
                 !sourceText?.trim() ? 'Source text is required' :
                 !sourceLocale || !targetLocale ? 'Locales are required' :
-                !currentProvider ? 'AI provider is not configured' :
+                !selectedPreset ? 'AI model preset is not selected' :
                 'Generate draft translation'
               }
             >

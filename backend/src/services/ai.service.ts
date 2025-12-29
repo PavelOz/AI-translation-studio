@@ -249,6 +249,7 @@ type MachineTranslationOptions = {
   applyTm?: boolean;
   minScore?: number;
   glossaryMode?: GlossaryMode;
+  temperature?: number; // Temperature for AI translation (0.0-1.0)
   // Опции для синхронизации с TM Search Panel
   tmRagSettings?: {
     minScore?: number;
@@ -258,6 +259,18 @@ type MachineTranslationOptions = {
     limit?: number;
   };
 };
+
+/**
+ * Get default temperature based on provider.
+ * DeepSeek (especially reasoning models) defaults to 0.0 for stability.
+ * Other providers default to 0.2 for natural fluency.
+ */
+function getDefaultTemperature(provider?: string | null): number {
+  if (provider?.toLowerCase() === 'deepseek') {
+    return 0.0;
+  }
+  return 0.2;
+}
 
 // Метаданные для прозрачности процесса перевода
 export type TranslationMetadata = {
@@ -1077,7 +1090,7 @@ export const generateSegmentSuggestions = async (documentId: string): Promise<Se
       } : undefined,
       sourceLocale: document.sourceLocale, // Pass explicit source locale from document
       targetLocale: document.targetLocale, // Pass explicit target locale from document
-      temperature: context.settings?.temperature ?? 0.2,
+      temperature: context.settings?.temperature ?? getDefaultTemperature(context.settings?.provider),
       maxTokens: context.settings?.maxTokens ?? 1024,
       // Stage 2: Document-specific context
       documentGlossary: documentGlossary.length > 0 ? documentGlossary : undefined,
@@ -1389,7 +1402,7 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
         // #region agent log
         sourceLocale: (()=>{fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:1387',message:'runSegmentMachineTranslation: Document locales before passing to orchestrator',data:{documentSourceLocale:segment.document.sourceLocale,documentTargetLocale:segment.document.targetLocale,segmentId:segment.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});return segment.document.sourceLocale;})(), // Pass explicit source locale from document
         targetLocale: segment.document.targetLocale, // Pass explicit target locale from document
-        temperature: context.settings?.temperature ?? 0.2,
+        temperature: context.settings?.temperature ?? getDefaultTemperature(context.settings?.provider),
         maxTokens,
         glossaryMode, // Pass glossary mode to orchestrator
       },
@@ -1614,7 +1627,7 @@ export const runSegmentMachineTranslationWithCritic = async (
       // #region agent log
       sourceLocale: (()=>{fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:1596',message:'runSegmentMachineTranslationWithCritic: Document locales before passing to orchestrator',data:{documentSourceLocale:segment.document.sourceLocale,documentTargetLocale:segment.document.targetLocale,segmentId:segment.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});return segment.document.sourceLocale;})(), // Pass explicit source locale from document
       targetLocale: segment.document.targetLocale, // Pass explicit target locale from document
-      temperature: context.settings?.temperature ?? 0.2,
+      temperature: options?.temperature ?? context.settings?.temperature ?? getDefaultTemperature(context.settings?.provider),
       maxTokens,
       glossaryMode,
       // Stage 2: Document-specific context (only if not ignoring context)
@@ -1862,7 +1875,7 @@ export const runDocumentMachineTranslation = async (
       project: context.projectMeta,
       sourceLocale: document.sourceLocale, // Pass explicit source locale from document
       targetLocale: document.targetLocale, // Pass explicit target locale from document
-      temperature: context.settings?.temperature ?? 0.2,
+      temperature: context.settings?.temperature ?? getDefaultTemperature(context.settings?.provider),
       maxTokens: context.settings?.maxTokens ?? 1024,
       glossaryMode, // Pass glossary mode to orchestrator
       // Stage 2: Document-specific context
@@ -2204,7 +2217,7 @@ export const pretranslateDocument = async (
                 project: context.projectMeta,
                 sourceLocale: document.sourceLocale,
                 targetLocale: document.targetLocale,
-                temperature: context.settings.temperature ?? 0.2,
+                temperature: context.settings.temperature ?? getDefaultTemperature(context.settings?.provider),
                 maxTokens: context.settings.maxTokens ?? 1024,
                 glossaryMode,
               },
@@ -2344,7 +2357,7 @@ export const pretranslateDocument = async (
             project: context.projectMeta,
             sourceLocale: document.sourceLocale, // Pass explicit source locale from document
             targetLocale: document.targetLocale, // Pass explicit target locale from document
-            temperature: context.settings.temperature ?? 0.2,
+            temperature: context.settings.temperature ?? getDefaultTemperature(context.settings?.provider),
             maxTokens: context.settings.maxTokens ?? 1024,
             glossaryMode,
             // Stage 2: Document-specific context
@@ -2545,7 +2558,7 @@ export const translateTextDirectly = async (request: DirectTranslationRequest) =
   const provider = request.provider ?? context?.settings?.provider;
   const model = request.model ?? context?.settings?.model;
   const apiKey = context?.apiKey; // Use project-specific API key if available
-  const temperature = request.temperature ?? context?.settings?.temperature ?? 0.2;
+  const temperature = request.temperature ?? context?.settings?.temperature ?? getDefaultTemperature(provider);
   const maxTokens = request.maxTokens ?? context?.settings?.maxTokens ?? 1024;
   const glossaryMode = request.glossaryMode ?? 'strict_source';
   const glossary = context?.glossary ?? [];
@@ -2673,7 +2686,7 @@ export const generateDraftTranslation = async (request: {
   const provider = request.provider ?? context?.settings?.provider;
   const model = request.model ?? context?.settings?.model;
   const apiKey = request.apiKey ?? context?.apiKey;
-  const temperature = request.temperature ?? context?.settings?.temperature ?? 0.2;
+  const temperature = request.temperature ?? context?.settings?.temperature ?? getDefaultTemperature(provider);
   const maxTokens = request.maxTokens ?? context?.settings?.maxTokens ?? 1024;
   const glossary = context?.glossary ?? [];
   const guidelines = context?.guidelines ?? [];
@@ -2877,7 +2890,7 @@ export const fixTranslationWithErrors = async (request: {
   const provider = request.provider ?? context?.settings?.provider;
   const model = request.model ?? context?.settings?.model;
   const apiKey = request.apiKey ?? context?.apiKey;
-  const temperature = request.temperature ?? context?.settings?.temperature ?? 0.2;
+  const temperature = request.temperature ?? context?.settings?.temperature ?? getDefaultTemperature(provider);
   const maxTokens = request.maxTokens ?? context?.settings?.maxTokens ?? 1024;
   const glossary = context?.glossary ?? [];
   const guidelines = context?.guidelines ?? [];

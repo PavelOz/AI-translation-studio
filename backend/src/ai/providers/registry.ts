@@ -2,12 +2,14 @@ import { env } from '../../utils/env';
 import { GeminiProvider } from './gemini.provider';
 import { OpenAIProvider } from './openai.provider';
 import { YandexProvider } from './yandex.provider';
+import { DeepSeekProvider } from './deepseek.provider';
 import type { AIProvider } from './types';
 
 const providers: Record<string, AIProvider> = {
   gemini: new GeminiProvider(env.geminiApiKey, env.geminiModel),
   openai: new OpenAIProvider(env.openAiApiKey, env.openAiModel),
   yandex: new YandexProvider(env.yandexApiKey, env.yandexModel),
+  deepseek: new DeepSeekProvider(env.deepseekApiKey, env.deepseekModel),
 };
 
 export const getProvider = (name?: string, apiKey?: string, yandexFolderId?: string): AIProvider => {
@@ -19,6 +21,7 @@ export const getProvider = (name?: string, apiKey?: string, yandexFolderId?: str
     const { GeminiProvider } = require('./gemini.provider');
     const { OpenAIProvider } = require('./openai.provider');
     const { YandexProvider } = require('./yandex.provider');
+    const { DeepSeekProvider } = require('./deepseek.provider');
     
     switch (normalized) {
       case 'gemini':
@@ -27,6 +30,8 @@ export const getProvider = (name?: string, apiKey?: string, yandexFolderId?: str
         return new OpenAIProvider(apiKey, env.openAiModel);
       case 'yandex':
         return new YandexProvider(apiKey, env.yandexModel, yandexFolderId);
+      case 'deepseek':
+        return new DeepSeekProvider(apiKey, env.deepseekModel);
       default:
         return defaultProvider;
     }
@@ -42,7 +47,8 @@ export const listProviders = () =>
     hasApiKey: Boolean(
       (key === 'gemini' && env.geminiApiKey) ||
         (key === 'openai' && env.openAiApiKey) ||
-        (key === 'yandex' && env.yandexApiKey),
+        (key === 'yandex' && env.yandexApiKey) ||
+        (key === 'deepseek' && env.deepseekApiKey),
     ),
   }));
 

@@ -39,7 +39,7 @@ const updateStatusSchema = z.object({
 });
 
 const aiSettingsSchema = z.object({
-  provider: z.enum(['gemini', 'openai', 'yandex']),
+  provider: z.enum(['gemini', 'openai', 'yandex', 'deepseek']),
   model: z.string(),
   temperature: z.number().min(0).max(1).optional(),
   maxTokens: z.number().positive().optional(),
@@ -184,7 +184,7 @@ const translateSchema = z.object({
   sourceLocale: z.string(),
   targetLocale: z.string(),
   projectId: z.string().uuid().optional(),
-  provider: z.enum(['gemini', 'openai', 'yandex']).optional(),
+  provider: z.enum(['gemini', 'openai', 'yandex', 'deepseek']).optional(),
   model: z.string().optional(),
   temperature: z.number().min(0).max(1).optional(),
   maxTokens: z.number().positive().optional(),
@@ -201,7 +201,7 @@ aiRoutes.post(
 );
 
 const testCredentialsSchema = z.object({
-  provider: z.enum(['gemini', 'openai', 'yandex']),
+  provider: z.enum(['gemini', 'openai', 'yandex', 'deepseek']),
   apiKey: z.string().optional(),
   yandexFolderId: z.string().optional(), // Required for YandexGPT
 });
@@ -221,7 +221,7 @@ const postEditQASchema = z.object({
   sourceLocale: z.string().min(2),
   targetLocale: z.string().min(2),
   projectId: z.string().uuid().optional(),
-  provider: z.enum(['gemini', 'openai', 'yandex']).optional(),
+  provider: z.enum(['gemini', 'openai', 'yandex', 'deepseek']).optional(),
   model: z.string().optional(),
   glossary: z.array(z.object({
     sourceTerm: z.string(),
@@ -261,7 +261,7 @@ const step1DraftSchema = z.object({
   projectId: z.string().uuid().optional(),
   sourceLocale: z.string().optional(),
   targetLocale: z.string().optional(),
-  provider: z.enum(['gemini', 'openai', 'yandex']).optional(),
+  provider: z.enum(['gemini', 'openai', 'yandex', 'deepseek']).optional(),
   model: z.string().optional(),
   apiKey: z.string().optional(),
   temperature: z.number().min(0).max(1).optional(),
@@ -284,7 +284,7 @@ const step2CritiqueSchema = z.object({
   projectId: z.string().uuid().optional(),
   sourceLocale: z.string().optional(),
   targetLocale: z.string().optional(),
-  provider: z.enum(['gemini', 'openai', 'yandex']).optional(),
+  provider: z.enum(['gemini', 'openai', 'yandex', 'deepseek']).optional(),
   model: z.string().optional(),
   apiKey: z.string().optional(),
 });
@@ -316,7 +316,7 @@ const step3FixSchema = z.object({
   projectId: z.string().uuid().optional(),
   sourceLocale: z.string().optional(),
   targetLocale: z.string().optional(),
-  provider: z.enum(['gemini', 'openai', 'yandex']).optional(),
+  provider: z.enum(['gemini', 'openai', 'yandex', 'deepseek']).optional(),
   model: z.string().optional(),
   apiKey: z.string().optional(),
   temperature: z.number().min(0).max(1).optional(),

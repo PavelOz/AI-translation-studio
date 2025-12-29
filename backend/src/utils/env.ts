@@ -21,6 +21,8 @@ export const env = {
   yandexApiKey: process.env.YANDEX_API_KEY ?? '',
   yandexModel: process.env.YANDEX_MODEL ?? 'yandexgpt-lite',
   yandexFolderId: process.env.YANDEX_FOLDER_ID ?? '',
+  deepseekApiKey: process.env.DEEPSEEK_API_KEY ?? '',
+  deepseekModel: process.env.DEEPSEEK_MODEL ?? 'deepseek-chat',
   defaultAIProvider: (process.env.DEFAULT_AI_PROVIDER ?? 'gemini').toLowerCase(),
   aiBatchSize: numberFromEnv(process.env.AI_BATCH_SIZE, 20),
   aiMaxRetries: numberFromEnv(process.env.AI_MAX_RETRIES, 3),

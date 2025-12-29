@@ -14,10 +14,85 @@ export class GeminiProvider extends BaseProvider {
   }
   
   /**
+   * Extract JSON substring from text that may contain "thought trace" or other non-JSON content
+   * Finds the first { or [ and the last matching } or ]
+   * Handles cases where thinking models output reasoning before the JSON
+   * Returns the extracted JSON if found and valid, otherwise returns original text
+   */
+  private extractJsonFromText(text: string): { extracted: string; wasExtracted: boolean } {
+    if (!text) return { extracted: text, wasExtracted: false };
+    
+    // Find first JSON start character
+    const firstBrace = text.indexOf('{');
+    const firstBracket = text.indexOf('[');
+    
+    // Determine which comes first and what type of JSON we're looking for
+    let startIndex = -1;
+    let isArray = false;
+    
+    if (firstBrace === -1 && firstBracket === -1) {
+      // No JSON found, return original text
+      return { extracted: text, wasExtracted: false };
+    } else if (firstBrace === -1) {
+      startIndex = firstBracket;
+      isArray = true;
+    } else if (firstBracket === -1) {
+      startIndex = firstBrace;
+      isArray = false;
+    } else {
+      // Both found, use the one that comes first
+      if (firstBracket < firstBrace) {
+        startIndex = firstBracket;
+        isArray = true;
+      } else {
+        startIndex = firstBrace;
+        isArray = false;
+      }
+    }
+    
+    // Find matching closing character from the end
+    let endIndex = -1;
+    if (isArray) {
+      endIndex = text.lastIndexOf(']');
+    } else {
+      endIndex = text.lastIndexOf('}');
+    }
+    
+    // If we found both start and end, extract the JSON substring
+    if (startIndex !== -1 && endIndex !== -1 && endIndex > startIndex) {
+      const jsonSubstring = text.substring(startIndex, endIndex + 1);
+      
+      // Validate that it's valid JSON by trying to parse it
+      try {
+        JSON.parse(jsonSubstring);
+        return { extracted: jsonSubstring, wasExtracted: true };
+      } catch {
+        // If parsing fails, return original text (might be malformed JSON)
+        logger.warn({
+          startIndex,
+          endIndex,
+          extractedLength: jsonSubstring.length,
+          preview: jsonSubstring.substring(0, 100),
+        }, 'Failed to parse extracted JSON, returning original text');
+        return { extracted: text, wasExtracted: false };
+      }
+    }
+    
+    // If we couldn't find matching brackets, return original text
+    return { extracted: text, wasExtracted: false };
+  }
+  
+  /**
    * Map model names to their correct API versions if needed
    * Older models like gemini-pro may need v1beta, newer models use v1
    */
   private getModelEndpoint(model: string): string {
+    // Thinking models strictly require v1alpha API
+    // Experimental models (exp) also use v1alpha for safety (works in logs)
+    if (model.includes('thinking') || model.includes('exp')) {
+      return 'https://generativelanguage.googleapis.com/v1alpha/models';
+    }
+    
     // Older models that might work better with v1beta
     const v1betaModels = ['gemini-pro'];
     
@@ -120,6 +195,12 @@ export class GeminiProvider extends BaseProvider {
     }
 
     let model = this.ensureModel(request.model);
+    
+    // Map alias to actual model name
+    if (model === 'gemini-thinking') {
+      model = 'gemini-2.0-flash-thinking-exp';
+    }
+    
     let endpoint = this.getModelEndpoint(model);
     
     // First, try to get list of available models to find one that works
@@ -162,9 +243,15 @@ export class GeminiProvider extends BaseProvider {
     if (model.includes('gemini-2.5-pro') || model.includes('gemini-2.5')) {
       modelAttempts.push('gemini-1.5-pro', 'gemini-1.5-pro-001', 'gemini-pro');
     }
-    // Add fallbacks for gemini-2.0 models
+    // Add fallbacks for gemini-2.0 models (including thinking models)
     if (model.includes('gemini-2.0')) {
       modelAttempts.push('gemini-1.5-pro', 'gemini-1.5-pro-001', 'gemini-pro');
+    }
+    // Add support for gemini-2.0-flash-thinking-exp (Reasoning model)
+    if (model.includes('gemini-2.0-flash-thinking') || model === 'gemini-thinking') {
+      modelAttempts.push('gemini-2.0-flash-thinking-exp');
+      // Add fallbacks if thinking model is not available (including non-thinking exp model)
+      modelAttempts.push('gemini-2.0-flash-exp', 'gemini-1.5-pro', 'gemini-1.5-pro-001', 'gemini-pro');
     }
     
     // 2. Try models from the available list
@@ -203,11 +290,15 @@ export class GeminiProvider extends BaseProvider {
         const fullModelName = modelInfo?.fullName || modelAttempt;
         
         // Determine endpoint based on model
+        // Thinking models strictly require v1alpha API
+        // Experimental models (exp) also use v1alpha for safety (works in logs)
         // All newer models (2.0, 2.5, 3.0) use v1 API
         // Older models use v1beta
         // Note: gemini-2.5-pro may not be available in all regions/API versions
         let attemptEndpoint = endpoint;
-        if (modelAttempt === 'gemini-pro' || (!modelAttempt.includes('2.') && !modelAttempt.includes('3.'))) {
+        if (modelAttempt.includes('thinking') || modelAttempt.includes('exp')) {
+          attemptEndpoint = 'https://generativelanguage.googleapis.com/v1alpha/models';
+        } else if (modelAttempt === 'gemini-pro' || (!modelAttempt.includes('2.') && !modelAttempt.includes('3.'))) {
           attemptEndpoint = 'https://generativelanguage.googleapis.com/v1beta/models';
         } else {
           // Newer models (2.0+, 2.5+, 3.0+) use v1 API
@@ -359,7 +450,27 @@ export class GeminiProvider extends BaseProvider {
           throw new Error(`Gemini API error: ${errorMessage}`);
         }
         
-        const outputText = payload?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+        let outputText = payload?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+        
+        // Extract JSON from output if it contains JSON structures
+        // This handles cases where models (especially thinking/reasoning models) output
+        // "thought trace" or other text before the JSON
+        // We check if the text contains JSON-like structures and extract only the JSON part
+        if (outputText && (outputText.includes('{') || outputText.includes('['))) {
+          const originalLength = outputText.length;
+          const { extracted, wasExtracted } = this.extractJsonFromText(outputText);
+          // Only use extracted JSON if we successfully found and extracted valid JSON
+          // This prevents breaking non-JSON responses
+          if (wasExtracted) {
+            outputText = extracted;
+            logger.debug({
+              modelAttempt,
+              originalLength,
+              extractedLength: extracted.length,
+            }, 'Extracted JSON from model output (removed non-JSON content)');
+          }
+        }
+        
         const finishReason = payload.candidates?.[0]?.finishReason;
         
         // Check if response was truncated due to MAX_TOKENS

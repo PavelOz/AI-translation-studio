@@ -39,7 +39,7 @@ export type TranslateTextRequest = {
   sourceLocale: string;
   targetLocale: string;
   projectId?: string;
-  provider?: 'gemini' | 'openai' | 'yandex';
+  provider?: 'gemini' | 'openai' | 'yandex' | 'deepseek';
   model?: string;
   temperature?: number;
   maxTokens?: number;

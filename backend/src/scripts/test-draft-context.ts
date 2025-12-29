@@ -10,8 +10,8 @@
  *   npx ts-node src/scripts/test-draft-context.ts
  * 
  * Environment variables:
- *   - GEMINI_API_KEY, OPENAI_API_KEY, or YANDEX_API_KEY (required)
- *   - AI_PROVIDER (optional, defaults to 'gemini')
+ *   - GEMINI_API_KEY, OPENAI_API_KEY, YANDEX_API_KEY, or DEEPSEEK_API_KEY (required)
+ *   - AI_PROVIDER (optional, defaults to 'openai')
  *   - AI_MODEL (optional, uses provider default)
  */
 
@@ -25,18 +25,35 @@ async function testDraftContext() {
   console.log('');
 
   // Get provider from environment or use default
-  const provider = process.env.AI_PROVIDER || 'gemini';
-  const apiKey = process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY || process.env.YANDEX_API_KEY;
+  const provider = process.env.AI_PROVIDER || 'openai';
+  const model = process.env.AI_MODEL;
+  
+  // Get API key based on provider
+  let apiKey: string | undefined;
+  if (provider === 'gemini') {
+    apiKey = process.env.GEMINI_API_KEY;
+  } else if (provider === 'openai') {
+    apiKey = process.env.OPENAI_API_KEY;
+  } else if (provider === 'yandex') {
+    apiKey = process.env.YANDEX_API_KEY;
+  } else if (provider === 'deepseek') {
+    apiKey = process.env.DEEPSEEK_API_KEY;
+  } else {
+    // Fallback: try to find any available API key
+    apiKey = process.env.GEMINI_API_KEY || process.env.OPENAI_API_KEY || process.env.YANDEX_API_KEY || process.env.DEEPSEEK_API_KEY;
+  }
   
   if (!apiKey) {
     console.error('❌ ERROR: No API key found. Please set one of:');
     console.error('   - GEMINI_API_KEY');
     console.error('   - OPENAI_API_KEY');
     console.error('   - YANDEX_API_KEY');
+    console.error('   - DEEPSEEK_API_KEY');
     process.exit(1);
   }
 
   console.log(`Provider: ${provider}`);
+  console.log(`Model: ${model || 'default'}`);
   console.log(`Source Locale: en`);
   console.log(`Target Locale: ru`);
   console.log('');
@@ -69,8 +86,8 @@ async function testDraftContext() {
       segmentWithContext, 
       {
         provider: provider as any,
-        model: process.env.AI_MODEL,
-        apiKey,
+        model: model,
+        apiKey: apiKey,
         sourceLocale: 'en',
         targetLocale: 'ru'
       }
