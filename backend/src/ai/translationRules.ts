@@ -98,6 +98,14 @@ export const ADDRESS_FORMATTING_RULES: AddressFormattingRule[] = [
       'юридический адрес',
       'БИН', // Often precedes address in company info
       'ИНН', // Tax ID often precedes address
+      'улица', // Full word (not just abbreviation)
+      'проспект', // Full word (not just abbreviation)
+      'район', // District
+      'область', // Region
+      'город', // City
+      'здание', // Building
+      'почтовый индекс', // Postal code
+      'индекс', // Postal code (short)
     ],
     instructions: `CRITICAL: Address Detection and Standardization (RU → EN)
 

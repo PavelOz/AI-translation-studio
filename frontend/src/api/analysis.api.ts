@@ -78,14 +78,25 @@ export type StageMonitoringData = {
 };
 
 export const analysisApi = {
-  triggerAnalysis: async (documentId: string, forceReset: boolean = false, glossaryMode: 'fast' | 'deep' = 'fast'): Promise<{
+  triggerAnalysis: async (
+    documentId: string, 
+    forceReset: boolean = false, 
+    glossaryMode: 'fast' | 'deep' = 'fast',
+    provider?: string,
+    model?: string
+  ): Promise<{
     status: string;
     message?: string;
   }> => {
     const response = await apiClient.post<{
       status: string;
       message?: string;
-    }>(`/documents/${documentId}/analyze`, { forceReset, glossaryMode });
+    }>(`/documents/${documentId}/analyze`, { 
+      forceReset, 
+      glossaryMode,
+      provider,
+      model,
+    });
     return response.data;
   },
 

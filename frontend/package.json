@@ -9,8 +9,10 @@
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0"
   },
   "dependencies": {
+    "@types/diff-match-patch": "^1.0.36",
     "axios": "^1.7.7",
     "date-fns": "^3.6.0",
+    "diff-match-patch": "^1.0.5",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-hot-toast": "^2.4.1",

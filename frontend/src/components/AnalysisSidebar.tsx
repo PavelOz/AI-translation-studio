@@ -13,6 +13,9 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
   
   // Glossary mode selection state
   const [glossaryMode, setGlossaryMode] = useState<'fast' | 'deep'>('fast');
+  
+  // Glossary engine selection state
+  const [glossaryEngine, setGlossaryEngine] = useState<'standard' | 'deepseek'>('standard');
 
   // Track previous status to detect status changes
   const previousStatusRef = useRef<AnalysisStatus | undefined>(undefined);
@@ -177,7 +180,11 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
 
   // Trigger analysis mutation
   const triggerAnalysisMutation = useMutation({
-    mutationFn: () => analysisApi.triggerAnalysis(documentId, false, glossaryMode),
+    mutationFn: () => {
+      const provider = glossaryEngine === 'deepseek' ? 'deepseek' : undefined;
+      const model = glossaryEngine === 'deepseek' ? 'deepseek-reasoner' : undefined;
+      return analysisApi.triggerAnalysis(documentId, false, glossaryMode, provider, model);
+    },
     onSuccess: () => {
       toast.success('Analysis started! This may take a moment...');
       console.log('Analysis started, invalidating queries and starting polling');
@@ -213,7 +220,11 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
 
   // Force reset mutation (wipes all data and re-runs analysis)
   const forceResetMutation = useMutation({
-    mutationFn: () => analysisApi.triggerAnalysis(documentId, true, glossaryMode),
+    mutationFn: () => {
+      const provider = glossaryEngine === 'deepseek' ? 'deepseek' : undefined;
+      const model = glossaryEngine === 'deepseek' ? 'deepseek-reasoner' : undefined;
+      return analysisApi.triggerAnalysis(documentId, true, glossaryMode, provider, model);
+    },
     onSuccess: () => {
       toast.success('Force reset analysis started! All existing data will be cleared...');
       // Immediately invalidate glossary queries (data is being flushed on backend)
@@ -441,6 +452,28 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
                 </span>
               </label>
             </div>
+          </div>
+
+          {/* Glossary Engine Selection */}
+          <div className="mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
+            <label htmlFor="glossary-engine" className="block text-xs font-medium text-gray-700 mb-2">
+              Glossary Extraction Engine:
+            </label>
+            <select
+              id="glossary-engine"
+              value={glossaryEngine}
+              onChange={(e) => setGlossaryEngine(e.target.value as 'standard' | 'deepseek')}
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+              disabled={isRunning || triggerAnalysisMutation.isPending || forceResetMutation.isPending}
+            >
+              <option value="standard">⚡ Standard (Gemini/GPT)</option>
+              <option value="deepseek">🧠 DeepSeek R1 (Deep Analysis)</option>
+            </select>
+            {glossaryEngine === 'deepseek' && (
+              <p className="text-xs text-gray-500 mt-2 italic">
+                Takes longer (1-2 mins) but produces higher precision terms.
+              </p>
+            )}
           </div>
           
           <button
@@ -837,6 +870,28 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
                 </label>
               </div>
             </div>
+          </div>
+
+          {/* Glossary Engine Selection */}
+          <div className="mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
+            <label htmlFor="glossary-engine-completed" className="block text-xs font-medium text-gray-700 mb-2">
+              Glossary Extraction Engine:
+            </label>
+            <select
+              id="glossary-engine-completed"
+              value={glossaryEngine}
+              onChange={(e) => setGlossaryEngine(e.target.value as 'standard' | 'deepseek')}
+              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+              disabled={isRunning || triggerAnalysisMutation.isPending || forceResetMutation.isPending}
+            >
+              <option value="standard">⚡ Standard (Gemini/GPT)</option>
+              <option value="deepseek">🧠 DeepSeek R1 (Deep Analysis)</option>
+            </select>
+            {glossaryEngine === 'deepseek' && (
+              <p className="text-xs text-gray-500 mt-2 italic">
+                Takes longer (1-2 mins) but produces higher precision terms.
+              </p>
+            )}
           </div>
 
           {/* Action Button */}

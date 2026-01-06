@@ -30,6 +30,74 @@ import { logger } from '../utils/logger';
 import { generateEmbeddingForEntry } from './embedding-generation.service';
 import { stripFormattingTags } from '../utils/segmentation';
 
+/**
+ * Extract all numbers from text (simple approach without complex regex)
+ * Returns an array of all digit sequences found in the text
+ */
+const extractNumbers = (text: string): string[] => {
+  const numbers: string[] = [];
+  let currentNumber = '';
+  
+  // Simple character-by-character scan to find all digit sequences
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (/\d/.test(char)) {
+      // Accumulate digits
+      currentNumber += char;
+    } else {
+      // Non-digit character - if we have accumulated digits, save them
+      if (currentNumber.length > 0) {
+        numbers.push(currentNumber);
+        currentNumber = '';
+      }
+    }
+  }
+  
+  // Don't forget the last number if text ends with digits
+  if (currentNumber.length > 0) {
+    numbers.push(currentNumber);
+  }
+  
+  return numbers;
+};
+
+/**
+ * Extract critical factual data (numbers) from text
+ * Returns an array of all numbers found in the text
+ */
+const extractFactualData = (text: string): string[] => {
+  // Simply extract all numbers - no complex regex needed
+  return extractNumbers(text);
+};
+
+/**
+ * Check if there are critical factual differences between two texts
+ * Returns true if critical data (numbers, dates) differ
+ */
+const checkFactualDifferences = (source: string, candidate: string): boolean => {
+  const sourceFactual = new Set(extractFactualData(source));
+  const candidateFactual = new Set(extractFactualData(candidate));
+  
+  // If one has factual data and the other doesn't, or counts differ, it's a critical difference
+  if (sourceFactual.size !== candidateFactual.size) {
+    return true;
+  }
+  
+  // If no factual data in either, no critical difference
+  if (sourceFactual.size === 0) {
+    return false;
+  }
+  
+  // Check if all factual data matches (order-independent)
+  for (const item of sourceFactual) {
+    if (!candidateFactual.has(item)) {
+      return true; // Found a mismatch in factual data
+    }
+  }
+  
+  return false;
+};
+
 const tmxParser = new XMLParser({ ignoreAttributes: false });
 
 // Simple in-memory cache for recent searches (LRU-style, max 100 entries)
@@ -512,19 +580,29 @@ export const searchTranslationMemory = async ({
       }
       
       // Quick pre-filter: exact match check (fastest)
+      // But still check for factual differences (contract numbers, dates) even if normalized text matches
       if (normalizedSource === entryText) {
+        // Check for critical factual differences even in exact normalized matches
+        // This prevents 100% matches when contract numbers, dates, or other factual data differ
+        const hasFactualDiff = checkFactualDifferences(cleanSourceText, entry.sourceText);
+        const finalScore = hasFactualDiff ? 95 : 100; // Cap at 95% if factual data differs
+        
         scored.push({
           ...entry,
           scope,
-          fuzzyScore: 100,
-          similarity: { score: 100, levenshteinRatio: 1, tokenOverlapRatio: 1 },
+          fuzzyScore: finalScore,
+          similarity: { 
+            score: finalScore, 
+            levenshteinRatio: 1, 
+            tokenOverlapRatio: 1 
+          },
           tmxFileName: entry.tmxFile?.filename || entry.tmxFile?.name,
           tmxFileSource: entry.tmxFile ? (entry.tmxFile.lastImportedAt ? 'imported' : 'linked') : undefined,
           searchMethod: 'fuzzy' as const,
           entryType: entry.entryType ?? undefined, // Explicitly preserve entryType
         });
-        // If we found a perfect match, we can stop early
-        if (scored.length >= normalizedLimit) {
+        // If we found a perfect match (100%), we can stop early
+        if (finalScore === 100 && scored.length >= normalizedLimit) {
           break;
         }
         continue;

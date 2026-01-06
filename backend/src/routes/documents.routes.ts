@@ -279,6 +279,8 @@ documentRoutes.get(
 const analyzeSchema = z.object({
   forceReset: z.boolean().optional(),
   glossaryMode: z.enum(['fast', 'deep']).optional(),
+  provider: z.string().optional(), // AI provider for glossary extraction (e.g., 'deepseek')
+  model: z.string().optional(), // AI model for glossary extraction (e.g., 'deepseek-reasoner')
 });
 
 documentRoutes.post(
@@ -287,12 +289,14 @@ documentRoutes.post(
     const payload = analyzeSchema.parse(req.body ?? {});
     const forceReset = payload.forceReset === true;
     const glossaryMode = (payload.glossaryMode === 'deep' ? 'deep' : 'fast') as 'fast' | 'deep';
-    runFullAnalysis(req.params.documentId, forceReset, glossaryMode)
+    const provider = payload.provider;
+    const model = payload.model;
+    runFullAnalysis(req.params.documentId, forceReset, glossaryMode, provider, model)
       .then(() => {})
       .catch((error) => {
         logger.error({ documentId: req.params.documentId, error }, 'Analysis failed');
       });
-    res.json({ status: 'started', documentId: req.params.documentId, glossaryMode });
+    res.json({ status: 'started', documentId: req.params.documentId, glossaryMode, provider, model });
   }),
 );
 

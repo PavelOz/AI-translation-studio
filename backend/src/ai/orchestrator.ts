@@ -397,7 +397,7 @@ export class AIOrchestrator {
     
     // Smart Injection: Detect if batch contains addresses before including address rules
     // Keywords detecting generic address components (RU/EN/KZ context)
-    const addressKeywords = /адрес|address|ул\.|st\.|street|просп|пр\.|ave\.|avenue|мкр\.|microdistrict|бц|офис|office|бин|bin|дом\s+\d|house\s+\d|расположен|located|находится|по\s+адресу/i;
+    const addressKeywords = /адрес|address|ул\.|улица|st\.|street|просп|проспект|пр\.|ave\.|avenue|мкр\.|microdistrict|бц|офис|office|бин|bin|дом\s+\d|house\s+\d|расположен|located|находится|по\s+адресу|район|область|город|здание|почтовый\s+индекс|индекс/i;
     
     // Check if ANY segment in the batch contains address keywords
     const containsAddress = batch.some(seg => addressKeywords.test(seg.sourceText));

@@ -3,6 +3,7 @@ import { tmApi } from '../../api/tm.api';
 import type { TmSearchResult } from '../../api/tm.api';
 import { segmentsApi } from '../../api/segments.api';
 import { stripFormattingMarkers } from '../../utils/formatting';
+import { processTmMatch } from '../../utils/tm-repair.utils';
 import toast from 'react-hot-toast';
 
 interface TMSuggestionsPanelProps {
@@ -484,6 +485,13 @@ export default function TMSuggestionsPanel({
       return;
     }
 
+    // Process the match to get repaired target (with numbers fixed)
+    const { repairedTarget } = processTmMatch(
+      sourceText,
+      suggestion.sourceText,
+      suggestion.targetText
+    );
+
     // Determine if this is a sentence-level match
     const isSentence = suggestion.entryType === 'sentence';
     const isParagraph = suggestion.entryType === 'paragraph' || !suggestion.entryType;
@@ -500,11 +508,11 @@ export default function TMSuggestionsPanel({
     
     if (isSentence && hasExistingText) {
       // Append sentence to existing text with space separator
-      finalText = `${currentTargetText.trim()} ${suggestion.targetText.trim()}`;
+      finalText = `${currentTargetText.trim()} ${repairedTarget.trim()}`;
       actionType = 'append';
     } else {
       // Replace entire segment (for paragraphs or empty segments with sentence matches)
-      finalText = suggestion.targetText;
+      finalText = repairedTarget;
       actionType = 'insert';
     }
 
@@ -913,6 +921,13 @@ export default function TMSuggestionsPanel({
             const isSentence = suggestion.entryType === 'sentence';
             const isParagraph = suggestion.entryType === 'paragraph' || !suggestion.entryType; // Default to paragraph if null/undefined
             
+            // Process TM match for visual diff and number repair
+            const { diffHtml, repairedTarget, isRepaired } = processTmMatch(
+              sourceText,
+              suggestion.sourceText,
+              suggestion.targetText
+            );
+            
             return (
             <div
               key={suggestion.id || index}
@@ -950,19 +965,76 @@ export default function TMSuggestionsPanel({
                     )}
                   </div>
                   
-                  {/* Source Text - Clean, professional display */}
+                  {/* Source Text - Visual diff display */}
                   <div className="mb-2">
                     <div className="text-xs text-gray-500 mb-1 font-medium">Source:</div>
-                    <div className="text-sm text-gray-700 bg-gray-50 p-2 rounded border border-gray-200">
-                      {stripFormattingMarkers(suggestion.sourceText)}
-                    </div>
+                    <div 
+                      className="text-sm text-gray-700 bg-gray-50 p-2 rounded border border-gray-200"
+                      dangerouslySetInnerHTML={{ __html: diffHtml }}
+                    />
                   </div>
                   
-                  {/* Target Text - Clean, professional display */}
+                  {/* Target Text - Display repaired target with diff highlighting */}
                   <div>
                     <div className="text-xs text-gray-500 mb-1 font-medium">Target:</div>
                     <div className="text-sm font-medium text-gray-900 bg-white p-2 rounded border border-gray-200">
-                      {stripFormattingMarkers(suggestion.targetText)}
+                      {(() => {
+                        // Show differences if currentTargetText exists and is different
+                        // Works for both text matches and meaning matches (vector/hybrid)
+                        const isMeaningMatch = suggestion.searchMethod === 'vector' || suggestion.searchMethod === 'hybrid';
+                        if (currentTargetText && currentTargetText.trim() && !isPerfectMatch) {
+                          const differences = getTextDifferences(currentTargetText, repairedTarget);
+                          if (differences && differences.length > 0) {
+                            const hasRemoved = differences.some(d => d.type === 'removed');
+                            const hasAdded = differences.some(d => d.type === 'added');
+                            
+                            if (hasRemoved || hasAdded) {
+                              return (
+                                <div>
+                                  {/* TM Match Text with strikethrough for removed parts */}
+                                  <span>
+                                    {differences.map((diff, idx) => {
+                                      if (diff.type === 'removed') {
+                                        // Text in TM but not in current - strikethrough (non-existent in current)
+                                        return (
+                                          <span key={idx} className="line-through text-red-600 bg-red-50 px-0.5 rounded">
+                                            {diff.text}
+                                          </span>
+                                        );
+                                      } else if (diff.type === 'added') {
+                                        // Text in current but not in TM - skip in TM display (will show separately)
+                                        return null;
+                                      } else {
+                                        // Unchanged text
+                                        return <span key={idx}>{diff.text}</span>;
+                                      }
+                                    })}
+                                  </span>
+                                  {/* Show new words from current segment */}
+                                  {hasAdded && (
+                                    <div className="mt-2 pt-2 border-t border-gray-200">
+                                      <span className="text-xs text-gray-500 font-medium">
+                                        {isMeaningMatch ? 'New in current (semantic match):' : 'New in current:'}
+                                      </span>{' '}
+                                      <span>
+                                        {differences
+                                          .filter(d => d.type === 'added')
+                                          .map((diff, idx) => (
+                                            <span key={idx} className="bg-green-100 text-green-800 px-1 rounded font-medium">
+                                              {diff.text}
+                                            </span>
+                                          ))}
+                                      </span>
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            }
+                          }
+                        }
+                        // Fallback to repaired target text
+                        return stripFormattingMarkers(repairedTarget);
+                      })()}
                     </div>
                   </div>
                 </div>
@@ -970,19 +1042,29 @@ export default function TMSuggestionsPanel({
                 {/* Match Score - Prominent */}
                 <div className="text-right">
                   <div className="text-xs text-gray-500 mb-0.5">Match</div>
-                  <span 
-                    className={`text-lg font-bold ${
-                      suggestion.fuzzyScore === 100
-                        ? 'text-yellow-600'
-                        : suggestion.fuzzyScore >= 95
-                          ? 'text-green-600'
-                          : suggestion.fuzzyScore >= 85
-                            ? 'text-blue-600'
-                            : 'text-gray-600'
-                    }`}
-                  >
-                    {suggestion.fuzzyScore}%
-                  </span>
+                  <div className="flex items-center gap-1">
+                    <span 
+                      className={`text-lg font-bold ${
+                        suggestion.fuzzyScore === 100
+                          ? 'text-yellow-600'
+                          : suggestion.fuzzyScore >= 95
+                            ? 'text-green-600'
+                            : suggestion.fuzzyScore >= 85
+                              ? 'text-blue-600'
+                              : 'text-gray-600'
+                      }`}
+                    >
+                      {suggestion.fuzzyScore}%
+                    </span>
+                    {isRepaired && (
+                      <span 
+                        className="text-xs px-1.5 py-0.5 rounded bg-purple-100 text-purple-800 border border-purple-300 font-medium"
+                        title="Numbers/dates were automatically repaired to match the source text"
+                      >
+                        ✨ Auto-Repaired
+                      </span>
+                    )}
+                  </div>
                 </div>
                 {/* Search Method Badge */}
                 {suggestion.searchMethod && (

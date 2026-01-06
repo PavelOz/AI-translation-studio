@@ -1787,7 +1787,134 @@ Return a JSON array of terms that pass ALL checks above.`;
   return chunkPrompt;
 };
 
-const getSystemPrompt = (mode: 'fast' | 'deep', domain?: string | null): string => {
+/**
+ * Helper function to detect if a model is a reasoning model (DeepSeek R1)
+ */
+const isReasoningModel = (providerName?: string, modelName?: string): boolean => {
+  if (!providerName || !modelName) return false;
+  const providerLower = providerName.toLowerCase();
+  const modelLower = modelName.toLowerCase();
+  
+  // DeepSeek R1 (reasoner) models
+  if (providerLower === 'deepseek' && (modelLower.includes('reasoner') || modelLower.includes('r1'))) {
+    return true;
+  }
+  
+  return false;
+};
+
+const getSystemPrompt = (
+  mode: 'fast' | 'deep', 
+  domain?: string | null,
+  providerName?: string,
+  modelName?: string
+): string => {
+  const isReasoning = isReasoningModel(providerName, modelName);
+  
+  // DeepSeek R1 Reasoning Model Prompt
+  if (isReasoning) {
+    const reasoningBaseInstructions = `
+You are a Forensic Terminologist (Deep Analysis Mode). Your PRIMARY GOAL is to analyze the provided CANDIDATE LIST against the source text context and extract valid technical terms with high precision.
+
+🧠 REASONING MODE ENABLED:
+- You are encouraged to use your reasoning capabilities to analyze each candidate term.
+- Think through whether each candidate is a valid technical term, proper noun, or domain-specific terminology.
+- Use your reasoning to filter out false positives (common words, fragments, non-technical phrases).
+- Consider the context and domain when making extraction decisions.
+- Focus on PRECISION over speed - better to extract fewer high-quality terms than many low-quality ones.
+
+🚨 OUTPUT FORMAT: After your reasoning process, return RAW JSON ONLY. NO Markdown formatting around the JSON.
+
+**CRITICAL: ANALYTICAL MINDSET**
+- I have provided a list of **Raw Candidates** below. Your job is to ANALYZE and FILTER them.
+- You are an ANALYST, not just a processor. Use your reasoning to evaluate each candidate.
+- For each candidate, reason about:
+  1. Is it a valid technical term, proper noun, or domain-specific phrase?
+  2. Does it appear VERBATIM in the Source Text?
+  3. Is it a complete term (not a fragment like "of the" or "by the")?
+  4. Would this term benefit from consistent translation across the document?
+- Extract terms that pass ALL your reasoning checks.
+- The candidate list contains pre-filtered terms - use your reasoning to validate and refine them.
+`;
+
+    const reasoningDeepInstructions = `
+🚀 DEEP MODE + REASONING: CONTEXT EXPANSION WITH ANALYSIS
+The "Frequent Phrases" list provided below contains BROKEN FRAGMENTS.
+Your job is to REPAIR them using the Source Text, but also REASON about their validity.
+
+**REASONING-BASED ALGORITHM:**
+1. Pick a candidate from the list (e.g., "composite toecap").
+2. REASON: Is this a valid technical term fragment, or just noise?
+3. LOCATE it in the Source Text (if valid).
+4. EXPAND the selection to capture the **FULL TECHNICAL DESCRIPTION**.
+5. REASON: Does the expanded phrase represent a complete, meaningful technical term?
+6. NORMALIZE to Nominative Singular (if appropriate).
+
+**REASONING CHECKS:**
+- ✅ GOOD: "Leather boots with rigid composite toecap" - Complete equipment description
+- ❌ BAD: "rigid composite" alone - Fragment without context
+- ✅ GOOD: "Protective suit" - Complete term
+- ❌ BAD: "of the company" - Prepositional fragment
+
+**💎 DIAMOND RULE (TABLE EXTRACTION):**
+- The document ends with Annexes/Tables containing Equipment Lists.
+- These items are often **LONG PHRASES** (e.g., "Insulated leather boots with high tops and composite toe").
+- **REASON:** These long descriptions are SINGLE TECHNICAL TERMS - extract them as complete units.
+- **EXTRACT THE ENTIRE PHRASE.** Do not shorten it.
+
+**PRECISION FOCUS:**
+- TARGET: Extract 80-120 high-precision terms (quality over quantity).
+- Use reasoning to avoid false positives.
+- Better to miss a borderline term than extract a false positive.
+- GRANULARITY: Do NOT merge variants. If "Winter Suit" and "Summer Suit" exist, extract BOTH.
+`;
+
+    const reasoningAntiPatterns = `
+🚫 STRICT ANTI-PATTERNS (Use reasoning to detect these):
+- NO VERBS: Reject phrases with "is", "are", "signed", "ensure".
+- NO FRAGMENTS: Reject "of the company", "by the law", "for the".
+- NO CASES: Normalize everything to NOMINATIVE SINGULAR (Dictionary Form).
+- NO COMMON WORDS: Use reasoning to reject generic terms that don't need glossary entries.
+`;
+
+    const reasoningDataCleaningRules = `
+**DATA CLEANING RULES (MANDATORY):**
+1. **NORMALIZE GRAMMAR:** You MUST convert all terms to **Nominative Singular** (Dictionary Form).
+   - *Bad:* "работников" (Genitive) -> *Good:* "работник" (Nominative)
+   - *Bad:* "сапоги" (Plural) -> *Good:* "сапог" (Singular) [Exception: Keep plural if the item is always plural, like "glasses/очки"]
+   - *Bad:* "коллективного договора" -> *Good:* "коллективный договор"
+
+2. **PURGE GARBAGE (Use reasoning to identify):**
+   - DELETE any term that is a preposition ("для", "на") or a common time unit ("год", "месяц").
+   - DELETE fragments ending in prepositions ("boots with" / "сапоги с").
+   - DELETE generic terms that don't require consistent translation.
+
+3. **EQUIPMENT LISTS:**
+   - The document contains lists of PPE (boots, suits). Extract the **full noun phrase**.
+   - *Bad:* "плащ"
+   - *Good:* "плащ непромокаемый"
+`;
+
+    const reasoningVerbatimVerificationRules = `
+🔍 **VERBATIM VERIFICATION (CRITICAL - MANDATORY):**
+- Before adding ANY term to your output, you MUST verify it appears VERBATIM in the Source Text.
+- Use reasoning to ensure the term exists exactly as extracted.
+- Extract terms EXACTLY as they appear in the source text (keep original case, plural, grammar).
+- Do NOT create or invent terms that don't exist in the source text.
+- Do NOT extract placeholder terms like "sample term", "another term", or "technical term".
+- If a term does not appear VERBATIM in the source text, DO NOT extract it.
+- The "sourceTerm" field MUST match the exact string found in the source text.
+`;
+
+    // Add domain context if available
+    const domainSection = domain ? `\n**DOMAIN CONTEXT:** ${domain}\nExtract terminology specific to this domain. Use reasoning to identify domain-relevant terms.` : '';
+    
+    const reasoningPrompt = `${reasoningBaseInstructions}\n${mode === 'deep' ? reasoningDeepInstructions : ''}\n${reasoningAntiPatterns}\n${reasoningDataCleaningRules}\n${reasoningVerbatimVerificationRules}${domainSection}`;
+    
+    return reasoningPrompt;
+  }
+  
+  // Standard Model Prompt (Original - for Gemini, OpenAI, etc.)
   const baseInstructions = `
 You are a Forensic Terminologist. Your PRIMARY GOAL is to REVIEW the provided CANDIDATE LIST and extract valid technical terms from it.
 🚨 OUTPUT FORMAT: RAW JSON ONLY. NO "Thinking", NO Markdown formatting.
@@ -2104,7 +2231,8 @@ const executeDeepMode = async (
   console.log(`[Stage 5] Processing ${chunks.length} batches of ~${CHUNK_SIZE} items.`);
 
   // Get system prompt if not provided
-  const finalSystemPrompt = systemPrompt || getSystemPrompt('deep', domain);
+  // Pass provider and model to getSystemPrompt for reasoning model detection
+  const finalSystemPrompt = systemPrompt || getSystemPrompt('deep', domain, provider?.name, model);
   // #region agent log
   fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2031',message:'executeDeepMode: System prompt check',data:{hasSystemPromptParam:!!systemPrompt,usedFallback:!systemPrompt,finalSystemPromptLength:finalSystemPrompt.length,hasVerbatimInSystem:finalSystemPrompt.includes('VERBATIM')||finalSystemPrompt.includes('verbatim'),hasVerbatimInSystemUpper:finalSystemPrompt.includes('VERBATIM'),hasVerbatimInSystemLower:finalSystemPrompt.includes('verbatim'),systemPromptPreview:finalSystemPrompt.substring(0,200)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
   // #endregion
@@ -2173,16 +2301,22 @@ const executeDeepMode = async (
         // #region agent log
         fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2089',message:'executeDeepMode: Before AI call',data:{batch:index+1,userPromptLength:userPrompt.length,systemPromptLength:finalSystemPrompt.length,totalPromptLength:userPrompt.length+finalSystemPrompt.length,model,maxTokens:maxResponseTokens,chunkSize:chunk.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
         // #endregion
+        // Ensure temperature is explicitly 0.0 for DeepSeek (especially reasoning models)
+        const chunkFinalTemperature = 0.0;
+        
         const chunkAiCallPromise = provider.callModel({
           prompt: userPrompt,
           systemPrompt: finalSystemPrompt,
           model,
-          temperature: 0,
+          temperature: chunkFinalTemperature,
           maxTokens: maxResponseTokens,
           segments: [],
         });
 
-        const chunkTimeoutSeconds = 240; // Deep mode: 240s
+        // Increase timeout for reasoning models in batch processing
+        const chunkIsReasoning = isReasoningModel(provider?.name, model);
+        const chunkBaseTimeout = 240; // Deep mode: 240s
+        const chunkTimeoutSeconds = chunkIsReasoning ? chunkBaseTimeout * 2 : chunkBaseTimeout; // Double timeout for reasoning models
         const chunkTimeoutPromise = new Promise<never>((_, reject) => {
           setTimeout(() => {
             reject(new Error(`Batch ${index + 1} timeout after ${chunkTimeoutSeconds} seconds`));
@@ -2330,7 +2464,9 @@ const executeDeepMode = async (
  */
 export const extractGlossary = async (
   documentId: string,
-  mode: 'fast' | 'deep' = 'fast'
+  mode: 'fast' | 'deep' = 'fast',
+  providerOverride?: string,
+  modelOverride?: string
 ): Promise<{ count: number }> => {
   // Clear previous logs when starting new extraction (use raw SQL to work even if Prisma client is out of sync)
   await prisma.$executeRawUnsafe(
@@ -2555,8 +2691,28 @@ export const extractGlossary = async (
     }
   }
   
-  const provider = getProvider(aiSettings?.provider, apiKey, yandexFolderId);
-  let model = aiSettings?.model ?? provider.defaultModel;
+  // Use override provider/model if provided, otherwise use project settings
+  const finalProvider = providerOverride || aiSettings?.provider;
+  const finalModel = modelOverride || aiSettings?.model;
+  
+  const provider = getProvider(finalProvider, apiKey, yandexFolderId);
+  let model = finalModel ?? provider.defaultModel;
+  
+  // Log if overrides are being used
+  if (providerOverride || modelOverride) {
+    logger.info(
+      {
+        documentId,
+        providerOverride,
+        modelOverride,
+        finalProvider,
+        finalModel,
+        providerName: provider.name,
+        modelUsed: model,
+      },
+      'Using provider/model overrides for glossary extraction',
+    );
+  }
   
   // For glossary extraction, avoid gemini-2.5-pro and gemini-2.5-flash
   // These models use too many tokens for "thoughts" (8189+ tokens), leaving no room for output
@@ -2588,7 +2744,8 @@ export const extractGlossary = async (
   // Step 5: Call AI for filtering and hunting with Universal Forensic Extractor
   // REFACTOR: Use helper function for prompt generation
   // Stage 4: AI Prompt Construction
-  const systemPrompt = getSystemPrompt(mode, domain);
+  // Pass provider and model to getSystemPrompt for reasoning model detection
+  const systemPrompt = getSystemPrompt(mode, domain, provider.name, model);
   
   // Stage 4 Validation: Verify critical instructions present
   const hasTableRowInstructions = systemPrompt.includes('TABLE ROW') || systemPrompt.includes('table row');
@@ -3099,16 +3256,35 @@ Return a JSON array of terms that pass ALL checks above.`;
         `AI call parameters: ~${estimatedPromptTokens} prompt tokens, ${maxResponseTokens} max response tokens`,
       );
       
+      // Ensure temperature is explicitly 0.0 for DeepSeek (especially reasoning models)
+      const finalTemperature = 0.0;
+      
       const aiCallPromise = provider.callModel({
         prompt: userPrompt,
         systemPrompt,
         model,
-        temperature: 0,
+        temperature: finalTemperature,
         maxTokens: maxResponseTokens,
         segments: [],
       });
 
-      const timeoutSeconds = mode === 'deep' ? 240 : 180; // Deep mode: 240s, Fast mode: 180s
+      // Increase timeout for reasoning models (DeepSeek R1 is slower)
+      const isReasoning = isReasoningModel(provider.name, model);
+      const baseTimeout = mode === 'deep' ? 240 : 180;
+      const timeoutSeconds = isReasoning ? baseTimeout * 2 : baseTimeout; // Double timeout for reasoning models
+      
+      if (isReasoning) {
+        logger.info(
+          {
+            documentId,
+            provider: provider.name,
+            model,
+            timeoutSeconds,
+            reason: 'Reasoning model detected - using extended timeout',
+          },
+          'Using extended timeout for reasoning model',
+        );
+      }
       
       // #region agent log
         fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1327',message:'Before AI call (single batch)',data:{mode,timeoutSeconds,termsToSendToAICount:termsToSendToAI.length,sourceTextLength:sourceTextForAI.length,estimatedPromptTokens,maxResponseTokens,providerName:provider?.name,providerType:typeof provider,hasProvider:!!provider,hasCallModel:!!provider?.callModel,model,hasModel:!!model},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
@@ -6345,7 +6521,9 @@ Analyze this text and extract all formatting and style rules. Return a JSON arra
 export const runFullAnalysis = async (
   documentId: string,
   forceReset: boolean = false,
-  glossaryMode: 'fast' | 'deep' = 'fast'
+  glossaryMode: 'fast' | 'deep' = 'fast',
+  provider?: string,
+  model?: string
 ): Promise<{
   glossaryCount: number;
   styleRulesCount: number;
@@ -6527,7 +6705,7 @@ export const runFullAnalysis = async (
     // This ensures that if one extraction fails (e.g., rate limit), the other can still complete
     // We'll handle partial failures gracefully and report what succeeded
     const [glossarySettlement, styleRulesSettlement] = await Promise.allSettled([
-      extractGlossary(documentId, glossaryMode), // Use provided mode (fast or deep)
+      extractGlossary(documentId, glossaryMode, provider, model), // Use provided mode (fast or deep) and AI provider/model
       extractStyleRules(documentId),
     ]);
     

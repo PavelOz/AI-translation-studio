@@ -48,3 +48,16 @@
   transform: translateX(-100%);
 }
 
+/* Diff styling for TM match visual diffs */
+.diff-del {
+  background-color: #ffeef0;
+  text-decoration: line-through;
+  color: #b31d28;
+}
+
+.diff-add {
+  background-color: #e6ffed;
+  text-decoration: none;
+  color: #22863a;
+}
+
