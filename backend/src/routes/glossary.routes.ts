@@ -30,7 +30,9 @@ const upsertSchema = z.object({
 });
 
 const importSchema = z.object({
-  projectId: z.string().uuid().optional(),
+  projectId: z.union([z.string().uuid(), z.literal('')]).optional().transform((val) => val === '' ? undefined : val),
+  sourceLocale: z.string().min(1),
+  targetLocale: z.string().min(1),
 });
 
 const searchSchema = z.object({
@@ -87,7 +89,12 @@ glossaryRoutes.post(
       throw ApiError.badRequest('Glossary file is required');
     }
     const payload = importSchema.parse(req.body);
-    const result = await importGlossaryCsv(req.file.buffer, payload.projectId);
+    const result = await importGlossaryCsv(
+      req.file.buffer, 
+      payload.projectId,
+      payload.sourceLocale,
+      payload.targetLocale
+    );
     res.status(201).json(result);
   }),
 );

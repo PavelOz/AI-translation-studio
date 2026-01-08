@@ -507,7 +507,16 @@ function parseCsvRow(row: string, delimiter: string = ','): string[] {
   return columns;
 }
 
-export const importGlossaryCsv = async (buffer: Buffer, projectId?: string) => {
+export const importGlossaryCsv = async (
+  buffer: Buffer, 
+  projectId: string | undefined,
+  sourceLocale: string,
+  targetLocale: string
+) => {
+  if (!sourceLocale || !targetLocale) {
+    throw ApiError.badRequest('sourceLocale and targetLocale are required');
+  }
+
   const content = buffer.toString('utf-8');
   
   // Detect delimiter (comma or semicolon)
@@ -552,9 +561,7 @@ export const importGlossaryCsv = async (buffer: Buffer, projectId?: string) => {
         return null;
       }
       
-      // Generate direction from sourceLocale and targetLocale
-      const sourceLocale = 'source'; // TODO: Should be provided in CSV or request
-      const targetLocale = 'target'; // TODO: Should be provided in CSV or request
+      // Use provided sourceLocale and targetLocale
       const direction = `${sourceLocale}-${targetLocale}`;
       
       return {
@@ -571,15 +578,48 @@ export const importGlossaryCsv = async (buffer: Buffer, projectId?: string) => {
     })
     .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
 
-  // Use skipDuplicates to prevent duplicate entries during import
-  // This will skip entries that have the same combination of:
-  // sourceTerm, targetTerm, sourceLocale, targetLocale, and projectId
-  const result = await prisma.glossaryEntry.createMany({
-    data: entries,
-    skipDuplicates: true, // Skip duplicates instead of throwing error
-  });
+  if (entries.length === 0) {
+    throw ApiError.badRequest('No valid entries found in CSV file. Please ensure the file contains term_source and term_target columns with data.');
+  }
 
-  return { imported: result.count };
+  // Validate entries before attempting to create
+  for (const entry of entries) {
+    if (!entry.sourceTerm || !entry.targetTerm || !entry.sourceLocale || !entry.targetLocale) {
+      throw ApiError.badRequest(`Invalid entry: missing required fields. sourceTerm: ${entry.sourceTerm}, targetTerm: ${entry.targetTerm}, sourceLocale: ${entry.sourceLocale}, targetLocale: ${entry.targetLocale}`);
+    }
+    if (entry.sourceTerm.length === 0 || entry.targetTerm.length === 0) {
+      throw ApiError.badRequest(`Invalid entry: sourceTerm or targetTerm is empty`);
+    }
+  }
+
+  try {
+    // Use skipDuplicates to prevent duplicate entries during import
+    // This will skip entries that have the same combination of:
+    // sourceTerm, targetTerm, sourceLocale, targetLocale, and projectId
+    const result = await prisma.glossaryEntry.createMany({
+      data: entries,
+      skipDuplicates: true, // Skip duplicates instead of throwing error
+    });
+
+    return { imported: result.count };
+  } catch (error: any) {
+    // Log the actual error for debugging
+    console.error('Glossary import error:', error);
+    console.error('Entries being imported:', entries.slice(0, 3)); // Log first 3 entries
+    
+    // Provide more helpful error messages
+    if (error.code === 'P2002') {
+      throw ApiError.badRequest('Duplicate entries found. Some entries may already exist in the glossary.');
+    }
+    if (error.code === 'P2003') {
+      throw ApiError.badRequest('Invalid projectId. The specified project does not exist.');
+    }
+    if (error.message?.includes('required')) {
+      throw ApiError.badRequest(`Missing required field: ${error.message}`);
+    }
+    
+    throw ApiError.internal(`Failed to import glossary: ${error.message || 'Unknown error'}`);
+  }
 };
 
 /**

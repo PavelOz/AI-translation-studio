@@ -137,6 +137,7 @@ export default function AITranslationPanel({
   const currentSourceTextRef = useRef<string>('');
   const lastSegmentIdRef = useRef<string>('');
   const hasAutoTranslatedRef = useRef<boolean>(false);
+  const shouldAutoApplyRef = useRef<boolean>(false);
 
   // Save provider preference to localStorage and update project settings
   useEffect(() => {
@@ -240,6 +241,7 @@ export default function AITranslationPanel({
     if (segmentChanged) {
       lastSegmentIdRef.current = segmentId;
       hasAutoTranslatedRef.current = false;
+      shouldAutoApplyRef.current = false;
     }
 
     // Skip if auto-translate is disabled
@@ -300,6 +302,7 @@ export default function AITranslationPanel({
         // If no TM match found (or score < 70%), auto-translate with AI
         if (tmResults.length === 0 || tmResults[0].fuzzyScore < 70) {
           hasAutoTranslatedRef.current = true;
+          shouldAutoApplyRef.current = true; // Mark for auto-apply
           // Small delay to avoid race conditions and allow component to settle
           timeoutId = setTimeout(() => {
             // Double-check conditions before translating
@@ -478,6 +481,20 @@ export default function AITranslationPanel({
                         });
                         console.log('Model used (SSE):', data.result._metadata.provider, data.result._metadata.model);
                       }
+                      // Auto-apply if this was an auto-translate
+                      if (shouldAutoApplyRef.current && translationText.trim() && segmentId) {
+                        shouldAutoApplyRef.current = false; // Reset flag before applying
+                        setTimeout(() => {
+                          onApply(translationText.trim());
+                          // Also update via API in background
+                          segmentsApi.update(segmentId, {
+                            targetFinal: translationText.trim(),
+                            status: 'MT',
+                          }).catch((error: any) => {
+                            console.error('Failed to save auto-applied translation:', error);
+                          });
+                        }, 100);
+                      }
                     }
                     return;
                   }
@@ -527,7 +544,8 @@ export default function AITranslationPanel({
             return; // Don't update state if sourceText changed
           }
 
-          setTranslation(result.targetMt || result.targetFinal || '');
+          const translationText = result.targetMt || result.targetFinal || '';
+          setTranslation(translationText);
           setIsTranslating(false);
           // Store metadata if available
           if ((result as any).translationMetadata) {
@@ -543,6 +561,20 @@ export default function AITranslationPanel({
               model: (result as any)._metadata.model,
             });
             console.log('Model used:', (result as any)._metadata.provider, (result as any)._metadata.model);
+          }
+          // Auto-apply if this was an auto-translate
+          if (shouldAutoApplyRef.current && translationText.trim() && segmentId) {
+            shouldAutoApplyRef.current = false; // Reset flag before applying
+            setTimeout(() => {
+              onApply(translationText.trim());
+              // Also update via API in background
+              segmentsApi.update(segmentId, {
+                targetFinal: translationText.trim(),
+                status: 'MT',
+              }).catch((error: any) => {
+                console.error('Failed to save auto-applied translation:', error);
+              });
+            }, 100);
           }
         } else {
           // Fallback to direct AI translation if no segmentId
@@ -566,7 +598,23 @@ export default function AITranslationPanel({
         return; // Don't update state if sourceText changed
       }
 
-      setTranslation(result.targetText);
+      const translationText = result.targetText || '';
+      setTranslation(translationText);
+      
+      // Auto-apply if this was an auto-translate
+      if (shouldAutoApplyRef.current && translationText.trim() && segmentId) {
+        shouldAutoApplyRef.current = false; // Reset flag before applying
+        setTimeout(() => {
+          onApply(translationText.trim());
+          // Also update via API in background
+          segmentsApi.update(segmentId, {
+            targetFinal: translationText.trim(),
+            status: 'MT',
+          }).catch((error: any) => {
+            console.error('Failed to save auto-applied translation:', error);
+          });
+        }, 100);
+      }
           setIsTranslating(false);
           // Store model information from direct AI translation
           setModelInfo({
