@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { documentsApi } from '../../api/documents.api';
+import { segmentsApi } from '../../api/segments.api';
 import apiClient from '../../api/client';
 import toast from 'react-hot-toast';
 import PretranslateModal from './PretranslateModal';
@@ -10,6 +11,7 @@ interface EditorToolbarProps {
   selectedSegmentIds: string[];
   onRefresh: () => void;
   onBatchTranslate: () => void;
+  onResetSegments?: (segmentIds: string[] | null) => void;
   glossaryMode?: GlossaryMode;
 }
 
@@ -18,6 +20,7 @@ export default function EditorToolbar({
   selectedSegmentIds,
   onRefresh,
   onBatchTranslate,
+  onResetSegments,
   glossaryMode = 'strict_source',
 }: EditorToolbarProps) {
   const [isPretranslateModalOpen, setIsPretranslateModalOpen] = useState(false);
@@ -26,17 +29,50 @@ export default function EditorToolbar({
     stage: 'preparing' | 'downloading' | 'processing' | 'complete';
     message: string;
   } | null>(null);
+  const [showBatchOptions, setShowBatchOptions] = useState(false);
+  const [batchFilterMode, setBatchFilterMode] = useState<'empty' | 'nonEmpty' | 'nonConfirmed' | 'all'>('empty');
+  const batchOptionsRef = useRef<HTMLDivElement>(null);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (batchOptionsRef.current && !batchOptionsRef.current.contains(event.target as Node)) {
+        setShowBatchOptions(false);
+      }
+    };
+
+    if (showBatchOptions) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => {
+        document.removeEventListener('mousedown', handleClickOutside);
+      };
+    }
+  }, [showBatchOptions]);
+
   const handleBatchTranslate = async () => {
     try {
-      const response = await documentsApi.batchTranslate(documentId, {
+      const options: any = {
         mode: 'pre_translate',
         applyTm: true,
         minScore: 70,
-        mtOnlyEmpty: true,
-        glossaryMode, // Pass glossary mode to API
-      });
+        glossaryMode,
+      };
+
+      // Apply filter based on selection
+      if (batchFilterMode === 'empty') {
+        options.mtOnlyEmpty = true;
+      } else if (batchFilterMode === 'nonEmpty') {
+        options.mtOnlyNonEmpty = true;
+      } else if (batchFilterMode === 'nonConfirmed') {
+        options.rewriteNonConfirmed = true;
+      } else if (batchFilterMode === 'all') {
+        options.mode = 'translate_all';
+      }
+
+      const response = await documentsApi.batchTranslate(documentId, options);
       toast.success(`Batch translation started: ${response.processed} segments processed`);
       onBatchTranslate();
+      setShowBatchOptions(false);
     } catch (error: any) {
       toast.error(error.response?.data?.message || 'Failed to start batch translation');
     }
@@ -118,14 +154,97 @@ export default function EditorToolbar({
           >
             Pretranslate
           </button>
-          <button onClick={handleBatchTranslate} className="btn btn-secondary text-sm">
-            Batch Translate
-          </button>
+          <div className="relative" ref={batchOptionsRef}>
+            <button 
+              onClick={() => setShowBatchOptions(!showBatchOptions)} 
+              className="btn btn-secondary text-sm flex items-center gap-1"
+            >
+              Batch Translate
+              <span className="text-xs">{showBatchOptions ? '▲' : '▼'}</span>
+            </button>
+            
+            {showBatchOptions && (
+              <div className="absolute left-0 mt-2 w-72 bg-white border border-gray-200 rounded-lg shadow-lg z-50 p-4">
+                <div className="mb-3">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Filter Segments:
+                  </label>
+                  <select
+                    value={batchFilterMode}
+                    onChange={(e) => setBatchFilterMode(e.target.value as any)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                  >
+                    <option value="empty">Empty segments only</option>
+                    <option value="nonEmpty">Non-empty segments only</option>
+                    <option value="nonConfirmed">Non-confirmed segments</option>
+                    <option value="all">All segments</option>
+                  </select>
+                  <p className="text-xs text-gray-500 mt-2">
+                    {batchFilterMode === 'empty' && 'Only segments with no translation'}
+                    {batchFilterMode === 'nonEmpty' && 'Only segments that already have translations'}
+                    {batchFilterMode === 'nonConfirmed' && 'Segments that are not confirmed (NEW, MT, EDITED)'}
+                    {batchFilterMode === 'all' && 'All segments in the document'}
+                  </p>
+                </div>
+                
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleBatchTranslate}
+                    className="btn btn-primary text-sm flex-1"
+                  >
+                    Start Batch Translate
+                  </button>
+                  <button
+                    onClick={() => setShowBatchOptions(false)}
+                    className="btn btn-secondary text-sm"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
           {selectedSegmentIds.length > 0 && (
-            <span className="text-sm text-gray-600">
-              {selectedSegmentIds.length} selected
-            </span>
+            <>
+              <span className="text-sm text-gray-600">
+                {selectedSegmentIds.length} selected
+              </span>
+              <button
+                onClick={async () => {
+                  if (!onResetSegments) return;
+                  try {
+                    await segmentsApi.reset({ segmentIds: selectedSegmentIds });
+                    toast.success(`Reset ${selectedSegmentIds.length} segment(s) to NEW status`);
+                    onResetSegments(selectedSegmentIds);
+                  } catch (error: any) {
+                    toast.error(error.response?.data?.message || 'Failed to reset segments');
+                  }
+                }}
+                className="btn btn-secondary text-sm"
+              >
+                Reset Selected to NEW
+              </button>
+            </>
           )}
+          <button
+            onClick={async () => {
+              if (!onResetSegments) return;
+              if (!confirm('Are you sure you want to reset ALL segments in this document to NEW status? This will clear all translations.')) {
+                return;
+              }
+              try {
+                await segmentsApi.reset({ documentId, resetAll: true });
+                toast.success('All segments reset to NEW status');
+                onResetSegments(null);
+              } catch (error: any) {
+                toast.error(error.response?.data?.message || 'Failed to reset all segments');
+              }
+            }}
+            className="btn btn-secondary text-sm text-red-600 hover:text-red-700"
+            title="Reset all segments in this document to NEW status (clears all translations)"
+          >
+            Reset All to NEW
+          </button>
         </div>
       <div className="flex items-center space-x-3">
         <button

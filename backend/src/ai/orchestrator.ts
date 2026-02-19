@@ -358,14 +358,8 @@ export class AIOrchestrator {
 
     const sourceLangCode = options.sourceLocale ?? project.sourceLang ?? 'ru';
     const targetLangCode = options.targetLocale ?? project.targetLang ?? 'en';
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:212',message:'buildBatchPrompt: Locale codes determined',data:{optionsSourceLocale:options.sourceLocale,optionsTargetLocale:options.targetLocale,projectSourceLang:project.sourceLang,projectTargetLang:project.targetLang,sourceLangCode,targetLangCode},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
     const sourceLang = getLanguageName(sourceLangCode);
     const targetLang = getLanguageName(targetLangCode);
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:215',message:'buildBatchPrompt: Language names determined',data:{sourceLangCode,sourceLang,targetLangCode,targetLang},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-    // #endregion
     
     // Detect if target is UK English for natural language instructions
     const isUKEnglish = targetLangCode.toLowerCase() === 'en-gb' || targetLangCode.toLowerCase() === 'en_gb';
@@ -492,8 +486,6 @@ export class AIOrchestrator {
         const configuredSourceIsRussian = ['ru', 'kk', 'uk', 'be', 'ky', 'uz', 'tg', 'tk', 'mn'].includes(sourceLangCode.toLowerCase());
         const configuredSourceIsEnglish = sourceLangCode.toLowerCase().startsWith('en');
         const possibleMismatch = (appearsRussian && configuredSourceIsEnglish) || (appearsEnglish && configuredSourceIsRussian);
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:317',message:'buildBatchPrompt: Source text language detection',data:{segmentId:segment.segmentId,sourceTextPreview:segment.sourceText.substring(0,100),hasCyrillic,hasLatin,appearsRussian,appearsEnglish,configuredSourceLocale:sourceLangCode,configuredSourceIsRussian,configuredSourceIsEnglish,possibleMismatch},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
         return [
           `ID: ${segment.segmentId}`,
           `Source: ${sourceTextXml}`,
@@ -848,14 +840,8 @@ export class AIOrchestrator {
     // #endregion
     const sourceLangCode = options.sourceLocale ?? project.sourceLang ?? 'ru';
     const targetLangCode = options.targetLocale ?? project.targetLang ?? 'en';
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:652',message:'translateSegments: Final locale codes after fallback',data:{sourceLangCode,targetLangCode,usedOptionsSource:!!options.sourceLocale,usedProjectSource:!options.sourceLocale&&!!project.sourceLang,usedDefaultSource:!options.sourceLocale&&!project.sourceLang,usedOptionsTarget:!!options.targetLocale,usedProjectTarget:!options.targetLocale&&!!project.targetLang,usedDefaultTarget:!options.targetLocale&&!project.targetLang},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
     const sourceLang = getLanguageName(sourceLangCode);
     const targetLang = getLanguageName(targetLangCode);
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:655',message:'translateSegments: Language names from getLanguageName',data:{sourceLangCode,sourceLang,targetLangCode,targetLang},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-    // #endregion
 
     // Plan token-based batches to prevent token limit exceeded errors
     const batchRanges = this.planBatches(options.segments, 4000); // 4k token safety limit

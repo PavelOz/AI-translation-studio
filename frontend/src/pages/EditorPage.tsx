@@ -26,8 +26,9 @@ export default function EditorPage() {
 
   const [activeSegmentIndex, setActiveSegmentIndex] = useState(0);
   const [statusFilter, setStatusFilter] = useState<SegmentStatus | 'ALL'>('ALL');
+  const [translationFilter, setTranslationFilter] = useState<'all' | 'empty' | 'nonEmpty' | 'hasTranslation'>('all');
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedSegmentIds] = useState<string[]>([]);
+  const [selectedSegmentIds, setSelectedSegmentIds] = useState<string[]>([]);
   const [showSidebar, setShowSidebar] = useState(true);
   const [sidebarWidth, setSidebarWidth] = useState(() => {
     if (typeof window !== 'undefined') {
@@ -123,10 +124,20 @@ export default function EditorPage() {
   
   // Debug: log what we have
   if (import.meta.env.DEV) {
+    const segmentsWithTranslations = segments.filter(s => s.targetMt || s.targetFinal);
     console.log('Editor render state:', {
       hasDocumentData: !!documentData,
       hasSegmentsData: !!segmentsData,
       segmentsCount: segments.length,
+      segmentsWithTranslations: segmentsWithTranslations.length,
+      sampleSegmentWithTranslation: segmentsWithTranslations[0] ? {
+        id: segmentsWithTranslations[0].id,
+        hasTargetMt: !!segmentsWithTranslations[0].targetMt,
+        hasTargetFinal: !!segmentsWithTranslations[0].targetFinal,
+        targetMtPreview: segmentsWithTranslations[0].targetMt?.substring(0, 50),
+        targetFinalPreview: segmentsWithTranslations[0].targetFinal?.substring(0, 50),
+        status: segmentsWithTranslations[0].status,
+      } : null,
       isLoadingDocument,
       isLoadingSegments,
       segmentsError: segmentsError ? (segmentsError as any).message : null,
@@ -134,9 +145,26 @@ export default function EditorPage() {
   }
   
   const filteredSegments = segments.filter((seg) => {
+    // Status filter
     if (statusFilter !== 'ALL' && seg.status !== statusFilter) {
       return false;
     }
+    
+    // Translation filter
+    const hasTranslation = !!(seg.targetFinal || seg.targetMt);
+    const isEmpty = !hasTranslation || (seg.targetFinal?.trim() === '' && seg.targetMt?.trim() === '');
+    
+    if (translationFilter === 'empty' && !isEmpty) {
+      return false;
+    }
+    if (translationFilter === 'nonEmpty' && isEmpty) {
+      return false;
+    }
+    if (translationFilter === 'hasTranslation' && !hasTranslation) {
+      return false;
+    }
+    
+    // Search query filter
     if (searchQuery) {
       const query = searchQuery.toLowerCase();
       return (
@@ -147,12 +175,34 @@ export default function EditorPage() {
     }
     return true;
   });
+  
+  // Debug: log filtered segments
+  if (import.meta.env.DEV && filteredSegments.length > 0) {
+    const filteredWithTranslations = filteredSegments.filter(s => s.targetMt || s.targetFinal);
+    console.log('[EditorPage] Filtered segments', {
+      totalFiltered: filteredSegments.length,
+      withTranslations: filteredWithTranslations.length,
+      statusFilter,
+    });
+  }
 
   // Ensure activeSegmentIndex is within bounds
   const safeActiveIndex = filteredSegments.length > 0 
     ? Math.min(activeSegmentIndex, Math.max(0, filteredSegments.length - 1))
     : 0;
   const activeSegment = filteredSegments[safeActiveIndex];
+  
+  // Debug: log active segment
+  if (import.meta.env.DEV && activeSegment) {
+    console.log('[EditorPage] Active segment', {
+      segmentId: activeSegment.id,
+      hasTargetMt: !!activeSegment.targetMt,
+      hasTargetFinal: !!activeSegment.targetFinal,
+      targetMtPreview: activeSegment.targetMt?.substring(0, 50),
+      targetFinalPreview: activeSegment.targetFinal?.substring(0, 50),
+      status: activeSegment.status,
+    });
+  }
   
   // Update index if it was out of bounds (only when segments change, not on every render)
   useEffect(() => {
@@ -259,7 +309,7 @@ export default function EditorPage() {
   // Reset active index when filter changes
   useEffect(() => {
     setActiveSegmentIndex(0);
-  }, [statusFilter, searchQuery]);
+  }, [statusFilter, translationFilter, searchQuery]);
 
   // Save sidebar width to localStorage
   useEffect(() => {
@@ -447,15 +497,37 @@ export default function EditorPage() {
         <EditorToolbar
           documentId={documentId!}
           selectedSegmentIds={selectedSegmentIds}
-          onRefresh={refetchSegments}
+          onRefresh={() => {
+            console.log('[EditorPage] onRefresh called - invalidating and refetching segments');
+            // Invalidate query cache first to ensure fresh data
+            queryClient.invalidateQueries({ queryKey: ['segments', documentId] });
+            refetchSegments().then((result) => {
+              console.log('[EditorPage] Segments refetched', {
+                dataCount: result.data?.segments?.length || 0,
+                total: result.data?.total || 0,
+                hasTranslations: result.data?.segments?.some((s: Segment) => s.targetMt || s.targetFinal) || false,
+                segmentsWithTargetMt: result.data?.segments?.filter((s: Segment) => s.targetMt).length || 0,
+                segmentsWithTargetFinal: result.data?.segments?.filter((s: Segment) => s.targetFinal).length || 0,
+              });
+            }).catch((error) => {
+              console.error('[EditorPage] Error refetching segments:', error);
+            });
+          }}
           onBatchTranslate={refetchSegments}
+          onResetSegments={async (segmentIds) => {
+            // Invalidate and refetch segments after reset
+            queryClient.invalidateQueries({ queryKey: ['segments', documentId] });
+            await refetchSegments();
+            // Clear selection after reset
+            setSelectedSegmentIds([]);
+          }}
           glossaryMode={glossaryMode}
         />
 
         {/* Filter and Actions */}
         <div className="bg-white border-b border-gray-200">
-          <div className="px-4 py-3 flex items-center space-x-4">
-            <div className="flex-1">
+          <div className="px-4 py-3 flex items-center space-x-4 flex-wrap gap-3">
+            <div className="flex-1 min-w-[200px]">
               <input
                 type="text"
                 placeholder="Search segments..."
@@ -465,7 +537,7 @@ export default function EditorPage() {
               />
             </div>
             <div className="flex items-center space-x-2">
-              <label className="text-sm text-gray-700">Status:</label>
+              <label className="text-sm text-gray-700 whitespace-nowrap">Status:</label>
               <select
                 value={statusFilter}
                 onChange={(e) => setStatusFilter(e.target.value as SegmentStatus | 'ALL')}
@@ -476,6 +548,19 @@ export default function EditorPage() {
                 <option value="MT">MT</option>
                 <option value="EDITED">Edited</option>
                 <option value="CONFIRMED">Confirmed</option>
+              </select>
+            </div>
+            <div className="flex items-center space-x-2">
+              <label className="text-sm text-gray-700 whitespace-nowrap">Translation:</label>
+              <select
+                value={translationFilter}
+                onChange={(e) => setTranslationFilter(e.target.value as any)}
+                className="input"
+              >
+                <option value="all">All</option>
+                <option value="empty">Empty</option>
+                <option value="nonEmpty">Non-empty</option>
+                <option value="hasTranslation">Has Translation</option>
               </select>
             </div>
             <button
@@ -516,25 +601,80 @@ export default function EditorPage() {
                   )}
                 </div>
               ) : (
-                filteredSegments.map((segment, index) => (
-                  <div
-                    key={segment.id}
-                    onClick={() => handleSegmentClick(index)}
-                    className={index === activeSegmentIndex ? 'cursor-default' : 'cursor-pointer'}
-                  >
-                    <SegmentEditor
-                      segment={segment}
-                      isActive={index === activeSegmentIndex}
-                      onUpdate={handleSegmentUpdate}
-                      onNext={handleNext}
-                      onPrevious={handlePrevious}
-                      onConfirm={handleConfirm}
-                      sourceLocale={documentData?.sourceLocale}
-                      targetLocale={documentData?.targetLocale}
-                      projectId={documentData?.projectId}
-                    />
+                <>
+                  <div className="mb-4 flex items-center justify-between">
+                    <div className="flex items-center space-x-3">
+                      <button
+                        onClick={() => {
+                          if (selectedSegmentIds.length === filteredSegments.length) {
+                            setSelectedSegmentIds([]);
+                          } else {
+                            setSelectedSegmentIds(filteredSegments.map(s => s.id));
+                          }
+                        }}
+                        className="text-sm text-gray-600 hover:text-gray-900"
+                      >
+                        {selectedSegmentIds.length === filteredSegments.length ? 'Deselect All' : 'Select All'}
+                      </button>
+                      {selectedSegmentIds.length > 0 && (
+                        <span className="text-sm text-gray-600">
+                          {selectedSegmentIds.length} selected
+                        </span>
+                      )}
+                    </div>
                   </div>
-                ))
+                  {filteredSegments.map((segment, index) => {
+                    const isSelected = selectedSegmentIds.includes(segment.id);
+                    // Log segment data for debugging
+                    if (index === activeSegmentIndex && (segment.targetMt || segment.targetFinal)) {
+                      console.log('[EditorPage] Rendering active segment with translation', {
+                        segmentId: segment.id,
+                        hasTargetMt: !!segment.targetMt,
+                        hasTargetFinal: !!segment.targetFinal,
+                        targetMtPreview: segment.targetMt?.substring(0, 50),
+                        targetFinalPreview: segment.targetFinal?.substring(0, 50),
+                        status: segment.status,
+                      });
+                    }
+                    return (
+                      <div
+                        key={segment.id}
+                        className={`flex items-start space-x-2 ${index === activeSegmentIndex ? 'cursor-default' : 'cursor-pointer'}`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={(e) => {
+                            e.stopPropagation();
+                            if (e.target.checked) {
+                              setSelectedSegmentIds([...selectedSegmentIds, segment.id]);
+                            } else {
+                              setSelectedSegmentIds(selectedSegmentIds.filter(id => id !== segment.id));
+                            }
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                          className="mt-2 h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
+                        />
+                        <div
+                          onClick={() => handleSegmentClick(index)}
+                          className={`flex-1 ${index === activeSegmentIndex ? 'cursor-default' : 'cursor-pointer'}`}
+                        >
+                          <SegmentEditor
+                            segment={segment}
+                            isActive={index === activeSegmentIndex}
+                            onUpdate={handleSegmentUpdate}
+                            onNext={handleNext}
+                            onPrevious={handlePrevious}
+                            onConfirm={handleConfirm}
+                            sourceLocale={documentData?.sourceLocale}
+                            targetLocale={documentData?.targetLocale}
+                            projectId={documentData?.projectId}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </>
               )}
             </div>
           </div>

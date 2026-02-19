@@ -6,6 +6,7 @@ import { getDocumentSegments, updateSegment, getSegment, bulkUpdateSegments, sea
 import { runSegmentMachineTranslation, runSegmentMachineTranslationWithCritic, getSegmentDebugInfo } from '../services/ai.service';
 import { getSegmentMetrics, runSegmentQualityCheck } from '../services/quality.service';
 import type { GlossaryMode } from '../types/glossary';
+import { prisma } from '../db/prisma';
 
 const patchSchema = z.object({
   target_final: z.string().optional(),
@@ -74,9 +75,17 @@ segmentRoutes.get(
 
     if (query) {
       const segments = await searchSegments(req.params.documentId, query);
+      // #region agent log
+      const segmentsWithTranslations = segments.filter((s: any) => s.targetMt || s.targetFinal);
+      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'segments.routes.ts:76',message:'GET segments (search) - returning segments',data:{documentId:req.params.documentId,query,totalSegments:segments.length,segmentsWithTranslations:segmentsWithTranslations.length,sampleSegment:segmentsWithTranslations[0]?{id:segmentsWithTranslations[0].id,hasTargetMt:!!segmentsWithTranslations[0].targetMt,hasTargetFinal:!!segmentsWithTranslations[0].targetFinal}:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
       res.json({ segments, page: 1, pageSize: segments.length, total: segments.length, totalPages: 1 });
     } else {
       const segments = await getDocumentSegments(req.params.documentId, page, pageSize);
+      // #region agent log
+      const segmentsWithTranslations = segments.segments?.filter((s: any) => s.targetMt || s.targetFinal) || [];
+      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'segments.routes.ts:79',message:'GET segments - returning segments',data:{documentId:req.params.documentId,page,pageSize,totalSegments:segments.segments?.length||0,total:segments.total,segmentsWithTranslations:segmentsWithTranslations.length,segmentsWithTargetMt:segments.segments?.filter((s:any)=>s.targetMt).length||0,segmentsWithTargetFinal:segments.segments?.filter((s:any)=>s.targetFinal).length||0,sampleSegment:segmentsWithTranslations[0]?{id:segmentsWithTranslations[0].id,hasTargetMt:!!segmentsWithTranslations[0].targetMt,hasTargetFinal:!!segmentsWithTranslations[0].targetFinal,targetMtPreview:segmentsWithTranslations[0].targetMt?.substring(0,50),targetFinalPreview:segmentsWithTranslations[0].targetFinal?.substring(0,50)}:null},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
       res.json(segments);
     }
   }),
@@ -148,6 +157,51 @@ segmentRoutes.post(
       })),
     );
     res.json(segments);
+  }),
+);
+
+const resetSegmentsSchema = z.object({
+  segmentIds: z.array(z.string().uuid()),
+  documentId: z.string().uuid().optional(), // Optional: if provided, can reset all segments in document
+  resetAll: z.boolean().optional(), // If true and documentId provided, reset all segments
+});
+
+segmentRoutes.post(
+  '/reset',
+  asyncHandler(async (req, res) => {
+    const payload = resetSegmentsSchema.parse(req.body);
+    
+    let segmentIds: string[];
+    
+    if (payload.resetAll && payload.documentId) {
+      // Reset all segments in document
+      const segments = await prisma.segment.findMany({
+        where: { documentId: payload.documentId },
+        select: { id: true },
+      });
+      segmentIds = segments.map(s => s.id);
+    } else {
+      segmentIds = payload.segmentIds;
+    }
+    
+    if (segmentIds.length === 0) {
+      res.json({ count: 0, message: 'No segments to reset' });
+      return;
+    }
+    
+    // Reset segments: clear translations and set status to NEW
+    const result = await prisma.segment.updateMany({
+      where: { id: { in: segmentIds } },
+      data: {
+        targetMt: null,
+        targetFinal: null,
+        fuzzyScore: null,
+        bestTmEntryId: null,
+        status: 'NEW',
+      },
+    });
+    
+    res.json({ count: result.count, segmentIds });
   }),
 );
 
@@ -248,9 +302,7 @@ segmentRoutes.get(
     const debugInfo = await getSegmentDebugInfo(req.params.segmentId);
     res.json(debugInfo);
   }),
-);
-
-// Control endpoint for blind translation (without document context)
+);// Control endpoint for blind translation (without document context)
 segmentRoutes.post(
   '/:segmentId/translate-blind',
   asyncHandler(async (req, res) => {
@@ -317,4 +369,3 @@ segmentRoutes.post(
     }
   }),
 );
-

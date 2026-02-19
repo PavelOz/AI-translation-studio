@@ -356,9 +356,7 @@ export async function storeGlossaryEmbedding(
     throw new Error('Invalid embedding: must be 1536 dimensions');
   }
 
-  const embeddingStr = embeddingToVectorString(embedding);
-
-  try {
+  const embeddingStr = embeddingToVectorString(embedding);  try {
     await prisma.$executeRawUnsafe(
       `
       UPDATE "GlossaryEntry"
@@ -558,4 +556,3 @@ export async function searchGlossaryByVector(
     throw new Error(`Glossary vector search failed: ${error.message}`);
   }
 }
-

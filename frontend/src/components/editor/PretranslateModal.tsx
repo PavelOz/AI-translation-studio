@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
+import { useQuery } from 'react-query';
 import { documentsApi } from '../../api/documents.api';
+import { aiApi } from '../../api/ai.api';
 import toast from 'react-hot-toast';
 import type { GlossaryMode } from '../../types/glossary';
 
@@ -23,6 +25,11 @@ export default function PretranslateModal({
   const [rewriteConfirmed, setRewriteConfirmed] = useState(false);
   const [rewriteNonConfirmed, setRewriteNonConfirmed] = useState(false);
   const [useCritic, setUseCritic] = useState(false);
+  const [skipTm, setSkipTm] = useState(false);
+  const [overrideAiConfig, setOverrideAiConfig] = useState(false);
+  const [overrideProvider, setOverrideProvider] = useState<string>('');
+  const [overrideModel, setOverrideModel] = useState<string>('');
+  const [overrideTemperature, setOverrideTemperature] = useState<number | undefined>(undefined);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState<{
     documentId: string;
@@ -34,10 +41,63 @@ export default function PretranslateModal({
     currentSegmentId?: string;
     currentSegmentText?: string;
     error?: string;
+    logs?: string[];
   } | null>(null);
   const progressIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const isCancelledRef = useRef(false);
   const cancelledToastShownRef = useRef(false);
+  const [showLogs, setShowLogs] = useState(false);
+  const logContainerRef = useRef<HTMLDivElement>(null);
+
+  // Reset progress when modal opens/closes
+  useEffect(() => {
+    if (!isOpen) {
+      // Reset all state when modal closes
+      setProgress(null);
+      setIsProcessing(false);
+      isCancelledRef.current = false;
+      cancelledToastShownRef.current = false;
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current);
+        progressIntervalRef.current = null;
+      }
+    } else {
+      // Reset state when modal opens
+      setProgress(null);
+      setIsProcessing(false);
+      isCancelledRef.current = false;
+      cancelledToastShownRef.current = false;
+    }
+  }, [isOpen]);
+
+  // Fetch document to get projectId, then fetch AI settings
+  const { data: document } = useQuery(
+    ['document', documentId],
+    () => documentsApi.get(documentId),
+    { enabled: isOpen && !!documentId, staleTime: 60000 }
+  );
+
+  const { data: aiSettings } = useQuery(
+    ['ai-settings', document?.projectId],
+    () => (document?.projectId ? aiApi.getAISettings(document.projectId) : null),
+    { enabled: isOpen && !!document?.projectId, staleTime: 60000 }
+  );
+
+  // Initialize override values from project settings when they load
+  useEffect(() => {
+    if (aiSettings && !overrideAiConfig) {
+      setOverrideProvider(aiSettings.provider || '');
+      setOverrideModel(aiSettings.model || '');
+      setOverrideTemperature(aiSettings.temperature);
+    }
+  }, [aiSettings, overrideAiConfig]);
+
+  // Auto-scroll log container to bottom when new logs arrive
+  useEffect(() => {
+    if (logContainerRef.current && showLogs && progress?.logs) {
+      logContainerRef.current.scrollTop = logContainerRef.current.scrollHeight;
+    }
+  }, [progress?.logs, showLogs]);
 
   // Poll for progress updates
   useEffect(() => {
@@ -55,13 +115,14 @@ export default function PretranslateModal({
 
         try {
           const progressData = await documentsApi.getPretranslateProgress(documentId);
-          // Only update if data actually changed to prevent UI jumping
+          // Always update if logs changed, or if other data changed
           setProgress((prev) => {
             if (!prev || 
                 prev.currentSegment !== progressData.currentSegment ||
                 prev.tmApplied !== progressData.tmApplied ||
                 prev.aiApplied !== progressData.aiApplied ||
-                prev.status !== progressData.status) {
+                prev.status !== progressData.status ||
+                (progressData.logs && prev.logs?.length !== progressData.logs.length)) {
               return progressData;
             }
             return prev;
@@ -79,6 +140,10 @@ export default function PretranslateModal({
                 `Pretranslation complete: ${progressData.tmApplied} TM matches applied, ${progressData.aiApplied} AI translations applied`,
               );
               setTimeout(() => {
+                console.log('[PretranslateModal] Calling onComplete after completion', {
+                  tmApplied: progressData.tmApplied,
+                  aiApplied: progressData.aiApplied,
+                });
                 onComplete();
                 onClose();
                 setProgress(null);
@@ -87,10 +152,32 @@ export default function PretranslateModal({
               // Only show toast once
               if (!cancelledToastShownRef.current) {
                 cancelledToastShownRef.current = true;
-                toast('Pretranslation cancelled', { icon: 'ℹ️' });
+                toast(
+                  `Pretranslation cancelled: ${progressData.tmApplied} TM matches and ${progressData.aiApplied} AI translations were saved`,
+                  { icon: 'ℹ️', duration: 4000 }
+                );
               }
               setIsProcessing(false);
-              setProgress(null);
+              
+              // Wait for backend to finish saving before refetching
+              // Backend continues processing queued segments even after cancellation
+              // Give it time to save completed translations
+              setTimeout(() => {
+                onComplete();
+                // Second refetch after a longer delay to catch any late saves
+                setTimeout(() => {
+                  onComplete(); // Refetch again to catch any late saves
+                }, 2000);
+                
+                setTimeout(() => {
+                  console.log('[PretranslateModal] Closing modal after cancellation', {
+                    tmApplied: progressData.tmApplied,
+                    aiApplied: progressData.aiApplied,
+                  });
+                  setProgress(null);
+                  onClose();
+                }, 3000);
+              }, 1000); // Wait 1 second for backend to save
             } else if (progressData.status === 'error') {
               toast.error(progressData.error || 'Pretranslation failed');
               setIsProcessing(false);
@@ -132,10 +219,17 @@ export default function PretranslateModal({
   }, []);
 
   const handlePretranslate = async () => {
-    setIsProcessing(true);
+    // Reset all state BEFORE starting new pretranslation
     setProgress(null);
+    setIsProcessing(false); // Set to false first to stop any existing polling
     isCancelledRef.current = false;
-    cancelledToastShownRef.current = false; // Reset cancelled toast flag
+    cancelledToastShownRef.current = false;
+    
+    // Small delay to ensure state is reset and any existing polling stops
+    await new Promise(resolve => setTimeout(resolve, 100));
+    
+    // Now start the new pretranslation
+    setIsProcessing(true);
 
     try {
       await documentsApi.pretranslate(documentId, {
@@ -145,9 +239,14 @@ export default function PretranslateModal({
         rewriteNonConfirmed,
         glossaryMode, // Pass glossary mode to API
         useCritic, // Pass critic AI option
+        skipTm, // Pass skip TM option
+        ...(overrideAiConfig && overrideProvider ? { provider: overrideProvider as 'gemini' | 'openai' | 'yandex' | 'deepseek' } : {}),
+        ...(overrideAiConfig && overrideModel ? { model: overrideModel } : {}),
+        ...(overrideAiConfig && overrideTemperature !== undefined ? { temperature: overrideTemperature } : {}),
       });
-      // Small delay to ensure backend has created progress before polling starts
-      await new Promise(resolve => setTimeout(resolve, 100));
+      // Small delay to ensure backend has cleared old progress and created new progress before polling starts
+      // This prevents reading stale progress data from the previous run
+      await new Promise(resolve => setTimeout(resolve, 300));
       // Progress will be updated via polling
     } catch (error: any) {
       setIsProcessing(false);
@@ -198,8 +297,125 @@ export default function PretranslateModal({
           This will apply all 100% Translation Memory matches to empty segments. You can optionally apply AI translations to segments with lower matches or only empty segments.
         </p>
 
+        {/* AI Configuration */}
+        {aiSettings && (
+          <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-sm font-semibold text-blue-900">AI Configuration:</p>
+              <label className="flex items-center text-xs text-blue-700 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={overrideAiConfig}
+                  onChange={(e) => setOverrideAiConfig(e.target.checked)}
+                  className="mr-2 h-3 w-3 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                  disabled={isProcessing}
+                />
+                Override project settings
+              </label>
+            </div>
+            
+            {!overrideAiConfig ? (
+              <div className="flex items-center gap-4 text-xs text-blue-700">
+                <span>
+                  <span className="font-medium">Provider:</span>{' '}
+                  <span className="font-mono">{aiSettings.provider || 'Not configured'}</span>
+                </span>
+                <span className="text-blue-400">|</span>
+                <span>
+                  <span className="font-medium">Model:</span>{' '}
+                  <span className="font-mono">{aiSettings.model || 'Not configured'}</span>
+                </span>
+                {aiSettings.temperature !== undefined && (
+                  <>
+                    <span className="text-blue-400">|</span>
+                    <span>
+                      <span className="font-medium">Temperature:</span>{' '}
+                      <span className="font-mono">{aiSettings.temperature}</span>
+                    </span>
+                  </>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-3 text-xs">
+                <div>
+                  <label className="block text-blue-900 font-medium mb-1">Provider:</label>
+                  <select
+                    value={overrideProvider}
+                    onChange={(e) => setOverrideProvider(e.target.value)}
+                    className="w-full px-2 py-1 border border-blue-300 rounded text-blue-700 bg-white"
+                    disabled={isProcessing}
+                  >
+                    <option value="">Select provider...</option>
+                    <option value="gemini">Gemini</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="yandex">Yandex</option>
+                    <option value="deepseek">DeepSeek</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-blue-900 font-medium mb-1">Model:</label>
+                  <input
+                    type="text"
+                    value={overrideModel}
+                    onChange={(e) => setOverrideModel(e.target.value)}
+                    placeholder="e.g., gpt-4o, deepseek-reasoner"
+                    className="w-full px-2 py-1 border border-blue-300 rounded text-blue-700"
+                    disabled={isProcessing}
+                  />
+                </div>
+                <div>
+                  <label className="block text-blue-900 font-medium mb-1">
+                    Temperature: {overrideTemperature !== undefined ? overrideTemperature.toFixed(1) : 'Default'}
+                  </label>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.1"
+                    value={overrideTemperature ?? (aiSettings.temperature ?? 0.3)}
+                    onChange={(e) => setOverrideTemperature(parseFloat(e.target.value))}
+                    className="w-full"
+                    disabled={isProcessing}
+                  />
+                  <div className="flex justify-between text-xs text-blue-600 mt-1">
+                    <span>0.0 (Strict)</span>
+                    <span>1.0 (Creative)</span>
+                  </div>
+                </div>
+              </div>
+            )}
+            
+            {!aiSettings.provider && !overrideAiConfig && (
+              <p className="text-xs text-blue-600 mt-2 italic">
+                ⚠️ No AI provider configured. Please configure AI settings in Project Settings or override above.
+              </p>
+            )}
+          </div>
+        )}
+
         {!isProcessing && (
           <div className="space-y-4 mb-6">
+            <div className="border-b border-gray-200 pb-3">
+              <h3 className="text-sm font-semibold text-gray-900 mb-3">Translation Memory Options</h3>
+              
+              <div className="flex items-start">
+                <input
+                  type="checkbox"
+                  id="skipTm"
+                  checked={skipTm}
+                  onChange={(e) => setSkipTm(e.target.checked)}
+                  className="mt-1 mr-3"
+                  disabled={isProcessing}
+                />
+                <label htmlFor="skipTm" className="text-sm text-gray-700 cursor-pointer">
+                  <span className="font-medium">Skip Phase 1 (TM Matching)</span>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Skip Translation Memory matching and send all eligible segments directly to AI translation. Segment selection is still controlled by the options below (empty segments, non-confirmed, etc.).
+                  </p>
+                </label>
+              </div>
+            </div>
+
             <div className="border-b border-gray-200 pb-3">
               <h3 className="text-sm font-semibold text-gray-900 mb-3">Segment Selection</h3>
               
@@ -359,6 +575,39 @@ export default function PretranslateModal({
                 Error: {progress.error}
               </div>
             )}
+
+            {/* Activity Log Section */}
+            <div className="mt-4 border-t border-gray-200 pt-4">
+              <button
+                onClick={() => setShowLogs(!showLogs)}
+                className="flex items-center justify-between w-full text-left text-sm font-medium text-gray-700 hover:text-gray-900 mb-2 focus:outline-none"
+              >
+                <span>Activity Log</span>
+                <span className="text-gray-500">{showLogs ? '🔽' : '▶️'}</span>
+              </button>
+              
+              {showLogs && (
+                <div
+                  ref={logContainerRef}
+                  className="bg-gray-900 text-gray-100 font-mono text-xs p-3 rounded border border-gray-700 max-h-64 overflow-y-auto"
+                  style={{ 
+                    fontFamily: 'monospace',
+                    fontSize: '12px',
+                    lineHeight: '1.5',
+                  }}
+                >
+                  {progress.logs && progress.logs.length > 0 ? (
+                    progress.logs.map((log, index) => (
+                      <div key={index} className="mb-1 text-gray-300 whitespace-pre-wrap break-words">
+                        {log}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-gray-500">No activity logs yet...</div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         )}
 

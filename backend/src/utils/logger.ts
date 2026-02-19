@@ -95,9 +95,7 @@ export function logErrorWithContext(
   operation?: string,
 ): void {
   const errorMessage = error instanceof Error ? error.message : error;
-  const errorStack = error instanceof Error ? error.stack : undefined;
-
-  logger.error(
+  const errorStack = error instanceof Error ? error.stack : undefined;  logger.error(
     {
       error: errorMessage,
       stack: errorStack,
@@ -135,4 +133,3 @@ export function logProgress(
     `Progress: ${operation} - ${stage} (${progress}%)`,
   );
 }
-

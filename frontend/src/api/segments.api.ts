@@ -165,6 +165,15 @@ export const segmentsApi = {
     const response = await apiClient.get(`/segments/${segmentId}/debug`);
     return response.data;
   },
+
+  reset: async (options: {
+    segmentIds?: string[];
+    documentId?: string;
+    resetAll?: boolean;
+  }): Promise<{ count: number; segmentIds: string[] }> => {
+    const response = await apiClient.post<{ count: number; segmentIds: string[] }>('/segments/reset', options);
+    return response.data;
+  },
 };
 
 

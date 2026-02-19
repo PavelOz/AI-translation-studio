@@ -11,6 +11,7 @@ interface PretranslateProgress {
   currentSegmentId?: string;
   currentSegmentText?: string;
   error?: string;
+  logs: string[]; // Activity log messages
   results: Array<{
     segmentId: string;
     method: 'tm' | 'ai';
@@ -30,6 +31,7 @@ export const createProgress = (documentId: string, totalSegments: number): void 
     totalSegments,
     tmApplied: 0,
     aiApplied: 0,
+    logs: [],
     results: [],
   });
   cancellationFlags.delete(documentId); // Clear any previous cancellation
@@ -94,6 +96,18 @@ export const setError = (documentId: string, error: string): void => {
 export const clearProgress = (documentId: string): void => {
   progressStore.delete(documentId);
   cancellationFlags.delete(documentId);
+};
+
+export const addLogMessage = (documentId: string, message: string): void => {
+  const progress = progressStore.get(documentId);
+  if (progress) {
+    const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    progress.logs.push(`[${timestamp}] ${message}`);
+    // Keep only last 500 log entries to prevent memory issues
+    if (progress.logs.length > 500) {
+      progress.logs = progress.logs.slice(-500);
+    }
+  }
 };
 
 // Cleanup old progress entries (older than 1 hour)

@@ -41,7 +41,10 @@ const batchTranslationSchema = z.object({
       applyTm: z.boolean().optional(),
       minScore: z.number().min(0).max(100).optional(),
       mtOnlyEmpty: z.boolean().optional(),
+      mtOnlyNonEmpty: z.boolean().optional(), // Only translate non-empty segments
       glossaryMode: z.enum(['off', 'strict_source', 'strict_semantic']).optional(),
+      useCritic: z.boolean().optional(), // Use critic AI workflow for higher quality (slower)
+      rewriteNonConfirmed: z.boolean().optional(), // Rewrite non-confirmed segments (ignore text, check status)
     })
     .optional(),
 });
@@ -52,6 +55,11 @@ const pretranslateSchema = z.object({
   rewriteConfirmed: z.boolean().optional(), // Rewrite confirmed segments
   rewriteNonConfirmed: z.boolean().optional(), // Rewrite non-confirmed but not empty segments
   glossaryMode: z.enum(['off', 'strict_source', 'strict_semantic']).optional(),
+  useCritic: z.boolean().optional(), // Use critic AI workflow for higher quality (slower)
+  provider: z.enum(['gemini', 'openai', 'yandex', 'deepseek']).optional(), // Override project AI provider
+  model: z.string().optional(), // Override project AI model
+  temperature: z.number().min(0).max(1).optional(), // Override AI temperature
+  skipTm: z.boolean().optional(), // Skip Phase 1 (TM matching)
 });
 
 const uploadSchema = z.object({
@@ -136,6 +144,15 @@ documentRoutes.post(
 );
 
 documentRoutes.post(
+  '/:documentId/mt-batch/cancel',
+  asyncHandler(async (req, res) => {
+    const { cancelBatchTranslation } = await import('../services/ai.service');
+    cancelBatchTranslation(req.params.documentId);
+    res.json({ status: 'cancelled', documentId: req.params.documentId });
+  }),
+);
+
+documentRoutes.post(
   '/:documentId/pretranslate',
   asyncHandler(async (req, res) => {
     const payload = pretranslateSchema.parse(req.body);
@@ -148,6 +165,9 @@ documentRoutes.post(
     pretranslateDocument(req.params.documentId, {
       ...payload,
       glossaryMode: payload.glossaryMode ?? 'strict_source', // Default to strict_source if not provided
+      provider: payload.provider,
+      model: payload.model,
+      temperature: payload.temperature,
     })
       .then(() => {
         // Success - progress will be marked as completed

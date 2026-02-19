@@ -813,9 +813,7 @@ export async function generateEmbeddingsForExistingGlossaryEntries(options: {
         const entriesResult = await prisma.$queryRawUnsafe<Array<{
           id: string;
           sourceTerm: string;
-        }>>(fetchQuery, ...fetchParams);
-
-        const entries = entriesResult;
+        }>>(fetchQuery, ...fetchParams);        const entries = entriesResult;
         
         // Log query details for debugging (especially when we hit issues)
         if (processed % 500 === 0 || entries.length === 0 || (processed > 0 && processed % 1000 === 0)) {
@@ -1234,4 +1232,3 @@ export async function generateEmbeddingsForExistingGlossaryEntries(options: {
 
   return progressId;
 }
-

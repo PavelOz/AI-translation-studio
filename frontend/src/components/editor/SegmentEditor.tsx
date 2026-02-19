@@ -45,14 +45,34 @@ const SegmentEditor = memo(function SegmentEditor({
     const segmentChanged = lastSegmentIdRef.current !== segment.id;
     const newTargetText = segment.targetFinal || segment.targetMt || '';
     
+    console.log('[SegmentEditor] Segment data update', {
+      segmentId: segment.id,
+      segmentChanged,
+      hasTargetFinal: !!segment.targetFinal,
+      hasTargetMt: !!segment.targetMt,
+      newTargetText: newTargetText.substring(0, 50),
+      currentTargetText: targetText.substring(0, 50),
+      isEditing: isEditingRef.current,
+      status: segment.status,
+    });
+    
     if (segmentChanged) {
       // New segment - always update
       lastSegmentIdRef.current = segment.id;
       isEditingRef.current = false;
       setTargetText(newTargetText);
       setLocalStatus(null); // Reset local status override
+      console.log('[SegmentEditor] Updated target text for new segment', {
+        segmentId: segment.id,
+        targetText: newTargetText.substring(0, 50),
+      });
     } else if (!isEditingRef.current && newTargetText !== targetText) {
       // Same segment, but data changed and user is not editing - update from external source (e.g., TM apply)
+      console.log('[SegmentEditor] Updating target text from external source', {
+        segmentId: segment.id,
+        oldText: targetText.substring(0, 50),
+        newText: newTargetText.substring(0, 50),
+      });
       setTargetText(newTargetText);
       setLocalStatus(null); // Reset local status override when external update happens
     }

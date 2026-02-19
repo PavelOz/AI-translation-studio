@@ -53,11 +53,8 @@
   background-color: #ffeef0;
   text-decoration: line-through;
   color: #b31d28;
-}
-
-.diff-add {
+}.diff-add {
   background-color: #e6ffed;
   text-decoration: none;
   color: #22863a;
 }
-

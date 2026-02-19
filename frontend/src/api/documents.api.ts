@@ -109,6 +109,11 @@ export const documentsApi = {
       rewriteConfirmed?: boolean;
       rewriteNonConfirmed?: boolean;
       glossaryMode?: GlossaryMode;
+      useCritic?: boolean;
+      provider?: 'gemini' | 'openai' | 'yandex' | 'deepseek';
+      model?: string;
+      temperature?: number;
+      skipTm?: boolean;
     },
   ): Promise<{
     status: string;
@@ -125,6 +130,8 @@ export const documentsApi = {
       applyTm?: boolean;
       minScore?: number;
       mtOnlyEmpty?: boolean;
+      mtOnlyNonEmpty?: boolean;
+      rewriteNonConfirmed?: boolean;
       glossaryMode?: GlossaryMode;
     },
   ): Promise<{
@@ -138,6 +145,8 @@ export const documentsApi = {
         applyTm: options?.applyTm,
         minScore: options?.minScore,
         mtOnlyEmpty: options?.mtOnlyEmpty,
+        mtOnlyNonEmpty: options?.mtOnlyNonEmpty,
+        rewriteNonConfirmed: options?.rewriteNonConfirmed,
         glossaryMode: options?.glossaryMode,
       },
     });
@@ -154,6 +163,7 @@ export const documentsApi = {
     currentSegmentId?: string;
     currentSegmentText?: string;
     error?: string;
+    logs?: string[];
     results: Array<{ segmentId: string; method: 'tm' | 'ai'; targetMt: string | null; fuzzyScore?: number }>;
   }> => {
     const response = await apiClient.get(`/documents/${documentId}/pretranslate/progress`);
