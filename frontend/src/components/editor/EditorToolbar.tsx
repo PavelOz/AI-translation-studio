@@ -280,9 +280,16 @@ export default function EditorToolbar({
         documentId={documentId}
         isOpen={isPretranslateModalOpen}
         onClose={() => setIsPretranslateModalOpen(false)}
-        onComplete={() => {
+        onComplete={async () => {
+          // Explicitly refresh segments after pretranslate completes
+          // onRefresh already invalidates cache and refetches, so we only need to call it once
+          console.log('[EditorToolbar] Pretranslate completed, refreshing segments...');
           onRefresh();
-          onBatchTranslate();
+          // Also call onBatchTranslate as a backup (it's just refetchSegments)
+          // This ensures data is refreshed even if onRefresh has issues
+          setTimeout(() => {
+            onBatchTranslate();
+          }, 1000);
         }}
         glossaryMode={glossaryMode}
       />

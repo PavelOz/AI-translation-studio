@@ -105,9 +105,7 @@ export function logErrorWithContext(
     },
     `Error in ${operation || 'operation'}: ${errorMessage}`,
   );
-}
-
-/**
+}/**
  * Log progress of a long-running operation
  * 
  * @param operation - Name of the operation

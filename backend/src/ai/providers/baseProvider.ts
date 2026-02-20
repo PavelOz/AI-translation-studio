@@ -28,10 +28,6 @@ export abstract class BaseProvider implements AIProvider {
     const isGlossaryRequest = /extract.*term|glossary.*term|return.*json.*array.*term/i.test(fullPrompt);
     const isSingleTermTranslation = /translate.*following.*technical.*term|return.*only.*translation/i.test(fullPrompt);
     
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'baseProvider.ts:21',message:'Generating mock response',data:{isStyleRuleRequest,isGlossaryRequest,isSingleTermTranslation,promptLength:prompt.length,systemPromptLength:systemPrompt.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'L'})}).catch(()=>{});
-    // #endregion
-    
     if (isStyleRuleRequest) {
       // Return mock style rules format (multiple rules to avoid "no rules extracted" error)
       const mockStyleRules = [

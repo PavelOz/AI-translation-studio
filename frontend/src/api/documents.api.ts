@@ -165,6 +165,10 @@ export const documentsApi = {
     error?: string;
     logs?: string[];
     results: Array<{ segmentId: string; method: 'tm' | 'ai'; targetMt: string | null; fuzzyScore?: number }>;
+    aiProvider?: string;
+    aiModel?: string;
+    aiConfigured?: boolean;
+    currentPhase?: 'tm_matching' | 'ai_translation';
   }> => {
     const response = await apiClient.get(`/documents/${documentId}/pretranslate/progress`);
     return response.data;

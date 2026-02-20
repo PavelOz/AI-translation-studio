@@ -740,6 +740,16 @@ export const searchTranslationMemory = async ({
   
   logger.info(`Included ${vectorIncluded} vector results in merge`);
   
+  /**
+   * Calculate weighted hybrid score from vector and fuzzy scores
+   * Uses weighted formula: (vectorScore * 0.7) + (fuzzyScore * 0.3)
+   */
+  const calculateHybridScore = (vectorScore: number, fuzzyScore: number): number => {
+    const vectorWeight = 0.7;
+    const fuzzyWeight = 0.3;
+    return Math.round((vectorScore * vectorWeight) + (fuzzyScore * fuzzyWeight));
+  };
+
   // Add fuzzy results (may override vector results if fuzzy score is higher)
   // Fuzzy results are already filtered by minScore in the scoring loop above
   scored.forEach((result) => {
@@ -748,20 +758,13 @@ export const searchTranslationMemory = async ({
       // New result from fuzzy search
       resultMap.set(result.id, result);
     } else {
-      // Result exists from both searches - mark as hybrid
-      if (result.fuzzyScore > existing.fuzzyScore) {
-        // Prefer the higher score, but mark as hybrid
-        resultMap.set(result.id, {
-          ...result,
-          searchMethod: 'hybrid' as const,
-        });
-      } else {
-        // Keep existing but mark as hybrid
-        resultMap.set(result.id, {
-          ...existing,
-          searchMethod: 'hybrid' as const,
-        });
-      }
+      // Result exists from both searches - use weighted hybrid formula
+      const hybridScore = calculateHybridScore(existing.fuzzyScore, result.fuzzyScore);
+      resultMap.set(result.id, {
+        ...result,
+        fuzzyScore: hybridScore,
+        searchMethod: 'hybrid' as const,
+      });
     }
   });
   

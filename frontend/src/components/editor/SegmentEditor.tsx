@@ -45,6 +45,10 @@ const SegmentEditor = memo(function SegmentEditor({
     const segmentChanged = lastSegmentIdRef.current !== segment.id;
     const newTargetText = segment.targetFinal || segment.targetMt || '';
     
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SegmentEditor.tsx:41',message:'SegmentEditor useEffect triggered',data:{segmentId:segment.id,segmentChanged,hasTargetFinal:!!segment.targetFinal,hasTargetMt:!!segment.targetMt,newTargetText:newTargetText.substring(0,50),currentTargetText:targetText.substring(0,50),isEditing:isEditingRef.current,status:segment.status,targetFinal:segment.targetFinal?.substring(0,50),targetMt:segment.targetMt?.substring(0,50)},timestamp:Date.now(),runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+    // #endregion
+    
     console.log('[SegmentEditor] Segment data update', {
       segmentId: segment.id,
       segmentChanged,
@@ -62,12 +66,18 @@ const SegmentEditor = memo(function SegmentEditor({
       isEditingRef.current = false;
       setTargetText(newTargetText);
       setLocalStatus(null); // Reset local status override
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SegmentEditor.tsx:59',message:'Segment changed - updating text',data:{segmentId:segment.id,targetText:newTargetText.substring(0,50)},timestamp:Date.now(),runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+      // #endregion
       console.log('[SegmentEditor] Updated target text for new segment', {
         segmentId: segment.id,
         targetText: newTargetText.substring(0, 50),
       });
     } else if (!isEditingRef.current && newTargetText !== targetText) {
       // Same segment, but data changed and user is not editing - update from external source (e.g., TM apply)
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SegmentEditor.tsx:69',message:'Updating text from external source',data:{segmentId:segment.id,oldText:targetText.substring(0,50),newText:newTargetText.substring(0,50),isEditing:isEditingRef.current},timestamp:Date.now(),runId:'run1',hypothesisId:'E'})}).catch(()=>{});
+      // #endregion
       console.log('[SegmentEditor] Updating target text from external source', {
         segmentId: segment.id,
         oldText: targetText.substring(0, 50),
@@ -75,6 +85,10 @@ const SegmentEditor = memo(function SegmentEditor({
       });
       setTargetText(newTargetText);
       setLocalStatus(null); // Reset local status override when external update happens
+    } else {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'SegmentEditor.tsx:78',message:'No update - blocked',data:{segmentId:segment.id,reason:isEditingRef.current?'isEditing=true':'newTargetText===targetText',isEditing:isEditingRef.current,newTargetText:newTargetText.substring(0,50),currentTargetText:targetText.substring(0,50)},timestamp:Date.now(),runId:'run1',hypothesisId:'F'})}).catch(()=>{});
+      // #endregion
     }
   }, [segment.id, segment.targetFinal, segment.targetMt, segment.status]);
 

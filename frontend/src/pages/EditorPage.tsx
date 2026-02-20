@@ -76,11 +76,15 @@ export default function EditorPage() {
 
   const { data: segmentsData, isLoading: isLoadingSegments, error: segmentsError, refetch: refetchSegments } = useQuery({
     queryKey: ['segments', documentId, statusFilter, searchQuery],
-    queryFn: () => {
+    queryFn: async () => {
       if (searchQuery) {
+        // For search queries, use a reasonable limit (search results are typically smaller)
         return segmentsApi.list(documentId!, 1, 1000, searchQuery);
       }
-      return segmentsApi.list(documentId!, 1, 1000);
+      // For full document view, first check total count, then load all segments
+      // Use a very large pageSize to load all segments in one request
+      // Backend supports this (no hard limit on segments)
+      return segmentsApi.list(documentId!, 1, 50000);
     },
     enabled: !!documentId,
   });
@@ -254,25 +258,51 @@ export default function EditorPage() {
     handleNext();
   }, [handleNext]);
 
-  const handleApplyTM = useCallback((targetText: string) => {
+  const handleApplyTM = useCallback(async (targetText: string) => {
+    // #region agent log
+    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EditorPage.tsx:261',message:'handleApplyTM called',data:{targetText:targetText.substring(0,50),hasActiveSegment:!!activeSegment,activeSegmentId:activeSegment?.id,hasSegmentsData:!!segmentsData,documentId,statusFilter,searchQuery},timestamp:Date.now(),runId:'run1',hypothesisId:'C'})}).catch(()=>{});
+    // #endregion
     if (activeSegment && segmentsData) {
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EditorPage.tsx:264',message:'Updating query cache',data:{queryKey:['segments',documentId,statusFilter,searchQuery],activeSegmentId:activeSegment.id,targetText:targetText.substring(0,50)},timestamp:Date.now(),runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+      // #endregion
       // Optimistically update the query cache immediately for instant UI feedback
-      queryClient.setQueryData(['segments', documentId, statusFilter, searchQuery], (oldData: any) => {
+      const updatedData = queryClient.setQueryData(['segments', documentId, statusFilter, searchQuery], (oldData: any) => {
         if (!oldData) return oldData;
+        const updatedSegments = oldData.segments.map((seg: Segment) =>
+          seg.id === activeSegment.id
+            ? {
+                ...seg,
+                targetFinal: targetText,
+                targetMt: targetText,
+                status: 'MT' as const,
+              }
+            : seg
+        );
+        // #region agent log
+        const foundSegment = updatedSegments.find((seg:Segment)=>seg.id===activeSegment.id);
+        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EditorPage.tsx:268',message:'Query cache update callback',data:{oldSegmentsCount:oldData.segments.length,updatedSegmentsCount:updatedSegments.length,foundSegment:foundSegment?{id:activeSegment.id,targetFinal:foundSegment.targetFinal?.substring(0,50),targetMt:foundSegment.targetMt?.substring(0,50)}:null},timestamp:Date.now(),runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+        // #endregion
         return {
           ...oldData,
-          segments: oldData.segments.map((seg: Segment) =>
-            seg.id === activeSegment.id
-              ? {
-                  ...seg,
-                  targetFinal: targetText,
-                  targetMt: targetText,
-                  status: 'MT' as const,
-                }
-              : seg
-          ),
+          segments: updatedSegments,
         };
       });
+      // #region agent log
+      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EditorPage.tsx:279',message:'Query cache updated',data:{hasUpdatedData:!!updatedData,updatedSegmentsCount:updatedData?.segments?.length,updatedSegment:updatedData?.segments?.find((s:Segment)=>s.id===activeSegment.id)?{id:activeSegment.id,targetFinal:updatedData.segments.find((s:Segment)=>s.id===activeSegment.id).targetFinal?.substring(0,50)}:null},timestamp:Date.now(),runId:'run1',hypothesisId:'D'})}).catch(()=>{});
+      // #endregion
+      
+      // Also update via API to ensure data is saved to database
+      try {
+        await segmentsApi.update(activeSegment.id, {
+          targetFinal: targetText,
+          status: 'MT',
+        });
+      } catch (error: any) {
+        console.error('Failed to save translation to database:', error);
+        // Revert optimistic update on error
+        queryClient.invalidateQueries({ queryKey: ['segments', documentId] });
+      }
       
       // Invalidate queries in background after a short delay to sync with server
       setTimeout(() => {
@@ -497,20 +527,26 @@ export default function EditorPage() {
         <EditorToolbar
           documentId={documentId!}
           selectedSegmentIds={selectedSegmentIds}
-          onRefresh={() => {
+          onRefresh={async () => {
             console.log('[EditorPage] onRefresh called - invalidating and refetching segments');
-            // Invalidate query cache first to ensure fresh data
-            queryClient.invalidateQueries({ queryKey: ['segments', documentId] });
-            refetchSegments().then((result) => {
-              console.log('[EditorPage] Segments refetched', {
-                dataCount: result.data?.segments?.length || 0,
-                total: result.data?.total || 0,
-                hasTranslations: result.data?.segments?.some((s: Segment) => s.targetMt || s.targetFinal) || false,
-                segmentsWithTargetMt: result.data?.segments?.filter((s: Segment) => s.targetMt).length || 0,
-                segmentsWithTargetFinal: result.data?.segments?.filter((s: Segment) => s.targetFinal).length || 0,
-              });
-            }).catch((error) => {
-              console.error('[EditorPage] Error refetching segments:', error);
+            // Invalidate all segment-related queries to ensure fresh data
+            await queryClient.invalidateQueries({ 
+              queryKey: ['segments', documentId],
+              exact: false, // Invalidate all queries that start with this key
+            });
+            // Also invalidate document query in case it has segment counts
+            await queryClient.invalidateQueries({ 
+              queryKey: ['documents', documentId],
+            });
+            // Force refetch with fresh data
+            const result = await refetchSegments();
+            console.log('[EditorPage] Segments refetched', {
+              dataCount: result.data?.segments?.length || 0,
+              total: result.data?.total || 0,
+              hasTranslations: result.data?.segments?.some((s: Segment) => s.targetMt || s.targetFinal) || false,
+              segmentsWithTargetMt: result.data?.segments?.filter((s: Segment) => s.targetMt).length || 0,
+              segmentsWithTargetFinal: result.data?.segments?.filter((s: Segment) => s.targetFinal).length || 0,
+              sampleSegment: result.data?.segments?.find((s: Segment) => s.targetMt || s.targetFinal),
             });
           }}
           onBatchTranslate={refetchSegments}
@@ -720,6 +756,9 @@ export default function EditorPage() {
                       targetLocale={documentData.targetLocale}
                       projectId={documentData.projectId}
                       segmentId={activeSegment.id}
+                      glossaryMode={glossaryMode}
+                      currentTargetText={activeSegment.targetFinal || activeSegment.targetMt || ''}
+                      onApply={handleApplyTM}
                       glossaryMode={glossaryMode}
                       currentTargetText={activeSegment.targetFinal || activeSegment.targetMt}
                       onApply={handleApplyTM}

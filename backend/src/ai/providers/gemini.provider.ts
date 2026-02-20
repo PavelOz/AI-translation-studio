@@ -254,16 +254,40 @@ export class GeminiProvider extends BaseProvider {
       modelAttempts.push('gemini-2.0-flash-exp', 'gemini-1.5-pro', 'gemini-1.5-pro-001', 'gemini-pro');
     }
     
-    // 2. Try models from the available list
-    supportedModels.forEach(m => {
+    // 2. Try models from the available list, but prioritize non-thinking models
+    // Filter out thinking models (2.5-flash, 2.5-pro) that consume tokens on thoughts
+    const nonThinkingModels = supportedModels.filter(m => 
+      !m.shortName.includes('2.5-flash') && 
+      !m.shortName.includes('2.5-pro') &&
+      !m.shortName.includes('thinking')
+    );
+    const thinkingModels = supportedModels.filter(m => 
+      m.shortName.includes('2.5-flash') || 
+      m.shortName.includes('2.5-pro') ||
+      m.shortName.includes('thinking')
+    );
+    
+    // Add non-thinking models first (preferred)
+    nonThinkingModels.forEach(m => {
+      if (!modelAttempts.includes(m.shortName)) {
+        modelAttempts.push(m.shortName);
+      }
+    });
+    
+    // Add thinking models last (fallback only)
+    thinkingModels.forEach(m => {
       if (!modelAttempts.includes(m.shortName)) {
         modelAttempts.push(m.shortName);
       }
     });
     
     // 3. Fallback defaults (ensure we always have at least one working model)
+    // Prefer models without thoughts to avoid token consumption issues
     if (!modelAttempts.includes('gemini-1.5-pro')) {
       modelAttempts.push('gemini-1.5-pro');
+    }
+    if (!modelAttempts.includes('gemini-pro-latest')) {
+      modelAttempts.push('gemini-pro-latest'); // Use -latest variant which is available
     }
     if (!modelAttempts.includes('gemini-pro')) {
       modelAttempts.push('gemini-pro');
@@ -295,10 +319,14 @@ export class GeminiProvider extends BaseProvider {
         // All newer models (2.0, 2.5, 3.0) use v1 API
         // Older models use v1beta
         // Note: gemini-2.5-pro may not be available in all regions/API versions
+        // Note: gemini-pro-latest uses v1 API (it's a newer variant)
         let attemptEndpoint = endpoint;
         if (modelAttempt.includes('thinking') || modelAttempt.includes('exp')) {
           attemptEndpoint = 'https://generativelanguage.googleapis.com/v1alpha/models';
-        } else if (modelAttempt === 'gemini-pro' || (!modelAttempt.includes('2.') && !modelAttempt.includes('3.'))) {
+        } else if (modelAttempt === 'gemini-pro-latest' || modelAttempt.includes('-latest')) {
+          // -latest variants use v1 API
+          attemptEndpoint = 'https://generativelanguage.googleapis.com/v1/models';
+        } else if (modelAttempt === 'gemini-pro' || (!modelAttempt.includes('2.') && !modelAttempt.includes('3.') && !modelAttempt.includes('-latest'))) {
           attemptEndpoint = 'https://generativelanguage.googleapis.com/v1beta/models';
         } else {
           // Newer models (2.0+, 2.5+, 3.0+) use v1 API
@@ -346,7 +374,13 @@ export class GeminiProvider extends BaseProvider {
           apiUrl: apiUrl.replace(this.apiKey || '', '***'),
         }, 'Trying Gemini model');
         
-        const maxOutputTokens = request.maxTokens ? Math.min(request.maxTokens, 8192) : 2048;
+        // For models with thoughts (2.5-flash, 2.5-pro), increase maxTokens to compensate
+        // Thoughts can consume 50-75% of tokens, so we need more headroom
+        const isThoughtsModel = modelAttempt.includes('2.5-flash') || modelAttempt.includes('2.5-pro');
+        const baseMaxTokens = request.maxTokens ? Math.min(request.maxTokens, 8192) : 2048;
+        const maxOutputTokens = isThoughtsModel 
+          ? Math.min(baseMaxTokens * 3, 8192) // Triple for thoughts models to ensure enough output tokens
+          : baseMaxTokens;
         
         // Log maxTokens for debugging
         if (request.maxTokens && request.maxTokens > 2048) {

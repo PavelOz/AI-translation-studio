@@ -434,9 +434,7 @@ export async function getGlossaryEmbeddingStats(options?: { projectId?: string }
     withoutEmbedding,
     coverage: Math.round(coverage * 100) / 100, // Round to 2 decimal places
   };
-}
-
-/**
+}/**
  * Search Glossary entries using vector similarity
  * @param queryEmbedding - The embedding vector to search for
  * @param options - Search options

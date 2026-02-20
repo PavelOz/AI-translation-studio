@@ -103,10 +103,78 @@ export class AIOrchestrator {
   }
 
   /**
+   * Get provider-specific maximum input tokens based on model capabilities
+   * Returns appropriate limit to prevent token limit exceeded errors
+   */
+  private getMaxInputTokens(provider?: string, model?: string): number {
+    if (!provider || !model) {
+      return 4000; // Safe default for unknown providers
+    }
+
+    const providerLower = provider.toLowerCase();
+    const modelLower = model.toLowerCase();
+
+    // Gemini 1.5 Pro supports up to 2M tokens, but we use 12K for practical batching
+    if (providerLower === 'gemini' && modelLower.includes('1.5-pro')) {
+      return 12000;
+    }
+
+    // GPT-4o supports up to 128K tokens, but we use 8K for practical batching
+    if (providerLower === 'openai' && (modelLower.includes('gpt-4') || modelLower.includes('gpt-4o'))) {
+      return 8000;
+    }
+
+    // YandexGPT has lower limits (~8K), use conservative 4K
+    if (providerLower === 'yandex') {
+      return 4000;
+    }
+
+    // Default safe limit for other providers
+    return 6000;
+  }
+
+  /**
+   * Validate formatting tags in text using stack-based approach
+   * Returns validation result with list of issues if any
+   */
+  private validateTags(text: string): { valid: boolean; issues: string[] } {
+    const issues: string[] = [];
+    const stack: number[] = [];
+    const tagPattern = /\{\{(\/?)(\d+)\}\}/g;
+    let match;
+
+    while ((match = tagPattern.exec(text)) !== null) {
+      const isClose = match[1] === '/';
+      const tagId = parseInt(match[2], 10);
+
+      if (isClose) {
+        if (stack.length === 0) {
+          issues.push(`Unmatched closing tag: {{/${tagId}}}`);
+        } else {
+          const expectedId = stack.pop();
+          if (expectedId !== tagId) {
+            issues.push(`Tag mismatch: expected {{/${expectedId}}}, found {{/${tagId}}}`);
+          }
+        }
+      } else {
+        stack.push(tagId);
+      }
+    }
+
+    if (stack.length > 0) {
+      issues.push(`Unclosed tags: ${stack.map(id => `{{${id}}}`).join(', ')}`);
+    }
+
+    return { valid: issues.length === 0, issues };
+  }
+
+  /**
    * Plan token-based batches to prevent token limit exceeded errors
    * Returns array of batch ranges {start, end} where end is exclusive
    */
-  private planBatches(segments: OrchestratorSegment[], maxInputTokens: number = 3000): Array<{start: number, end: number}> {
+  private planBatches(segments: OrchestratorSegment[], maxInputTokens?: number, provider?: string, model?: string): Array<{start: number, end: number}> {
+    // Use provider-specific limit if not explicitly provided
+    const effectiveMaxTokens = maxInputTokens ?? this.getMaxInputTokens(provider, model);
     const batches: Array<{start: number, end: number}> = [];
     let currentStart = 0;
     let currentTokens = 0;
@@ -117,7 +185,7 @@ export class AIOrchestrator {
       const segTokens = this.estimateTokens(segments[i].sourceText) + 100; // +100 for JSON overhead
       
       // If this single segment exceeds limit, create a batch with just this segment
-      if (segTokens + PROMPT_OVERHEAD > maxInputTokens) {
+      if (segTokens + PROMPT_OVERHEAD > effectiveMaxTokens) {
         // If we have accumulated segments, save them first
         if (i > currentStart) {
           batches.push({ start: currentStart, end: i });
@@ -130,7 +198,7 @@ export class AIOrchestrator {
       }
       
       // If adding this segment exceeds limit AND we have at least one segment in batch
-      if (currentTokens + segTokens + PROMPT_OVERHEAD > maxInputTokens && i > currentStart) {
+      if (currentTokens + segTokens + PROMPT_OVERHEAD > effectiveMaxTokens && i > currentStart) {
         batches.push({ start: currentStart, end: i });
         currentStart = i;
         currentTokens = 0;
@@ -334,7 +402,8 @@ export class AIOrchestrator {
     batch: OrchestratorSegment[], 
     options: TranslateSegmentsOptions,
     prevContext?: string | null,
-    nextContext?: string | null
+    nextContext?: string | null,
+    strictMode?: boolean
   ): string {
     const project = options.project ?? {};
     const guidelineText = this.buildGuidelineSection(options.guidelines);
@@ -436,10 +505,28 @@ export class AIOrchestrator {
     // 4. Source Segments (Highly Dynamic)
     return [
       // 1. SYSTEM PERSONA WITH CONTEXT (Top Priority - AI sees this first)
-      `You are a professional technical translator specializing in ${sourceLangCode} to ${targetLangCode}.`,
+      `You are a professional technical translator specializing in ${sourceLang} (${sourceLangCode}) to ${targetLang} (${targetLangCode}).`,
       docContext ? `\n=== GLOBAL DOCUMENT CONTEXT (CRITICAL) ===\n${docContext}\n` : '',
+      `CRITICAL TRANSLATION REQUIREMENT:`,
+      `- Source language: ${sourceLang} (${sourceLangCode})`,
+      `- Target language: ${targetLang} (${targetLangCode})`,
+      `- You MUST translate ALL source text from ${sourceLang} (${sourceLangCode}) to ${targetLang} (${targetLangCode})`,
+      `- NEVER return the source text unchanged in the target_text field - it MUST be translated`,
+      `- The target_text field must contain ONLY the translation in ${targetLang}, never the original ${sourceLang} text`,
+      `- Even if the source text appears similar to ${targetLang}, you must still provide a proper translation`,
+      `- Your output MUST be in ${targetLang} (${targetLangCode}) only - do not mix languages`,
       `Your goal is to produce a translation that flows naturally in the target language while preserving the original technical meaning.`,
       '',
+      // Model-specific instructions for gemini-1.5-pro
+      ...(options.model?.includes('gemini-1.5-pro') && options.document?.clusterSummary ? [
+        '### 🎯 TERMINOLOGY ACCURACY REQUIREMENT (gemini-1.5-pro):',
+        'Ensure maximum terminological accuracy by cross-referencing with the Document Cluster Summary below.',
+        'The Cluster Summary contains domain-specific terminology patterns and context that must be respected.',
+        '',
+        '=== DOCUMENT CLUSTER SUMMARY ===',
+        options.document.clusterSummary,
+        '',
+      ] : []),
       '### 👑 CONTEXT HIERARCHY & PRIORITIES:',
       '1. **TERMINOLOGY (NON-NEGOTIABLE):** Strict adherence to the Glossary below is mandatory.',
       '2. **CONSISTENCY (CRITICAL):** Use the provided "Translation Memory Examples" to match the tone and style of previous work.',
@@ -465,7 +552,17 @@ export class AIOrchestrator {
       '',
       '=== OUTPUT FORMAT ===',
       'Return ONLY valid JSON array matching this schema:',
-      `[{"segment_id":"<id>","target_mt":"<translation>"}]`,
+      ...(strictMode ? [
+        `[{"segment_id":"<id>","target_text":"<translation>"}]`,
+        '',
+        'NOTE: Strict mode - omit analysis field to save output tokens.',
+      ] : [
+        `[{"segment_id":"<id>","analysis":"<2-3 words about key translation choice>","target_text":"<translation>"}]`,
+        '',
+        'IMPORTANT: The "analysis" field should briefly capture the key translation decision (2-3 words).',
+        'Examples: "legal term", "past tense", "technical spec", "idiomatic expression", "formal register", "glossary match".',
+        'This helps you focus on the critical choice without spending thousands of tokens on reasoning.',
+      ]),
       '',
       // Previous context (if provided)
       ...(prevContext ? [
@@ -477,15 +574,6 @@ export class AIOrchestrator {
       ...batch.map((segment) => {
         // Convert formatting tags to XML for AI-friendly processing
         const sourceTextXml = this.convertTagsToXml(segment.sourceText);
-        // #region agent log
-        // Simple heuristic: check if text contains Cyrillic characters (Russian/Kazakh/etc)
-        const hasCyrillic = /[а-яёА-ЯЁҚқҒғҢңҰұҮүӘәІіӨөҺһ]/.test(segment.sourceText);
-        const hasLatin = /[a-zA-Z]/.test(segment.sourceText);
-        const appearsRussian = hasCyrillic && !hasLatin;
-        const appearsEnglish = hasLatin && !hasCyrillic;
-        const configuredSourceIsRussian = ['ru', 'kk', 'uk', 'be', 'ky', 'uz', 'tg', 'tk', 'mn'].includes(sourceLangCode.toLowerCase());
-        const configuredSourceIsEnglish = sourceLangCode.toLowerCase().startsWith('en');
-        const possibleMismatch = (appearsRussian && configuredSourceIsEnglish) || (appearsEnglish && configuredSourceIsRussian);
         return [
           `ID: ${segment.segmentId}`,
           `Source: ${sourceTextXml}`,
@@ -770,6 +858,11 @@ export class AIOrchestrator {
     const end = cleanedText.lastIndexOf(']');
     
     if (start === -1 || end === -1 || end < start) {
+      logger.error({
+        responseLength: cleanedText.length,
+        responsePreview: cleanedText.substring(0, 500),
+        fallbackSegmentsCount: fallbackSegments.length,
+      }, 'Provider response did not contain a JSON array');
       throw new Error('Provider response did not contain a JSON array');
     }
     
@@ -778,6 +871,11 @@ export class AIOrchestrator {
     try {
         parsed = JSON.parse(sliced);
     } catch (e) {
+        logger.error({
+          jsonSnippet: sliced.substring(0, 500),
+          jsonLength: sliced.length,
+          error: (e as Error).message,
+        }, 'JSON Parse Error in provider response');
         throw new Error(`JSON Parse Error: ${(e as Error).message}`);
     }
 
@@ -787,17 +885,37 @@ export class AIOrchestrator {
 
     const map = new Map<string, string>();
     parsed.forEach((entry: any) => {
-      if (entry.segment_id && typeof entry.target_mt === 'string') {
-        let targetText = entry.target_mt.trim();
+      // Support both old format (target_mt) and new format (target_text) for backward compatibility
+      const targetField = entry.target_text || entry.target_mt;
+      if (entry.segment_id && typeof targetField === 'string') {
+        let targetText = targetField.trim();
         
-        // Remove mock/synthetic translation markers
-        targetText = targetText.replace(/\s*\[(?:gemini|openai|yandex|deepseek|gpt|ai)\s+synthetic\s+translation\]\s*/gi, '').trim();
+        // Log analysis if present (for debugging/quality tracking)
+        if (entry.analysis && typeof entry.analysis === 'string') {
+          logger.debug({
+            segmentId: entry.segment_id,
+            analysis: entry.analysis,
+          }, 'Translation analysis from AI');
+        }
+        
+        // Remove mock/synthetic translation markers (including "to <lang>" suffix)
+        targetText = targetText.replace(/\s*\[(?:gemini|openai|yandex|deepseek|gpt|ai)\s+synthetic\s+translation(?:\s+to\s+\w+)?\]\s*/gi, '').trim();
+        targetText = targetText.replace(/\s*\[(?:gemini|openai|yandex|deepseek|gpt|ai)\s+mock\s+translation(?:\s+to\s+\w+)?\]\s*/gi, '').trim();
         targetText = targetText.replace(/\s*\[mock\s+translation\]\s*/gi, '').trim();
         targetText = targetText.replace(/\s*\[synthetic\]\s*/gi, '').trim();
         targetText = targetText.replace(/\s*\[\s*\]\s*$/, '').trim();
         
         // Convert XML tags back to formatting tags
         targetText = this.convertXmlToTags(targetText);
+        
+        // Validate tags after conversion
+        const validation = this.validateTags(targetText);
+        if (!validation.valid) {
+          logger.warn({
+            segmentId: entry.segment_id,
+            issues: validation.issues,
+          }, 'Tag Validation Failed');
+        }
         
         map.set(entry.segment_id, targetText);
       }
@@ -807,10 +925,41 @@ export class AIOrchestrator {
       throw new Error('Provider response missing target text');
     }
 
-    return fallbackSegments.map((segment) => ({
-      segmentId: segment.segmentId,
-      targetText: map.get(segment.segmentId) ?? segment.sourceText,
-    }));
+    // Validate that translations are actually different from source text
+    return fallbackSegments.map((segment) => {
+      const targetText = map.get(segment.segmentId) ?? segment.sourceText;
+      
+      // Remove formatting tags for comparison
+      const sourceTextClean = segment.sourceText.replace(/\{\{\/?\d+\}\}/g, '').trim();
+      const targetTextClean = targetText.replace(/\{\{\/?\d+\}\}/g, '').trim();
+      
+      // Check if translation is identical to source (case-insensitive, ignoring whitespace)
+      const sourceNormalized = sourceTextClean.toLowerCase().replace(/\s+/g, ' ');
+      const targetNormalized = targetTextClean.toLowerCase().replace(/\s+/g, ' ');
+      
+      // Debug: Check if translation is identical to source
+      const isIdentical = sourceNormalized === targetNormalized;
+      const sourceHasCyrillic = /[а-яёА-ЯЁ]/.test(sourceTextClean);
+      const targetHasCyrillic = /[а-яёА-ЯЁ]/.test(targetTextClean);
+      
+      if (sourceNormalized === targetNormalized && sourceTextClean.length > 0) {
+        logger.error({
+          segmentId: segment.segmentId,
+          sourceText: segment.sourceText.substring(0, 100),
+          targetText: targetText.substring(0, 100),
+          sourceHasCyrillic,
+          targetHasCyrillic,
+          warning: 'Translation appears identical to source text - AI may have failed to translate. Using source text as fallback (will need manual correction).',
+        }, 'Translation validation error: text not translated - using source as fallback');
+        // Use source text as fallback - this will be visible in UI and user can correct it
+        // We don't throw an error because we want the batch to continue processing other segments
+      }
+      
+      return {
+        segmentId: segment.segmentId,
+        targetText,
+      };
+    });
   }
 
   private ruleBasedBatch(segments: OrchestratorSegment[]): OrchestratorResult[] {
@@ -835,16 +984,14 @@ export class AIOrchestrator {
 
     // Extract language codes and names for translation direction
     const project = options.project ?? {};
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:649',message:'translateSegments: Input locale values',data:{optionsSourceLocale:options.sourceLocale,optionsTargetLocale:options.targetLocale,projectSourceLang:project.sourceLang,projectTargetLang:project.targetLang},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
     const sourceLangCode = options.sourceLocale ?? project.sourceLang ?? 'ru';
     const targetLangCode = options.targetLocale ?? project.targetLang ?? 'en';
     const sourceLang = getLanguageName(sourceLangCode);
     const targetLang = getLanguageName(targetLangCode);
 
     // Plan token-based batches to prevent token limit exceeded errors
-    const batchRanges = this.planBatches(options.segments, 4000); // 4k token safety limit
+    // Use provider-specific limits for optimal context window usage
+    const batchRanges = this.planBatches(options.segments, undefined, provider.name, model);
     
     // Process each batch
     for (const range of batchRanges) {
@@ -908,7 +1055,7 @@ export class AIOrchestrator {
       let success = false;
       while (attempt < retries && !success) {
         try {
-          const prompt = this.buildBatchPrompt(batchSegments, options, prevContextString, nextContextString);
+          const prompt = this.buildBatchPrompt(batchSegments, options, prevContextString, nextContextString, options.strictMode || false);
           
           // Log prompt for YandexGPT debugging
           if (provider.name === 'yandex') {
@@ -980,10 +1127,6 @@ export class AIOrchestrator {
             systemPrompt: systemPersona, // Explicit system prompt injection
             segments: batchSegments.map((segment) => ({ segmentId: segment.segmentId, sourceText: segment.sourceText })),
           });
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:710',message:'translateSegments: Provider callModel completed',data:{providerName:provider.name,responseLength:response.outputText?.length||0,responsePreview:response.outputText?.substring(0,100)||'',hasSystemPrompt:!!systemPersona},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-          // #endregion
-          
           // Log response for YandexGPT debugging
           if (provider.name === 'yandex') {
             logger.debug({
@@ -1011,7 +1154,69 @@ export class AIOrchestrator {
           success = true;
         } catch (error) {
           attempt += 1;
-          logger.warn({ provider: provider.name, chunkId, attempt, error: (error as Error).message }, 'AI translation chunk failed');
+          const errorMessage = (error as Error).message;
+          const isParseError = errorMessage.includes('JSON') || errorMessage.includes('array') || errorMessage.includes('Parse');
+          
+          logger.warn({ 
+            provider: provider.name, 
+            chunkId, 
+            attempt, 
+            error: errorMessage,
+            isParseError,
+            willRetryWithStrictMode: isParseError && !options.strictMode && attempt < retries,
+          }, 'AI translation chunk failed');
+          
+          // If parsing error and not already in strict mode, retry with strict mode
+          if (isParseError && !options.strictMode && attempt < retries) {
+            logger.info({ 
+              provider: provider.name, 
+              chunkId, 
+              attempt,
+              reason: 'Response was truncated or malformed - retrying in strict mode (without analysis field)',
+            }, 'Retrying translation with strict mode to save output tokens');
+            
+            // Retry with strict mode
+            const strictOptions = { ...options, strictMode: true };
+            const prompt = this.buildBatchPrompt(batchSegments, strictOptions, prevContextString, nextContextString, true);
+            
+            try {
+              const response = await provider.callModel({
+                prompt,
+                model,
+                temperature: options.temperature !== undefined ? options.temperature : 0.4,
+                maxTokens,
+                systemPrompt: systemPersona,
+                segments: batchSegments.map((segment) => ({ segmentId: segment.segmentId, sourceText: segment.sourceText })),
+              });
+              
+              const parsed = this.parseProviderResponse(response.outputText, batchSegments);
+              parsed.forEach((item) =>
+                results.push({
+                  segmentId: item.segmentId,
+                  targetText: item.targetText,
+                  provider: provider.name,
+                  model,
+                  confidence: 0.9,
+                  usage: response.usage,
+                  raw: response.raw,
+                  fallback: false
+                }),
+              );
+              logger.info({ provider: provider.name, chunkId, strictMode: true }, 'AI translation chunk completed (strict mode retry)');
+              success = true;
+              continue; // Skip the normal retry logic below
+            } catch (strictError) {
+              logger.warn({ 
+                provider: provider.name, 
+                chunkId, 
+                attempt, 
+                error: (strictError as Error).message,
+                strictMode: true,
+              }, 'AI translation chunk failed even in strict mode');
+              // Fall through to normal retry logic
+            }
+          }
+          
           if (attempt >= retries) {
             const fallback = this.ruleBasedBatch(batchSegments);
             results.push(...fallback);
@@ -1117,9 +1322,10 @@ export class AIOrchestrator {
       }],
     });
 
-    // Remove mock/synthetic translation markers from draft
+    // Remove mock/synthetic translation markers from draft (including "to <lang>" suffix)
     let draftText = result.targetText;
-    draftText = draftText.replace(/\s*\[(?:gemini|openai|yandex|deepseek|gpt|ai)\s+synthetic\s+translation\]\s*/gi, '').trim();
+    draftText = draftText.replace(/\s*\[(?:gemini|openai|yandex|deepseek|gpt|ai)\s+synthetic\s+translation(?:\s+to\s+\w+)?\]\s*/gi, '').trim();
+    draftText = draftText.replace(/\s*\[(?:gemini|openai|yandex|deepseek|gpt|ai)\s+mock\s+translation(?:\s+to\s+\w+)?\]\s*/gi, '').trim();
     draftText = draftText.replace(/\s*\[mock\s+translation\]\s*/gi, '').trim();
     draftText = draftText.replace(/\s*\[synthetic\]\s*/gi, '').trim();
     draftText = draftText.replace(/\s*\[\s*\]\s*$/, '').trim();
@@ -1449,9 +1655,6 @@ export class AIOrchestrator {
     const sourceLangCode = sourceLocale || 'en';
     const targetLangCode = targetLocale || 'ru';
     const systemPersona = `You are a Senior QA Linguist. TRANSLATION DIRECTION: ${sourceLangCode} → ${targetLangCode}. You are checking a translation FROM ${sourceLangCode} (${sourceLang}, source/input) TO ${targetLangCode} (${targetLang}, target/output). CRITICAL: The Source text is in ${sourceLangCode} (${sourceLang}). The Draft text is a translation into ${targetLangCode} (${targetLang}). You must verify that the Draft uses the correct ${targetLangCode} terms from the glossary, not ${sourceLangCode} terms. Your analysis must be accurate and focused on glossary compliance and naturalness.`;
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:1195',message:'runCritique: System persona constructed',data:{sourceLangCode,targetLangCode,sourceLang,targetLang,systemPersonaLength:systemPersona.length,systemPersonaPreview:systemPersona.substring(0,200),providerName:provider.name},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'D'})}).catch(()=>{});
-    // #endregion
     
     const response = await provider.callModel({
       prompt,
@@ -1461,9 +1664,6 @@ export class AIOrchestrator {
       systemPrompt: systemPersona, // Explicit system prompt injection
       segments: [{ segmentId: 'critique', sourceText }],
     });
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'orchestrator.ts:1207',message:'runCritique: Provider callModel completed',data:{providerName:provider.name,responseLength:response.outputText?.length||0,hasSystemPrompt:!!systemPersona},timestamp:Date.now(),sessionId:'debug-session',runId:'post-fix',hypothesisId:'D'})}).catch(()=>{});
-    // #endregion
 
     const text = response.outputText.trim();
     let errors: any[] = [];
@@ -1818,8 +2018,9 @@ export class AIOrchestrator {
       }
       
       // Remove mock/synthetic translation markers (e.g., "[gemini synthetic translation]", "[openai synthetic translation]")
-      // These are added by the mock response when API keys are missing
-      final = final.replace(/\s*\[(?:gemini|openai|yandex|deepseek|gpt|ai)\s+synthetic\s+translation\]\s*/gi, '').trim();
+      // These are added by the mock response when API keys are missing (including "to <lang>" suffix)
+      final = final.replace(/\s*\[(?:gemini|openai|yandex|deepseek|gpt|ai)\s+synthetic\s+translation(?:\s+to\s+\w+)?\]\s*/gi, '').trim();
+      final = final.replace(/\s*\[(?:gemini|openai|yandex|deepseek|gpt|ai)\s+mock\s+translation(?:\s+to\s+\w+)?\]\s*/gi, '').trim();
       
       // Also remove any other common mock markers
       final = final.replace(/\s*\[mock\s+translation\]\s*/gi, '').trim();
@@ -1831,6 +2032,15 @@ export class AIOrchestrator {
       if (!final || final.length === 0) {
         logger.warn('fixTranslation: Final text is empty after processing, returning draft');
         return { finalText: draftText, modelUsed: model, usage: response.usage };
+      }
+
+      // Validate tags after all processing
+      const validation = this.validateTags(final);
+      if (!validation.valid) {
+        logger.warn({
+          segmentId: 'fix',
+          issues: validation.issues,
+        }, 'Tag Validation Failed');
       }
 
       logger.debug({

@@ -18,12 +18,21 @@ interface PretranslateProgress {
     targetMt: string | null;
     fuzzyScore?: number;
   }>;
+  // AI configuration info
+  aiProvider?: string;
+  aiModel?: string;
+  aiConfigured?: boolean; // Whether AI is properly configured (has API key)
+  currentPhase?: 'tm_matching' | 'ai_translation'; // Current processing phase
 }
 
 const progressStore = new Map<string, PretranslateProgress>();
 const cancellationFlags = new Set<string>();
 
-export const createProgress = (documentId: string, totalSegments: number): void => {
+export const createProgress = (
+  documentId: string, 
+  totalSegments: number,
+  aiConfig?: { provider?: string; model?: string; configured?: boolean }
+): void => {
   progressStore.set(documentId, {
     documentId,
     status: 'running',
@@ -33,13 +42,16 @@ export const createProgress = (documentId: string, totalSegments: number): void 
     aiApplied: 0,
     logs: [],
     results: [],
+    aiProvider: aiConfig?.provider,
+    aiModel: aiConfig?.model,
+    aiConfigured: aiConfig?.configured,
   });
   cancellationFlags.delete(documentId); // Clear any previous cancellation
 };
 
 export const updateProgress = (
   documentId: string,
-  update: Partial<Pick<PretranslateProgress, 'currentSegment' | 'tmApplied' | 'aiApplied' | 'currentSegmentId' | 'currentSegmentText'>>,
+  update: Partial<Pick<PretranslateProgress, 'currentSegment' | 'tmApplied' | 'aiApplied' | 'currentSegmentId' | 'currentSegmentText' | 'currentPhase'>>,
 ): void => {
   const progress = progressStore.get(documentId);
   if (progress) {

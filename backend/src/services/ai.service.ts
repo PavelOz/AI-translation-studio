@@ -2286,11 +2286,6 @@ export const pretranslateDocument = async (
   fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:1988',message:'Pretranslate: Segment filtering complete',data:{documentId,eligibleCount:eligibleSegments.length,totalCount:document.segments.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
   // #endregion
 
-  // Initialize progress tracking BEFORE checking if segments are empty
-  // This ensures progress exists even if there are no segments to process
-  createProgress(documentId, eligibleSegments.length);
-  addLogMessage(documentId, `🚀 Starting pretranslation: ${eligibleSegments.length} segments to process`);
-
   // Declare variables outside try block so they're accessible in catch
   // Smaller batch size = more frequent saves = better preservation on cancellation
   const SAVE_BATCH_SIZE = 5;
@@ -2328,6 +2323,29 @@ export const pretranslateDocument = async (
     const effectiveTemperature = options?.temperature !== undefined 
       ? options.temperature 
       : (context.settings?.temperature ?? getDefaultTemperature(effectiveProvider || 'gemini'));
+    
+    // Check if AI is properly configured
+    const hasAiConfig = context.settings || (options?.provider && options?.model);
+    const hasApiKey = !!context.apiKey || (effectiveProvider === 'yandex' && !!context.yandexFolderId);
+    
+    // Initialize progress tracking with AI configuration info
+    // This ensures progress exists even if there are no segments to process
+    createProgress(documentId, eligibleSegments.length, {
+      provider: effectiveProvider,
+      model: effectiveModel,
+      configured: hasAiConfig && hasApiKey,
+    });
+    
+    // Log AI configuration status
+    if (hasAiConfig && hasApiKey) {
+      addLogMessage(documentId, `✅ AI configured: ${effectiveProvider} / ${effectiveModel}`);
+    } else if (hasAiConfig && !hasApiKey) {
+      addLogMessage(documentId, `⚠️ AI provider/model set but API key missing. AI translations will be skipped.`);
+    } else {
+      addLogMessage(documentId, `ℹ️ AI not configured. Only TM matches will be applied.`);
+    }
+    
+    addLogMessage(documentId, `🚀 Starting pretranslation: ${eligibleSegments.length} segments to process`);
     
     // Validate that we have required AI configuration
     if (!effectiveProvider || !effectiveModel) {
@@ -2372,6 +2390,10 @@ export const pretranslateDocument = async (
 
     // Step 1: Apply 100% TM matches (skip if skipTm is true)
     if (!options?.skipTm) {
+      // Update progress to show we're in Phase 1 (TM Matching)
+      updateProgress(documentId, {
+        currentPhase: 'tm_matching',
+      });
       addLogMessage(documentId, `🚀 Starting Pass 1: Scanning ${eligibleSegments.length} segments for 100% TM matches...`);
       // #region agent log
       fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2073',message:'Pretranslate: Starting TM matching loop',data:{documentId,eligibleCount:eligibleSegments.length,queuedForAICount:queuedForAI.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
@@ -2477,9 +2499,15 @@ export const pretranslateDocument = async (
           break; // Exit loop to allow processing of queued segments
         }
 
-        // Update progress counters less frequently
-        if (responseLog.filter((r) => r.method === 'tm').length % 10 === 0 || i === eligibleSegments.length - 1) {
-          updateProgress(documentId, { tmApplied: responseLog.filter((r) => r.method === 'tm').length });
+        // Update progress counters after each save batch or at the end
+        // This ensures progress is updated frequently enough to show accurate counts
+        const currentTmCount = responseLog.filter((r) => r.method === 'tm').length;
+        if (pendingUpdates.length === 0 || i === eligibleSegments.length - 1) {
+          // Update after saving a batch or at the end
+          updateProgress(documentId, { 
+            tmApplied: currentTmCount,
+            currentSegment: responseLog.length, // Total completed so far
+          });
         }
       } else {
         // No 100% match - check if we should queue for AI
@@ -2516,8 +2544,9 @@ export const pretranslateDocument = async (
         queuedForAI.push({ segment, previous: neighbors.previous, next: neighbors.next });
       }
       
-      // Update progress to show we're skipping TM phase
+      // Update progress to show we're skipping TM phase and going directly to AI
       updateProgress(documentId, {
+        currentPhase: 'ai_translation', // Skip directly to AI phase
         tmApplied: 0,
         currentSegment: eligibleSegments.length,
       });
@@ -2550,7 +2579,7 @@ export const pretranslateDocument = async (
 
     // Step 2: Apply AI translations if requested
     // Allow AI translation if we have either project settings OR overrides provided
-    const hasAiConfig = context.settings || (options?.provider && options?.model);
+    // hasAiConfig is already declared above (line 2328), reuse it
     // #region agent log
     fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2226',message:'Pretranslate: AI translation check',data:{documentId,queuedForAICount:queuedForAI.length,hasAiConfig:!!hasAiConfig,hasContextSettings:!!context.settings,hasOverrideProvider:!!options?.provider,hasOverrideModel:!!options?.model,effectiveProvider:aiConfig.provider,effectiveModel:aiConfig.model},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
     // #endregion
@@ -2561,6 +2590,17 @@ export const pretranslateDocument = async (
       } else {
         addLogMessage(documentId, `🤖 Starting Pass 2: Sending ${queuedForAI.length} segments to AI (Batch Mode)...`);
       }
+      
+      // Update progress to show we're starting AI translation phase
+      // This ensures UI shows that AI processing has begun
+      const tmCount = responseLog.filter((r) => r.method === 'tm').length;
+      const currentAiCount = responseLog.filter((r) => r.method === 'ai').length; // Should be 0 at start of Phase 2
+      updateProgress(documentId, {
+        currentPhase: 'ai_translation', // Mark that we're now in AI translation phase
+        currentSegmentText: `Starting AI translation for ${queuedForAI.length} segments...`,
+        aiApplied: currentAiCount, // Show current count (0 at start, will update as segments complete)
+        currentSegment: tmCount, // Total completed so far (TM only at this point)
+      });
       // #region agent log
       fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2231',message:'Pretranslate: Entering AI translation section',data:{documentId,useCritic,queuedForAICount:queuedForAI.length,wasCancelled},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
       // #endregion
@@ -2766,11 +2806,12 @@ export const pretranslateDocument = async (
                 
                 // Update progress: currentSegment should be the total completed segments
                 // This ensures it only increases, never decreases
+                // Update aiApplied immediately to show real-time progress
                 updateProgress(documentId, {
                   currentSegment: totalCompleted,
                   currentSegmentId: entry.segment.id,
                   currentSegmentText: entry.segment.sourceText.substring(0, 100) + (entry.segment.sourceText.length > 100 ? '...' : ''),
-                  aiApplied: completedCount,
+                  aiApplied: completedCount, // Update immediately after each segment completes
                 });
                 
                 // Log completion (but not every single one to avoid spam - log every 5th or important ones)
@@ -2803,14 +2844,32 @@ export const pretranslateDocument = async (
         fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2428',message:'Pretranslate: Cancellation check after critic promises',data:{documentId,cancelledAfterCritic,resultsCount:results.length,successfulCount:results.filter(r=>r!==null).length,pendingUpdatesCount:pendingUpdates.length,responseLogCount:responseLog.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
         // #endregion
         
-        // Save any pending updates (whether cancelled or not, save what we have)
+        // CRITICAL: Save any pending updates (whether cancelled or not, save what we have)
+        // This ensures all completed translations are preserved even if cancellation occurred
         if (pendingUpdates.length > 0) {
+          logger.info({
+            documentId,
+            pendingUpdatesCount: pendingUpdates.length,
+            wasCancelled: cancelledAfterCritic,
+          }, 'Pretranslate: Saving pending updates after critic mode (cancellation may have occurred)');
           await prisma.$transaction(pendingUpdates);
           pendingUpdates = [];
+          
+          // Verify that translations were saved
+          const savedCount = responseLog.filter((r) => r.method === 'ai').length;
+          logger.info({
+            documentId,
+            savedTranslations: savedCount,
+            wasCancelled: cancelledAfterCritic,
+          }, 'Pretranslate: Verified AI translations saved after critic mode');
         }
         
         if (cancelledAfterCritic) {
-          logger.info({ documentId }, 'Pretranslation cancelled - stopping AI translation (critic mode)');
+          logger.info({ 
+            documentId,
+            completedTranslations: responseLog.filter((r) => r.method === 'ai').length,
+          }, 'Pretranslation cancelled - stopping AI translation (critic mode), all completed translations saved');
+          addLogMessage(documentId, `⏸️ Cancellation detected. All completed translations (${responseLog.filter((r) => r.method === 'ai').length} segments) have been saved.`);
           // Don't throw - exit gracefully to allow saving what was processed
           // #region agent log
           fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2443',message:'Pretranslate: Cancelled after critic, exiting gracefully',data:{documentId,responseLogCount:responseLog.length,aiApplied:responseLog.filter(r=>r.method==='ai').length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
@@ -2856,15 +2915,20 @@ export const pretranslateDocument = async (
             buildOrchestratorSegment(entry.segment, entry.previous, entry.next, document.name ?? undefined),
           );
           
-          // Update progress for AI batch
+          // Update progress for AI batch - show that we're starting AI translation
           const aiStartIndex = eligibleSegments.findIndex((s) => s.id === batch[0].segment.id);
+          const currentAiCountBeforeBatch = responseLog.filter((r) => r.method === 'ai').length;
           if (aiStartIndex >= 0) {
             updateProgress(documentId, {
               currentSegment: aiStartIndex + 1,
               currentSegmentId: batch[0].segment.id,
               currentSegmentText: batch[0].segment.sourceText.substring(0, 100) + (batch[0].segment.sourceText.length > 100 ? '...' : ''),
+              aiApplied: currentAiCountBeforeBatch, // Show current count before processing this batch
             });
           }
+          
+          // Log that we're starting AI translation for this batch
+          addLogMessage(documentId, `🤖 Starting AI translation for batch ${batchNumber}/${totalBatches} (${batch.length} segments)...`);
 
           // Filter glossary by document context first
           const documentContext: DocumentContext = {
@@ -2917,6 +2981,14 @@ export const pretranslateDocument = async (
             .slice(0, 20)
             .filter(term => term.status !== 'DEPRECATED');
 
+          // Update progress to show we're calling AI (before the actual call)
+          // This gives user feedback that AI is working, even if it takes time
+          const currentAiCountBefore = responseLog.filter((r) => r.method === 'ai').length;
+          updateProgress(documentId, {
+            currentSegmentText: `Calling AI for batch ${batchNumber}/${totalBatches} (${batch.length} segments)...`,
+            aiApplied: currentAiCountBefore, // Show current count before processing
+          });
+
           // eslint-disable-next-line no-await-in-loop
           const aiResults = await orchestrator.translateSegments({
             provider: aiConfig.provider,
@@ -2945,6 +3017,8 @@ export const pretranslateDocument = async (
 
           const resultMap = new Map(aiResults.map((result) => [result.segmentId, result]));
 
+          // Update progress immediately after getting AI results (before saving to DB)
+          // This shows real-time progress to the user
           batch.forEach((entry) => {
             const aiResult = resultMap.get(entry.segment.id);
             const targetText = aiResult?.targetText ?? entry.segment.sourceText;
@@ -2971,7 +3045,18 @@ export const pretranslateDocument = async (
             addResult(documentId, result);
           });
           
-          addLogMessage(documentId, `✅ Batch ${batchNumber}/${totalBatches} complete: ${batch.length} segments translated`);
+          // Update AI progress immediately after processing batch (before saving to DB)
+          // This gives real-time feedback to the user
+          // Calculate immediately after adding to responseLog
+          const currentAiCount = responseLog.filter((r) => r.method === 'ai').length;
+          const tmCount = responseLog.filter((r) => r.method === 'tm').length;
+          updateProgress(documentId, { 
+            aiApplied: currentAiCount, // Update immediately to show progress
+            currentSegment: responseLog.length, // Total completed (TM + AI)
+            currentSegmentText: `Completed batch ${batchNumber}/${totalBatches}: ${currentAiCount} AI translations so far`,
+          });
+          
+          addLogMessage(documentId, `✅ Batch ${batchNumber}/${totalBatches} complete: ${batch.length} segments translated (Total AI: ${currentAiCount})`);
 
           // Save AI updates immediately after each batch to preserve on cancellation
           // This is critical - save before checking cancellation for next batch
@@ -2982,13 +3067,12 @@ export const pretranslateDocument = async (
           
           // Check for cancellation AFTER saving this batch's updates
           if (isCancelled(documentId)) {
-            console.log('Pretranslation cancelled - stopping after saving current batch');
+            logger.info({ 
+              documentId,
+              completedInThisBatch: batch.length,
+              totalAiApplied: currentAiCount,
+            }, 'Pretranslation cancelled - stopping after saving current batch');
             break; // Exit loop, updates already saved
-          }
-
-          // Update AI progress less frequently
-          if (responseLog.filter((r) => r.method === 'ai').length % 10 === 0 || i + batchSize >= queuedForAI.length) {
-            updateProgress(documentId, { aiApplied: responseLog.filter((r) => r.method === 'ai').length });
           }
         }
       }
@@ -3037,12 +3121,51 @@ export const pretranslateDocument = async (
 
     // Check if cancelled after processing
     if (isCancelled(documentId)) {
+      // CRITICAL: Ensure all pending updates are saved before returning
+      // This ensures all completed translations are preserved even after cancellation
+      if (pendingUpdates.length > 0) {
+        logger.info({
+          documentId,
+          pendingUpdatesCount: pendingUpdates.length,
+        }, 'Pretranslate: Saving final pending updates before cancellation');
+        await prisma.$transaction(pendingUpdates);
+        pendingUpdates = [];
+      }
+      
+      // Verify that completed translations were saved
+      const sampleSegmentId = responseLog[0]?.segmentId;
+      if (sampleSegmentId) {
+        const sampleSegment = await prisma.segment.findUnique({
+          where: { id: sampleSegmentId },
+          select: { id: true, targetMt: true, targetFinal: true, status: true },
+        });
+        logger.info({
+          documentId,
+          sampleSegmentId,
+          hasTargetMt: !!sampleSegment?.targetMt,
+          hasTargetFinal: !!sampleSegment?.targetFinal,
+          status: sampleSegment?.status,
+          totalCompleted: responseLog.length,
+        }, 'Pretranslate: Verified completed translations saved after cancellation');
+      }
+      
       // Update progress with final counts before cancelling
       updateProgress(documentId, {
         tmApplied,
         aiApplied,
         currentSegment: responseLog.length,
       });
+      
+      addLogMessage(documentId, `⏸️ Pretranslation cancelled. ${tmApplied} TM matches and ${aiApplied} AI translations were saved.`);
+      
+      logger.info({
+        documentId,
+        tmApplied,
+        aiApplied,
+        totalProcessed: responseLog.length,
+        resultsCount: responseLog.length,
+      }, 'Pretranslate: Cancelled - all completed translations saved');
+      
       cancelProgress(documentId);
       return {
         documentId,
@@ -3053,10 +3176,38 @@ export const pretranslateDocument = async (
       };
     }
 
+    // Ensure all database transactions are committed before marking as complete
+    // Add a small delay to ensure all writes are flushed to database
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    // Verify that segments were actually saved by checking a sample
+    const sampleSegmentId = responseLog[0]?.segmentId;
+    if (sampleSegmentId) {
+      const sampleSegment = await prisma.segment.findUnique({
+        where: { id: sampleSegmentId },
+        select: { id: true, targetMt: true, targetFinal: true, status: true },
+      });
+      logger.info({
+        documentId,
+        sampleSegmentId,
+        hasTargetMt: !!sampleSegment?.targetMt,
+        hasTargetFinal: !!sampleSegment?.targetFinal,
+        status: sampleSegment?.status,
+      }, 'Pretranslate: Verified sample segment was saved to database');
+    }
+    
     completeProgress(documentId);
     const finalTmCount = responseLog.filter((r) => r.method === 'tm').length;
     const finalAiCount = responseLog.filter((r) => r.method === 'ai').length;
     addLogMessage(documentId, `🎉 Pretranslation complete! ${finalTmCount} TM matches and ${finalAiCount} AI translations applied`);
+
+    logger.info({
+      documentId,
+      tmApplied: finalTmCount,
+      aiApplied: finalAiCount,
+      totalProcessed: responseLog.length,
+      sampleSegmentId,
+    }, 'Pretranslate: Completed successfully, all segments saved to database');
 
     return {
       documentId,

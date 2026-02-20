@@ -20,8 +20,10 @@ export default function PretranslateModal({
   onComplete,
   glossaryMode = 'strict_source',
 }: PretranslateModalProps) {
+  // Default: Apply AI to empty segments only (most common use case)
+  // User can still uncheck this if they only want TM matches
   const [applyAiToLowMatches, setApplyAiToLowMatches] = useState(false);
-  const [applyAiToEmptyOnly, setApplyAiToEmptyOnly] = useState(false);
+  const [applyAiToEmptyOnly, setApplyAiToEmptyOnly] = useState(true); // Default: enabled
   const [rewriteConfirmed, setRewriteConfirmed] = useState(false);
   const [rewriteNonConfirmed, setRewriteNonConfirmed] = useState(false);
   const [useCritic, setUseCritic] = useState(false);
@@ -42,6 +44,10 @@ export default function PretranslateModal({
     currentSegmentText?: string;
     error?: string;
     logs?: string[];
+    aiProvider?: string;
+    aiModel?: string;
+    aiConfigured?: boolean;
+    currentPhase?: 'tm_matching' | 'ai_translation';
   } | null>(null);
   const progressIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const isCancelledRef = useRef(false);
@@ -139,22 +145,27 @@ export default function PretranslateModal({
               toast.success(
                 `Pretranslation complete: ${progressData.tmApplied} TM matches applied, ${progressData.aiApplied} AI translations applied`,
               );
+              // Wait longer to ensure all database writes are complete before refreshing UI
               setTimeout(() => {
                 console.log('[PretranslateModal] Calling onComplete after completion', {
                   tmApplied: progressData.tmApplied,
                   aiApplied: progressData.aiApplied,
                 });
                 onComplete();
-                onClose();
-                setProgress(null);
-              }, 2000);
+                // Close modal after a short delay to allow UI to update
+                setTimeout(() => {
+                  onClose();
+                  setProgress(null);
+                }, 500);
+              }, 3000); // Increased from 2000 to 3000ms to ensure DB writes complete
             } else if (progressData.status === 'cancelled') {
               // Only show toast once
               if (!cancelledToastShownRef.current) {
                 cancelledToastShownRef.current = true;
+                const totalSaved = progressData.tmApplied + progressData.aiApplied;
                 toast(
-                  `Pretranslation cancelled: ${progressData.tmApplied} TM matches and ${progressData.aiApplied} AI translations were saved`,
-                  { icon: 'ℹ️', duration: 4000 }
+                  `Pretranslation cancelled: ${totalSaved} translations saved (${progressData.tmApplied} TM + ${progressData.aiApplied} AI). All completed translations are preserved in the document.`,
+                  { icon: 'ℹ️', duration: 6000 }
                 );
               }
               setIsProcessing(false);
@@ -162,7 +173,14 @@ export default function PretranslateModal({
               // Wait for backend to finish saving before refetching
               // Backend continues processing queued segments even after cancellation
               // Give it time to save completed translations
+              // Increased delay to ensure all database writes complete
               setTimeout(() => {
+                console.log('[PretranslateModal] Refreshing segments after cancellation', {
+                  tmApplied: progressData.tmApplied,
+                  aiApplied: progressData.aiApplied,
+                  totalSaved: progressData.tmApplied + progressData.aiApplied,
+                  resultsCount: progressData.results?.length || 0,
+                });
                 onComplete();
                 // Second refetch after a longer delay to catch any late saves
                 setTimeout(() => {
@@ -173,11 +191,12 @@ export default function PretranslateModal({
                   console.log('[PretranslateModal] Closing modal after cancellation', {
                     tmApplied: progressData.tmApplied,
                     aiApplied: progressData.aiApplied,
+                    totalSaved: progressData.tmApplied + progressData.aiApplied,
                   });
                   setProgress(null);
                   onClose();
                 }, 3000);
-              }, 1000); // Wait 1 second for backend to save
+              }, 1500); // Increased from 1000ms to 1500ms to ensure DB writes complete
             } else if (progressData.status === 'error') {
               toast.error(progressData.error || 'Pretranslation failed');
               setIsProcessing(false);
@@ -283,8 +302,13 @@ export default function PretranslateModal({
     }
   };
 
+  // Calculate progress based on actual completed translations (TM + AI)
+  // This gives a more accurate representation than currentSegment which may include skipped segments
+  const totalCompleted = progress
+    ? (progress.tmApplied || 0) + (progress.aiApplied || 0)
+    : 0;
   const progressPercentage = progress
-    ? Math.round((progress.currentSegment / progress.totalSegments) * 100)
+    ? Math.round((totalCompleted / progress.totalSegments) * 100)
     : 0;
 
   if (!isOpen) return null;
@@ -294,7 +318,7 @@ export default function PretranslateModal({
       <div className="bg-white rounded-lg shadow-xl p-6 max-w-lg w-full mx-4">
         <h2 className="text-2xl font-bold text-gray-900 mb-4">Pretranslate Document</h2>
         <p className="text-sm text-gray-600 mb-6">
-          This will apply all 100% Translation Memory matches to empty segments. You can optionally apply AI translations to segments with lower matches or only empty segments.
+          This will apply 100% Translation Memory matches to empty segments. By default, AI translations will also be applied to empty segments that have no TM matches. You can customize the options below or simply click "Start Pretranslation" to use default settings.
         </p>
 
         {/* AI Configuration */}
@@ -395,6 +419,12 @@ export default function PretranslateModal({
 
         {!isProcessing && (
           <div className="space-y-4 mb-6">
+            <div className="mb-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+              <p className="text-sm text-blue-900">
+                <strong>Quick Start:</strong> You can click "Start Pretranslation" right now with default settings (TM matches + AI for empty segments). The options below are optional and can be customized if needed.
+              </p>
+            </div>
+            
             <div className="border-b border-gray-200 pb-3">
               <h3 className="text-sm font-semibold text-gray-900 mb-3">Translation Memory Options</h3>
               
@@ -533,7 +563,7 @@ export default function PretranslateModal({
               <div className="flex justify-between items-center mb-2">
                 <span className="text-sm font-medium text-gray-700">Progress</span>
                 <span className="text-sm font-semibold text-primary-600">
-                  {progress.currentSegment} / {progress.totalSegments} segments ({progressPercentage}%)
+                  {totalCompleted} / {progress.totalSegments} translations completed ({progressPercentage}%)
                 </span>
               </div>
               <div className="w-full bg-gray-200 rounded-full h-4 overflow-hidden shadow-inner">
@@ -542,24 +572,82 @@ export default function PretranslateModal({
                   style={{ width: `${progressPercentage}%` }}
                 />
               </div>
+              <div className="mt-2 text-xs text-gray-500">
+                Based on actual completed translations (TM matches + AI translations)
+              </div>
             </div>
 
             {progress.currentSegmentText && (
               <div className="mb-3 p-3 bg-gray-50 border border-gray-200 rounded">
-                <div className="text-xs text-gray-500 mb-1">Processing segment:</div>
+                <div className="text-xs text-gray-500 mb-1">Currently processing:</div>
                 <div className="text-sm text-gray-700 line-clamp-2">{progress.currentSegmentText}</div>
               </div>
             )}
 
-            <div className="grid grid-cols-2 gap-4 text-sm">
+            <div className="grid grid-cols-2 gap-4 text-sm mb-3">
               <div className="p-3 bg-green-50 border border-green-200 rounded">
-                <div className="text-green-800 font-medium">TM Matches</div>
-                <div className="text-2xl font-bold text-green-900">{progress.tmApplied}</div>
+                <div className="text-green-800 font-medium mb-1">TM Matches Applied</div>
+                <div className="text-2xl font-bold text-green-900">{progress.tmApplied || 0}</div>
+                <div className="text-xs text-green-700 mt-1">100% matches from TM</div>
               </div>
-              {progress.aiApplied > 0 && (
-                <div className="p-3 bg-blue-50 border border-blue-200 rounded">
-                  <div className="text-blue-800 font-medium">AI Translations</div>
-                  <div className="text-2xl font-bold text-blue-900">{progress.aiApplied}</div>
+              <div className="p-3 bg-blue-50 border border-blue-200 rounded">
+                <div className="text-blue-800 font-medium mb-1">AI Translations</div>
+                <div className="text-2xl font-bold text-blue-900">{progress.aiApplied || 0}</div>
+                <div className="text-xs text-blue-700 mt-1">
+                  {progress.aiApplied > 0 
+                    ? `${Math.round((progress.aiApplied / totalCompleted) * 100)}% of completed`
+                    : progress.currentPhase === 'ai_translation' || progress.currentSegmentText?.includes('Calling AI') || progress.currentSegmentText?.includes('Starting AI') || progress.currentSegmentText?.includes('Pass 2')
+                      ? 'AI processing...'
+                      : progress.currentPhase === 'tm_matching'
+                        ? 'Phase 1: TM matching in progress...'
+                        : 'Waiting for Phase 2 (AI translation)...'}
+                </div>
+              </div>
+            </div>
+
+            {/* AI Configuration Status */}
+            {progress.aiProvider && progress.aiModel && (
+              <div className={`p-3 border rounded mb-3 ${
+                progress.aiConfigured 
+                  ? 'bg-green-50 border-green-200' 
+                  : 'bg-yellow-50 border-yellow-200'
+              }`}>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className={`text-sm font-medium mb-1 ${
+                      progress.aiConfigured ? 'text-green-800' : 'text-yellow-800'
+                    }`}>
+                      AI Configuration
+                    </div>
+                    <div className={`text-xs ${
+                      progress.aiConfigured ? 'text-green-700' : 'text-yellow-700'
+                    }`}>
+                      <span className="font-mono font-semibold">{progress.aiProvider}</span>
+                      {' / '}
+                      <span className="font-mono">{progress.aiModel}</span>
+                    </div>
+                  </div>
+                  <div className={`text-lg ${progress.aiConfigured ? 'text-green-600' : 'text-yellow-600'}`}>
+                    {progress.aiConfigured ? '✅' : '⚠️'}
+                  </div>
+                </div>
+                {!progress.aiConfigured && (
+                  <div className="text-xs text-yellow-700 mt-2">
+                    API key missing. AI translations will be skipped.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Summary of completed translations */}
+            <div className="p-3 bg-primary-50 border border-primary-200 rounded">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium text-primary-900">Total Completed:</span>
+                <span className="text-lg font-bold text-primary-900">{totalCompleted}</span>
+              </div>
+              {progress.totalSegments > 0 && (
+                <div className="mt-1 text-xs text-primary-700">
+                  {progress.totalSegments - totalCompleted} segments remaining
                 </div>
               )}
             </div>

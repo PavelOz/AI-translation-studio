@@ -63,6 +63,7 @@ export type TranslateSegmentsOptions = {
   documentGlossary?: Array<{ sourceTerm: string; targetTerm: string; status: string; occurrenceCount: number }>;
   documentStyleRules?: Array<{ ruleType: string; pattern: string; description: string | null; examples: any }>;
   documentId?: string; // Optional: for per-segment glossary lookup
+  strictMode?: boolean; // If true, omit analysis field to save output tokens
 };
 
 // Valid provider names for translation results
