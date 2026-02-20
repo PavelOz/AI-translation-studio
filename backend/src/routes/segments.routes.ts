@@ -161,10 +161,24 @@ segmentRoutes.post(
 );
 
 const resetSegmentsSchema = z.object({
-  segmentIds: z.array(z.string().uuid()),
+  segmentIds: z.array(z.string().uuid()).optional(),
   documentId: z.string().uuid().optional(), // Optional: if provided, can reset all segments in document
   resetAll: z.boolean().optional(), // If true and documentId provided, reset all segments
-});
+}).refine(
+  (data) => {
+    // Either segmentIds must be provided (and non-empty), or resetAll must be true with documentId
+    if (data.resetAll && data.documentId) {
+      return true; // resetAll with documentId is valid
+    }
+    if (data.segmentIds && data.segmentIds.length > 0) {
+      return true; // segmentIds provided is valid
+    }
+    return false; // Invalid: need either segmentIds or resetAll+documentId
+  },
+  {
+    message: 'Either segmentIds must be provided (non-empty array) or resetAll must be true with documentId',
+  }
+);
 
 segmentRoutes.post(
   '/reset',
