@@ -844,7 +844,7 @@ export class AIOrchestrator {
   // 2. STANDARD TRANSLATION METHODS
   // ==========================================
 
-  private parseProviderResponse(text: string, fallbackSegments: OrchestratorSegment[]): Array<{ segmentId: string; targetText: string }> {
+  private parseProviderResponse(text: string, fallbackSegments: OrchestratorSegment[]): Array<{ segmentId: string; targetText: string; analysis?: string }> {
     // Basic cleanup
     let cleanedText = text.trim();
     if (cleanedText.startsWith('```')) {
@@ -883,18 +883,18 @@ export class AIOrchestrator {
       throw new Error('Provider returned empty translation array');
     }
 
-    const map = new Map<string, string>();
+    const map = new Map<string, { targetText: string; analysis?: string }>();
     parsed.forEach((entry: any) => {
       // Support both old format (target_mt) and new format (target_text) for backward compatibility
       const targetField = entry.target_text || entry.target_mt;
       if (entry.segment_id && typeof targetField === 'string') {
         let targetText = targetField.trim();
+        const analysis = entry.analysis && typeof entry.analysis === 'string' ? entry.analysis.trim() : undefined;
         
-        // Log analysis if present (for debugging/quality tracking)
-        if (entry.analysis && typeof entry.analysis === 'string') {
+        if (analysis) {
           logger.debug({
             segmentId: entry.segment_id,
-            analysis: entry.analysis,
+            analysis,
           }, 'Translation analysis from AI');
         }
         
@@ -917,7 +917,7 @@ export class AIOrchestrator {
           }, 'Tag Validation Failed');
         }
         
-        map.set(entry.segment_id, targetText);
+        map.set(entry.segment_id, { targetText, analysis });
       }
     });
 
@@ -927,7 +927,8 @@ export class AIOrchestrator {
 
     // Validate that translations are actually different from source text
     return fallbackSegments.map((segment) => {
-      const targetText = map.get(segment.segmentId) ?? segment.sourceText;
+      const entry = map.get(segment.segmentId);
+      const targetText = entry?.targetText ?? segment.sourceText;
       
       // Remove formatting tags for comparison
       const sourceTextClean = segment.sourceText.replace(/\{\{\/?\d+\}\}/g, '').trim();
@@ -958,6 +959,7 @@ export class AIOrchestrator {
       return {
         segmentId: segment.segmentId,
         targetText,
+        analysis: entry?.analysis,
       };
     });
   }
@@ -1147,7 +1149,9 @@ export class AIOrchestrator {
               confidence: 0.9,
               usage: response.usage,
               raw: response.raw,
-              fallback: false
+              fallback: false,
+              fullPrompt: prompt,
+              analysis: item.analysis,
             }),
           );
           logger.info({ provider: provider.name, chunkId }, 'AI translation chunk completed');
@@ -1199,7 +1203,9 @@ export class AIOrchestrator {
                   confidence: 0.9,
                   usage: response.usage,
                   raw: response.raw,
-                  fallback: false
+                  fallback: false,
+                  fullPrompt: prompt,
+                  analysis: item.analysis,
                 }),
               );
               logger.info({ provider: provider.name, chunkId, strictMode: true }, 'AI translation chunk completed (strict mode retry)');

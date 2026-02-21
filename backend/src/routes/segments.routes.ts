@@ -22,6 +22,8 @@ const patchSchema = z.object({
   fuzzyScore: z.number().min(0).max(100).optional(), // Support camelCase
   bestTmEntryId: z.string().uuid().nullable().optional(), // Support camelCase
   timeSpentSeconds: z.number().int().min(0).optional(), // Support camelCase
+  mtFullPrompt: z.string().nullable().optional(),
+  mtAnalysis: z.string().nullable().optional(),
 }).transform((data) => ({
   target_final: data.target_final ?? data.targetFinal,
   target_mt: data.target_mt ?? data.targetMt,
@@ -31,6 +33,8 @@ const patchSchema = z.object({
   fuzzy_score: data.fuzzy_score ?? data.fuzzyScore,
   best_tm_entry_id: (data as any).bestTmEntryId,
   time_spent_seconds: (data as any).timeSpentSeconds,
+  mt_full_prompt: data.mtFullPrompt,
+  mt_analysis: data.mtAnalysis,
 }));
 
 const bulkUpdateSchema = z.object({
@@ -124,6 +128,8 @@ segmentRoutes.patch(
       fuzzyScore: payload.fuzzy_score,
       bestTmEntryId: (payload as any).best_tm_entry_id,
       timeSpentSeconds: (payload as any).time_spent_seconds,
+      mtFullPrompt: (payload as any).mt_full_prompt,
+      mtAnalysis: (payload as any).mt_analysis,
     };
 
     if (payload.confirmed_by !== undefined) {
@@ -164,21 +170,7 @@ const resetSegmentsSchema = z.object({
   segmentIds: z.array(z.string().uuid()).optional(),
   documentId: z.string().uuid().optional(), // Optional: if provided, can reset all segments in document
   resetAll: z.boolean().optional(), // If true and documentId provided, reset all segments
-}).refine(
-  (data) => {
-    // Either segmentIds must be provided (and non-empty), or resetAll must be true with documentId
-    if (data.resetAll && data.documentId) {
-      return true; // resetAll with documentId is valid
-    }
-    if (data.segmentIds && data.segmentIds.length > 0) {
-      return true; // segmentIds provided is valid
-    }
-    return false; // Invalid: need either segmentIds or resetAll+documentId
-  },
-  {
-    message: 'Either segmentIds must be provided (non-empty array) or resetAll must be true with documentId',
-  }
-);
+});
 
 segmentRoutes.post(
   '/reset',
@@ -194,8 +186,11 @@ segmentRoutes.post(
         select: { id: true },
       });
       segmentIds = segments.map(s => s.id);
-    } else {
+    } else if (payload.segmentIds && payload.segmentIds.length > 0) {
       segmentIds = payload.segmentIds;
+    } else {
+      res.status(400).json({ error: 'Either segmentIds must be provided or resetAll must be true with documentId' });
+      return;
     }
     
     if (segmentIds.length === 0) {

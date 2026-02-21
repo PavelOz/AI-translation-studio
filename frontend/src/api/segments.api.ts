@@ -19,6 +19,10 @@ export type Segment = {
   timeSpentSeconds?: number;
   createdAt: string;
   updatedAt: string;
+  /** AI model analysis (e.g. "legal term", "past tense") from last MT run */
+  mtAnalysis?: string | null;
+  /** Full prompt sent to LLM for last MT run */
+  mtFullPrompt?: string | null;
 };
 
 export type SegmentListResponse = {

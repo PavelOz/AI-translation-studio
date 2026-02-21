@@ -13,6 +13,8 @@ type SegmentUpdateInput = {
   confirmedById?: string | null;
   confirmedAt?: Date | null;
   timeSpentSeconds?: number | null;
+  mtFullPrompt?: string | null;
+  mtAnalysis?: string | null;
 };
 
 /**

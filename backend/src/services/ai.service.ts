@@ -1192,7 +1192,7 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
   let translationText: string | undefined;
   let fuzzyScore: number | null = null;
   let bestTmEntryId: string | null = null;
-  let aiResult: { targetText: string; provider: string; model: string; confidence: number; usage?: any } | null = null;
+  let aiResult: { targetText: string; provider: string; model: string; confidence: number; usage?: any; fullPrompt?: string; analysis?: string } | null = null;
   const metadata: TranslationMetadata[] = [];
 
   // Priority 1: Check for direct TM match (≥70%)
@@ -1455,6 +1455,10 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
       fuzzyScore,
       bestTmEntryId,
       status: 'MT',
+      ...(aiResult && {
+        mtFullPrompt: aiResult.fullPrompt ?? undefined,
+        mtAnalysis: aiResult.analysis ?? undefined,
+      }),
     },
     include: { document: true },
   });
@@ -1468,6 +1472,8 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
       provider: aiResult.provider,
       model: aiResult.model,
       usage: aiResult.usage,
+      fullPrompt: aiResult.fullPrompt,
+      analysis: aiResult.analysis,
     };
   }
 
@@ -1685,6 +1691,10 @@ export const runSegmentMachineTranslationWithCritic = async (
       fuzzyScore,
       bestTmEntryId,
       status: 'MT',
+      ...(aiResult && {
+        mtFullPrompt: aiResult.fullPrompt ?? undefined,
+        mtAnalysis: aiResult.analysis ?? undefined,
+      }),
     },
     include: { document: true },
   });
@@ -1697,8 +1707,10 @@ export const runSegmentMachineTranslationWithCritic = async (
       provider: aiResult.provider,
       model: aiResult.model,
       usage: aiResult.usage,
+      fullPrompt: aiResult.fullPrompt,
+      analysis: aiResult.analysis,
     },
-  } as typeof updatedSegment & { _metadata: { provider: string; model: string; usage?: any } };
+  } as typeof updatedSegment & { _metadata: { provider: string; model: string; usage?: any; fullPrompt?: string; analysis?: string } };
 };
 
 export const runDocumentMachineTranslation = async (
@@ -1991,6 +2003,8 @@ export const runDocumentMachineTranslation = async (
               segmentId: entry.segment.id,
               targetText: aiResult?.targetText ?? entry.segment.sourceText,
               confidence: aiResult?.confidence ?? 0.85,
+              fullPrompt: aiResult?.fullPrompt,
+              analysis: aiResult?.analysis,
             };
           } catch (error: any) {
             logger.error(
@@ -2013,7 +2027,7 @@ export const runDocumentMachineTranslation = async (
       // Process results and add to updates
       criticResults.forEach((result) => {
         if (!result) return; // Skipped due to cancellation
-        const { segmentId, targetText, confidence } = result;
+        const { segmentId, targetText, confidence, fullPrompt, analysis } = result;
         updates.push(
           prisma.segment.update({
             where: { id: segmentId },
@@ -2022,6 +2036,8 @@ export const runDocumentMachineTranslation = async (
               fuzzyScore: Math.round(confidence * 100),
               bestTmEntryId: null,
               status: 'MT',
+              ...(fullPrompt !== undefined && { mtFullPrompt: fullPrompt }),
+              ...(analysis !== undefined && { mtAnalysis: analysis }),
             },
           }),
         );
@@ -2180,6 +2196,10 @@ export const runDocumentMachineTranslation = async (
               fuzzyScore: aiResult ? Math.round((aiResult.confidence ?? 0.85) * 100) : null,
               bestTmEntryId: null,
               status: 'MT',
+              ...(aiResult && {
+                mtFullPrompt: aiResult.fullPrompt ?? undefined,
+                mtAnalysis: aiResult.analysis ?? undefined,
+              }),
             },
           }),
         );
@@ -2629,7 +2649,7 @@ export const pretranslateDocument = async (
           entry: typeof queuedForAI[number],
           retries = 3,
           baseDelay = 1000,
-        ): Promise<{ segmentId: string; targetText: string; confidence?: number } | null> => {
+        ): Promise<{ segmentId: string; targetText: string; confidence?: number; fullPrompt?: string; analysis?: string } | null> => {
           // Check cancellation before starting AI call
           if (isCancelled(documentId)) {
             const segmentIndex = eligibleSegments.findIndex((s) => s.id === entry.segment.id) + 1;
@@ -2714,6 +2734,8 @@ export const pretranslateDocument = async (
                 segmentId: entry.segment.id,
                 targetText: aiResult?.targetText ?? entry.segment.sourceText,
                 confidence: aiResult?.confidence,
+                fullPrompt: aiResult?.fullPrompt,
+                analysis: aiResult?.analysis,
               };
             } catch (error: any) {
               // #region agent log
@@ -2778,6 +2800,8 @@ export const pretranslateDocument = async (
                     fuzzyScore: result.confidence ? Math.round(result.confidence * 100) : null,
                     bestTmEntryId: null,
                     status: 'MT',
+                    ...(result.fullPrompt !== undefined && { mtFullPrompt: result.fullPrompt }),
+                    ...(result.analysis !== undefined && { mtAnalysis: result.analysis }),
                   },
                 }),
               );
@@ -3032,6 +3056,10 @@ export const pretranslateDocument = async (
                   fuzzyScore: aiResult ? Math.round((aiResult.confidence ?? 0.85) * 100) : null,
                   bestTmEntryId: null,
                   status: 'MT',
+                  ...(aiResult && {
+                    mtFullPrompt: aiResult.fullPrompt ?? undefined,
+                    mtAnalysis: aiResult.analysis ?? undefined,
+                  }),
                 },
               }),
             );

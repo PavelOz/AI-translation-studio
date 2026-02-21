@@ -87,6 +87,10 @@ export type OrchestratorResult = {
   usage?: ProviderUsage;
   raw?: unknown;
   fallback?: boolean;
+  /** Full prompt sent to the model (for inspection/debugging). */
+  fullPrompt?: string;
+  /** Brief analysis from the model (e.g. "legal term", "past tense"). */
+  analysis?: string;
 };
 
 // Re-export types for external use

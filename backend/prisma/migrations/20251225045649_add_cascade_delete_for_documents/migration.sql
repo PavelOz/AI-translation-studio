@@ -17,10 +17,20 @@
   - You are about to drop the column `segmentType` on the `Segment` table. All the data in the column will be lost.
 
 */
+-- AlterEnum (only drop default if status column exists, so migration works on DBs that never had it)
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'GlossaryEntry' AND column_name = 'status'
+  ) THEN
+    ALTER TABLE "GlossaryEntry" ALTER COLUMN "status" DROP DEFAULT;
+  END IF;
+END $$;
 -- AlterEnum
 BEGIN;
 CREATE TYPE "GlossaryStatus_new" AS ENUM ('PREFERRED', 'DEPRECATED');
-ALTER TABLE "GlossaryEntry" ALTER COLUMN "status" DROP DEFAULT;
+ALTER TABLE "GlossaryEntry" DROP COLUMN IF EXISTS "status";
 ALTER TYPE "GlossaryStatus" RENAME TO "GlossaryStatus_old";
 ALTER TYPE "GlossaryStatus_new" RENAME TO "GlossaryStatus";
 DROP TYPE "GlossaryStatus_old";
@@ -47,12 +57,11 @@ DROP COLUMN "summaryGeneratedAt";
 -- AlterTable
 ALTER TABLE "DocumentAnalysis" ADD COLUMN     "executionLogs" JSONB;
 
--- AlterTable
-ALTER TABLE "GlossaryEntry" DROP COLUMN "contextRules",
-DROP COLUMN "embeddingModel",
-DROP COLUMN "embeddingUpdatedAt",
-DROP COLUMN "sourceEmbedding",
-DROP COLUMN "status";
+-- AlterTable (status already dropped in AlterEnum block above)
+ALTER TABLE "GlossaryEntry" DROP COLUMN IF EXISTS "contextRules",
+DROP COLUMN IF EXISTS "embeddingModel",
+DROP COLUMN IF EXISTS "embeddingUpdatedAt",
+DROP COLUMN IF EXISTS "sourceEmbedding";
 
 -- AlterTable
 ALTER TABLE "Segment" DROP COLUMN "segmentType";

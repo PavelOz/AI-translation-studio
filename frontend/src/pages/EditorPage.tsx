@@ -12,6 +12,7 @@ import GlossaryPanel from '../components/editor/GlossaryPanel';
 import GlossaryModePanel from '../components/editor/GlossaryModePanel';
 import QAIssuesPanel from '../components/editor/QAIssuesPanel';
 import DebugInspectorPanel from '../components/editor/DebugInspectorPanel';
+import AnalysisInspector from '../components/editor/AnalysisInspector';
 import EditorToolbar from '../components/editor/EditorToolbar';
 import DocumentGlossary from '../components/DocumentGlossary';
 import AnalysisSidebar from '../components/AnalysisSidebar';
@@ -231,6 +232,7 @@ export default function EditorPage() {
       });
       // Also invalidate to ensure consistency
       queryClient.invalidateQueries({ queryKey: ['segments', documentId] });
+      queryClient.invalidateQueries({ queryKey: ['segment', updatedSegment.id] });
     },
   });
 
@@ -307,6 +309,7 @@ export default function EditorPage() {
       // Invalidate queries in background after a short delay to sync with server
       setTimeout(() => {
         queryClient.invalidateQueries({ queryKey: ['segments', documentId] });
+        queryClient.invalidateQueries({ queryKey: ['segment', activeSegment.id] });
       }, 500); // Reduced delay for faster sync
     }
   }, [activeSegment, queryClient, documentId, statusFilter, searchQuery, segmentsData]);
@@ -759,9 +762,6 @@ export default function EditorPage() {
                       glossaryMode={glossaryMode}
                       currentTargetText={activeSegment.targetFinal || activeSegment.targetMt || ''}
                       onApply={handleApplyTM}
-                      glossaryMode={glossaryMode}
-                      currentTargetText={activeSegment.targetFinal || activeSegment.targetMt}
-                      onApply={handleApplyTM}
                     />
 
                     <TMSuggestionsPanel
@@ -800,6 +800,8 @@ export default function EditorPage() {
                     />
 
                     <QAIssuesPanel segmentId={activeSegment.id} />
+
+                    <AnalysisInspector segmentId={activeSegment.id} />
 
                     <DebugInspectorPanel segmentId={activeSegment.id} />
                   </div>

@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE "Segment" ADD COLUMN IF NOT EXISTS "mtFullPrompt" TEXT;
+ALTER TABLE "Segment" ADD COLUMN IF NOT EXISTS "mtAnalysis" TEXT;
