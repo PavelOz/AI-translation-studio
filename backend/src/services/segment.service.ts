@@ -128,7 +128,6 @@ export const getDocumentSegments = async (documentId: string, page = 1, pageSize
     }),
     prisma.segment.count({ where: { documentId } }),
   ]);
-
   return {
     segments,
     page,

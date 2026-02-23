@@ -1,11 +1,9 @@
 import { randomUUID } from 'crypto';
-import { promises as fs } from 'fs';
-import { join, resolve } from 'path';
 import { logger } from '../utils/logger';
 import { getProvider } from './providers/registry';
 import { env } from '../utils/env';
 import { getLanguageName } from '../utils/languages';
-import { getAddressFormattingRule, hasAddressFormattingRule } from './translationRules';
+import { getAddressFormattingRuleAsync, type AddressFormattingRuleSource } from './translationRules';
 import type { 
   TranslateSegmentsOptions, 
   OrchestratorGlossaryEntry, 
@@ -13,7 +11,8 @@ import type {
   ProviderUsage,
   TmExample,
   OrchestratorResult,
-  TranslationProvider
+  TranslationProvider,
+  DocumentDnaPayload,
 } from './types';
 
 // Re-export types for external use
@@ -370,6 +369,62 @@ export class AIOrchestrator {
     return formattedRules;
   }
 
+  /**
+   * Build Style Governor block: first-use expansion (Full Term (ABBR)), subsequent use abbreviation only,
+   * and exception for policy "always_full".
+   */
+  private buildStyleGovernorBlock(options: TranslateSegmentsOptions): string {
+    const dna = options.documentDna;
+    const abbreviationLogic = dna?.abbreviationLogic && typeof dna.abbreviationLogic === 'object' ? dna.abbreviationLogic as Record<string, unknown> : null;
+    if (!abbreviationLogic || Object.keys(abbreviationLogic).length === 0) return '';
+
+    const introduced = options.introducedAbbreviations ?? [];
+    const alwaysFull: string[] = [];
+    const abbrevList = Object.keys(abbreviationLogic);
+    for (const key of abbrevList) {
+      const v = abbreviationLogic[key];
+      if (v && typeof v === 'object' && !Array.isArray(v) && (v as Record<string, unknown>).policy === 'always_full') {
+        alwaysFull.push(key);
+      }
+    }
+
+    const introducedList = introduced.length > 0 ? introduced.join(', ') : '(none yet)';
+    const alwaysFullList = alwaysFull.length > 0 ? alwaysFull.join(', ') : '(none)';
+
+    return [
+      '=== ABBREVIATION STYLE (Style Governor) ===',
+      'Apply these rules for terms from Document DNA abbreviationLogic:',
+      '',
+      '1. FIRST USE in document: When a term from abbreviationLogic appears for the first time in the document, output: "Full English Term (Abbreviation)" — e.g. "Battery Energy Storage System (BESS)" or "Automatic Generation Control (AGC)".',
+      '2. SUBSEQUENT USE: For terms that have already been introduced in a previous segment, use ONLY the abbreviation (e.g. "BESS", "AGC"). The following have already been introduced — use abbreviation only for these: ' + introducedList + '.',
+      '3. EXCEPTION — always_full: The following terms must NEVER be abbreviated; always use the full form: ' + alwaysFullList + '.',
+      '4. Within this segment/batch: Prefer first-use expansion for any term not in the already-introduced list; use only abbreviation for terms in that list.',
+      '',
+      'Example: First occurrence → "Electrical Energy Storage Systems (BESS) are connected to the Automatic Generation Control (AGC)." Later → "BESS connected to AGC."',
+    ].join('\n');
+  }
+
+  /**
+   * Format Document DNA as readable text for PROJECT KNOWLEDGE BASE block (all providers).
+   */
+  private formatDocumentDnaForPrompt(dna: DocumentDnaPayload | null | undefined): string {
+    if (!dna) return '';
+    const parts: string[] = [];
+    if (dna.technicalSchema && typeof dna.technicalSchema === 'object' && Object.keys(dna.technicalSchema).length > 0) {
+      parts.push('Technical schema / domain types:\n' + JSON.stringify(dna.technicalSchema, null, 2));
+    }
+    if (dna.namingConventions && typeof dna.namingConventions === 'object' && Object.keys(dna.namingConventions).length > 0) {
+      parts.push('Naming conventions (phases, types, units):\n' + JSON.stringify(dna.namingConventions, null, 2));
+    }
+    if (dna.abbreviationLogic && typeof dna.abbreviationLogic === 'object' && Object.keys(dna.abbreviationLogic).length > 0) {
+      parts.push('Abbreviations and expansions:\n' + JSON.stringify(dna.abbreviationLogic, null, 2));
+    }
+    if (dna.entityGroups && typeof dna.entityGroups === 'object' && Object.keys(dna.entityGroups).length > 0) {
+      parts.push('Entity groups / term variations:\n' + JSON.stringify(dna.entityGroups, null, 2));
+    }
+    return parts.join('\n\n');
+  }
+
   private buildTranslationExamplesSection(tmExamples?: TmExample[]) {
     if (!tmExamples || tmExamples.length === 0) {
       return 'No translation examples available. Use your best judgment based on the glossary and guidelines.';
@@ -429,7 +484,8 @@ export class AIOrchestrator {
     const targetLangCode = options.targetLocale ?? project.targetLang ?? 'en';
     const sourceLang = getLanguageName(sourceLangCode);
     const targetLang = getLanguageName(targetLangCode);
-    
+    const isRuToEn = sourceLangCode.toLowerCase().startsWith('ru') && targetLangCode.toLowerCase().startsWith('en');
+
     // Detect if target is UK English for natural language instructions
     const isUKEnglish = targetLangCode.toLowerCase() === 'en-gb' || targetLangCode.toLowerCase() === 'en_gb';
     const isUSEnglish = targetLangCode.toLowerCase() === 'en-us' || targetLangCode.toLowerCase() === 'en_us';
@@ -455,33 +511,21 @@ export class AIOrchestrator {
       });
     }
 
-    // Check if address formatting rules exist for this language pair
-    const hasAddressRules = hasAddressFormattingRule(sourceLangCode, targetLangCode);
-    
-    // Smart Injection: Detect if batch contains addresses before including address rules
-    // Keywords detecting generic address components (RU/EN/KZ context)
+    // Address rules and RU→EN-specific instructions only when direction is ru → en
+    const addressRule = isRuToEn ? (options.addressRule ?? undefined) : undefined;
+    const hasAddressRules = !!addressRule;
+
+    // Smart Injection: Detect if batch contains addresses before including address rules (ru→en only)
     const addressKeywords = /адрес|address|ул\.|улица|st\.|street|просп|проспект|пр\.|ave\.|avenue|мкр\.|microdistrict|бц|офис|office|бин|bin|дом\s+\d|house\s+\d|расположен|located|находится|по\s+адресу|район|область|город|здание|почтовый\s+индекс|индекс/i;
-    
-    // Check if ANY segment in the batch contains address keywords
     const containsAddress = batch.some(seg => addressKeywords.test(seg.sourceText));
-    
-    // Log the decision for debugging
-    console.log('Address rules injection:', { 
-      hasRules: hasAddressRules, 
-      detected: containsAddress,
-      willInject: hasAddressRules && containsAddress,
-      batchSize: batch.length
-    });
-    
-    // Build natural language quality instructions
+
+    // Build natural language quality instructions (address rule only for ru→en)
     const naturalLanguageInstructions = this.buildNaturalLanguageInstructions(
       isUKEnglish,
       isUSEnglish,
       isEnglish,
       targetLangCode,
-      hasAddressRules && containsAddress, // Only inject if rules exist AND addresses detected
-      sourceLangCode,
-      targetLangCode
+      isRuToEn && hasAddressRules && containsAddress ? addressRule : undefined
     );
 
     const document = options.document ?? {};
@@ -494,8 +538,17 @@ export class AIOrchestrator {
       document.clusterSummary ? `SECTION CONTEXT: ${document.clusterSummary}` : ''
     ].filter(Boolean).join('\n') : '';
 
+    // PROJECT KNOWLEDGE BASE (Document DNA) – model-agnostic context for all providers
+    const projectKnowledgeBase = this.formatDocumentDnaForPrompt(options.documentDna);
+    const dnaIntroRuEn = isRuToEn
+      ? `Document DNA contains source-to-target terminology mappings. Use the TARGET LANGUAGE values from the DNA (e.g. abbreviationLogic, namingConventions) to replace source-language abbreviations and symbols in your translation. Do not leave Cyrillic abbreviations or phase letters (А, В, С) in the final ${targetLang} text; use the Latin/English equivalents given in the DNA.
+When Document DNA provides a mapping for an abbreviation or term (abbreviationLogic, namingConventions, entityGroups), SUBSTITUTE it entirely in the target text. Use only the target-language value from the DNA. Do not output both the English term and the source abbreviation (e.g. never "Surge Arrester (SA) ОПН-110"; use "110 kV SA" or "110 kV Surge Arrester (SA)" only). Clean substitution: one term in the target language, no duplication.`
+      : `Document DNA contains source-to-target terminology mappings. Use the TARGET LANGUAGE values from the DNA (abbreviationLogic, namingConventions, entityGroups) to replace source-language terms in your translation. When DNA provides a mapping, SUBSTITUTE it entirely in the target text using only the target-language value. Clean substitution: one term in the target language, no duplication.`;
+    const dnaIntroRest = `If the DNA defines marking patterns or codes (e.g. equipment tags), preserve the exact structure and alphanumeric pattern of the code, but translate any descriptive text or labels around it into the target language.`;
+
     // Format style rules using filtered rules (prevents Runglish formatting issues)
     const formattedStyleRules = this.formatStyleRulesForHierarchy(filteredStyleRules);
+    const styleGovernorBlock = this.buildStyleGovernorBlock(options);
 
     // NEW HIERARCHICAL PROMPT STRUCTURE with Context Anchors
     // Ordering follows "Static-First" rule for KV-Caching efficiency:
@@ -507,6 +560,10 @@ export class AIOrchestrator {
       // 1. SYSTEM PERSONA WITH CONTEXT (Top Priority - AI sees this first)
       `You are a professional technical translator specializing in ${sourceLang} (${sourceLangCode}) to ${targetLang} (${targetLangCode}).`,
       docContext ? `\n=== GLOBAL DOCUMENT CONTEXT (CRITICAL) ===\n${docContext}\n` : '',
+      projectKnowledgeBase ? `\n=== PROJECT KNOWLEDGE BASE ===
+${dnaIntroRuEn}
+${dnaIntroRest}
+${projectKnowledgeBase}\n` : '',
       `CRITICAL TRANSLATION REQUIREMENT:`,
       `- Source language: ${sourceLang} (${sourceLangCode})`,
       `- Target language: ${targetLang} (${targetLangCode})`,
@@ -517,7 +574,7 @@ export class AIOrchestrator {
       `- Your output MUST be in ${targetLang} (${targetLangCode}) only - do not mix languages`,
       `Your goal is to produce a translation that flows naturally in the target language while preserving the original technical meaning.`,
       '',
-      // Model-specific instructions for gemini-1.5-pro
+      // Model-specific instructions for gemini-1.5-pro (kept for backward compatibility; Document DNA is universal)
       ...(options.model?.includes('gemini-1.5-pro') && options.document?.clusterSummary ? [
         '### 🎯 TERMINOLOGY ACCURACY REQUIREMENT (gemini-1.5-pro):',
         'Ensure maximum terminological accuracy by cross-referencing with the Document Cluster Summary below.',
@@ -528,17 +585,19 @@ export class AIOrchestrator {
         '',
       ] : []),
       '### 👑 CONTEXT HIERARCHY & PRIORITIES:',
-      '1. **TERMINOLOGY (NON-NEGOTIABLE):** Strict adherence to the Glossary below is mandatory.',
-      '2. **CONSISTENCY (CRITICAL):** Use the provided "Translation Memory Examples" to match the tone and style of previous work.',
-      '3. **FLUENCY (HIGH):** If no Glossary/TM match exists, prioritize a natural, native-level reading experience over literal word-for-word translation.',
+      '1. **TECHNICAL CONSISTENCY (PRIORITY):** Use the PROJECT KNOWLEDGE BASE and your erudition to adapt terms to the document\'s notation and context (e.g. phase symbols, technical abbreviations). Prefer technical consistency with the document\'s own system of designations.',
+      '2. **EXPERT GLOSSARY (RECOMMENDATION):** The Glossary below is an expert knowledge base – follow it where it fits the segment; otherwise use Document DNA and context to choose the best term.',
+      '3. **CONSISTENCY (CRITICAL):** Use the provided "Translation Memory Examples" to match the tone and style of previous work.',
+      '4. **FLUENCY (HIGH):** If no Glossary/TM match exists, prioritize a natural, native-level reading experience over literal word-for-word translation.',
       '',
-      '### 📖 CRITICAL GLOSSARY:',
+      '### 📖 EXPERT GLOSSARY (RECOMMENDED):',
       formattedGlossaryTerms || '(No specific glossary terms for this segment)',
       '',
       '### ✍️ STYLE & GRAMMAR INSTRUCTIONS:',
       naturalLanguageInstructions,
       formattedStyleRules,
       '',
+      ...(styleGovernorBlock ? [styleGovernorBlock, ''] : []),
       '### 🧠 TRANSLATION MEMORY (REFERENCE):',
       'Use these similar past translations to guide your style and terminology:',
       examplesText || '(No similar past translations found for this segment)',
@@ -592,63 +651,23 @@ export class AIOrchestrator {
   /**
    * Build address standardization rules dynamically based on language pair
    */
-  private buildAddressStandardizationRules(
-    sourceLocale: string,
-    targetLocale: string
-  ): string {
-    const rule = getAddressFormattingRule(sourceLocale, targetLocale);
-    
-    if (!rule) {
-      return ''; // No rule for this language pair
+  private buildAddressStandardizationRules(rule: AddressFormattingRuleSource | undefined): string {
+    if (!rule?.instructions?.trim()) {
+      return '';
     }
-
-    // Build examples from transformations
-    const examples = rule.transformations
-      .filter(t => t.example)
-      .map(t => `- "${t.example!.source}" → "${t.example!.target}"`)
-      .join('\n');
-
-    // Build detection keywords section if available
-    const detectionKeywordsSection = rule.detectionKeywords && rule.detectionKeywords.length > 0
-      ? `ADDRESS DETECTION KEYWORDS:\nLook for these keywords that indicate an address is present:\n${rule.detectionKeywords.map(kw => `- "${kw}"`).join('\n')}\n`
-      : '';
-
-    return [
-      `=== ADDRESS STANDARDIZATION (${rule.description}) ===`,
-      detectionKeywordsSection,
-      rule.instructions,
-      '',
-      examples ? `TRANSFORMATION EXAMPLES:\n${examples}` : '',
-    ].filter(Boolean).join('\n');
+    return `=== ADDRESS STANDARDIZATION ===\n\n${rule.instructions}`;
   }
 
   /**
    * Build address compliance check instructions for critic
    */
-  private buildAddressComplianceCheck(
-    sourceLocale: string,
-    targetLocale: string
-  ): string {
-    const rule = getAddressFormattingRule(sourceLocale, targetLocale);
-    
-    if (!rule) {
-      return ''; // No rule for this language pair
+  private buildAddressComplianceCheck(rule: AddressFormattingRuleSource | undefined): string {
+    if (!rule?.instructions?.trim()) {
+      return '';
     }
-
-    const examples = rule.transformations
-      .filter(t => t.example)
-      .map(t => `- Source: "${t.example!.source}" → Expected: "${t.example!.target}"`)
-      .join('\n');
-
-    const terminologyList = Object.entries(rule.terminology)
-      .map(([key, value]) => `- "${key}" → "${value}"`)
-      .join('\n');
-
     return [
       '=== ADDRESS FORMATTING COMPLIANCE ===',
-      `Check that addresses follow ${rule.description}:`,
-      '',
-      `REQUIRED FORMAT: ${rule.format}`,
+      'Check that addresses follow the standardization rules below.',
       '',
       'CHECK FOR COMPLIANCE:',
       '1. Address order: Verify addresses follow the target language format, not source language order',
@@ -656,9 +675,7 @@ export class AIOrchestrator {
       '3. Terminology: Verify address terms are translated correctly',
       '4. Formatting: Check proper use of abbreviations (St., Ave., Blvd., etc.)',
       '',
-      examples ? `TRANSFORMATION EXAMPLES:\n${examples}` : '',
-      '',
-      terminologyList ? `TERMINOLOGY MAPPINGS:\n${terminologyList}` : '',
+      rule.instructions,
       '',
       'FLAG AS ERROR if:',
       '- Address follows source language order instead of target format',
@@ -681,13 +698,10 @@ export class AIOrchestrator {
     isUKEnglish: boolean,
     targetLang: string,
     targetLocale?: string,
-    hasAddressRules: boolean = false,
-    sourceLocale: string = '',
-    targetLocaleForAddress: string = ''
+    addressRule?: AddressFormattingRuleSource
   ): string {
-    // Build address compliance check section
-    const addressComplianceSection = hasAddressRules && sourceLocale && targetLocaleForAddress
-      ? this.buildAddressComplianceCheck(sourceLocale, targetLocaleForAddress)
+    const addressComplianceSection = addressRule
+      ? this.buildAddressComplianceCheck(addressRule)
       : '';
 
     if (isUKEnglish) {
@@ -736,14 +750,10 @@ export class AIOrchestrator {
     isUSEnglish: boolean,
     isEnglish: boolean,
     targetLangCode: string,
-    shouldIncludeAddressRules: boolean = false, // True only if rules exist AND addresses detected in batch
-    sourceLocale: string = '',
-    targetLocale: string = ''
+    addressRule?: AddressFormattingRuleSource
   ): string {
-    // Build address standardization section dynamically based on language pair
-    // Smart Injection: Only include if addresses were detected in the batch
-    const addressStandardizationSection = shouldIncludeAddressRules 
-      ? this.buildAddressStandardizationRules(sourceLocale, targetLocale) 
+    const addressStandardizationSection = addressRule
+      ? this.buildAddressStandardizationRules(addressRule)
       : '';
     
     if (isUKEnglish) {
@@ -904,7 +914,9 @@ export class AIOrchestrator {
         targetText = targetText.replace(/\s*\[mock\s+translation\]\s*/gi, '').trim();
         targetText = targetText.replace(/\s*\[synthetic\]\s*/gi, '').trim();
         targetText = targetText.replace(/\s*\[\s*\]\s*$/, '').trim();
-        
+        // Remove trailing artifact ",---" or ",--" (model output noise)
+        targetText = targetText.replace(/,[-]+\s*$/, '').trim();
+
         // Convert XML tags back to formatting tags
         targetText = this.convertXmlToTags(targetText);
         
@@ -991,6 +1003,9 @@ export class AIOrchestrator {
     const sourceLang = getLanguageName(sourceLangCode);
     const targetLang = getLanguageName(targetLangCode);
 
+    const addressRule = await getAddressFormattingRuleAsync(sourceLangCode, targetLangCode);
+    const optionsWithAddressRule = { ...options, addressRule: addressRule ?? null };
+
     // Plan token-based batches to prevent token limit exceeded errors
     // Use provider-specific limits for optimal context window usage
     const batchRanges = this.planBatches(options.segments, undefined, provider.name, model);
@@ -1056,8 +1071,32 @@ export class AIOrchestrator {
       let attempt = 0;
       let success = false;
       while (attempt < retries && !success) {
+        // Calculate dynamic maxTokens and system persona once per attempt (used in try and in retry-in-catch)
+        let maxTokens = options.maxTokens;
+        if (!maxTokens || maxTokens < 2048) {
+          const longestSegment = batchSegments.reduce((longest, seg) =>
+            seg.sourceText.length > longest.sourceText.length ? seg : longest,
+            batchSegments[0]
+          );
+          const sourceTextLength = longestSegment.sourceText.length;
+          const estimatedInputTokens = Math.ceil(sourceTextLength / 4);
+          const calculatedMaxTokens = Math.max(
+            Math.ceil(estimatedInputTokens * 2.5) + 1000,
+            2048
+          );
+          maxTokens = Math.min(calculatedMaxTokens, 8192);
+          logger.debug({
+            batchSize: batchSegments.length,
+            longestSegmentLength: sourceTextLength,
+            estimatedInputTokens,
+            calculatedMaxTokens,
+            finalMaxTokens: maxTokens,
+          }, 'translateSegments: Calculated dynamic maxTokens for batch');
+        }
+        const systemPersona = `You are an expert linguist. TRANSLATION DIRECTION: ${sourceLangCode} → ${targetLangCode}. You translate FROM ${sourceLangCode} (${sourceLang}, source/input) TO ${targetLangCode} (${targetLang}, target/output). CRITICAL: Your output MUST be in ${targetLangCode} only. Never return text in ${sourceLangCode}. If you see text in ${sourceLangCode}, translate it to ${targetLangCode}. If you see text in ${targetLangCode}, keep it as-is. Your translations must be accurate, natural, and idiomatic. Avoid literal calques and word-for-word translations. Prioritize meaning and fluency while maintaining technical precision.`;
+
         try {
-          const prompt = this.buildBatchPrompt(batchSegments, options, prevContextString, nextContextString, options.strictMode || false);
+          const prompt = this.buildBatchPrompt(batchSegments, optionsWithAddressRule, prevContextString, nextContextString, options.strictMode || false);
           
           // Log prompt for YandexGPT debugging
           if (provider.name === 'yandex') {
@@ -1069,56 +1108,6 @@ export class AIOrchestrator {
               sourceLocale: options.sourceLocale,
               targetLocale: options.targetLocale,
             }, 'YandexGPT translation request');
-          }
-          
-          // Calculate dynamic maxTokens for batch if not explicitly set
-          let maxTokens = options.maxTokens;
-          if (!maxTokens || maxTokens < 2048) {
-            // For batch, use the longest segment
-            const longestSegment = batchSegments.reduce((longest, seg) => 
-              seg.sourceText.length > longest.sourceText.length ? seg : longest,
-              batchSegments[0]
-            );
-            const sourceTextLength = longestSegment.sourceText.length;
-            const estimatedInputTokens = Math.ceil(sourceTextLength / 4);
-            const calculatedMaxTokens = Math.max(
-              Math.ceil(estimatedInputTokens * 2.5) + 1000,
-              2048 // Minimum 2048
-            );
-            maxTokens = Math.min(calculatedMaxTokens, 8192);
-            logger.debug({
-              batchSize: batchSegments.length,
-              longestSegmentLength: sourceTextLength,
-              estimatedInputTokens,
-              calculatedMaxTokens,
-              finalMaxTokens: maxTokens,
-            }, 'translateSegments: Calculated dynamic maxTokens for batch');
-          }
-          
-          // Build system persona for explicit injection with clear translation direction
-          const systemPersona = `You are an expert linguist. TRANSLATION DIRECTION: ${sourceLangCode} → ${targetLangCode}. You translate FROM ${sourceLangCode} (${sourceLang}, source/input) TO ${targetLangCode} (${targetLang}, target/output). CRITICAL: Your output MUST be in ${targetLangCode} only. Never return text in ${sourceLangCode}. If you see text in ${sourceLangCode}, translate it to ${targetLangCode}. If you see text in ${targetLangCode}, keep it as-is. Your translations must be accurate, natural, and idiomatic. Avoid literal calques and word-for-word translations. Prioritize meaning and fluency while maintaining technical precision.`;
-          
-          // Debug: Write raw prompt with XML tags to file for inspection
-          try {
-            // Use workspace root (.cursor) instead of backend/.cursor
-            // process.cwd() returns backend directory, so go up one level
-            const debugDir = resolve(process.cwd(), '..', '.cursor');
-            await fs.mkdir(debugDir, { recursive: true });
-            const timestamp = Date.now();
-            const debugFilePath = join(debugDir, `debug-xml-prompt-${timestamp}.log`);
-            await fs.writeFile(debugFilePath, prompt, 'utf-8');
-            logger.info({ 
-              debugFilePath, 
-              promptLength: prompt.length,
-              hasXmlTags: prompt.includes('<t i='),
-              timestamp 
-            }, 'DEBUG: Wrote raw prompt with XML tags to file');
-            console.log(`[DEBUG] XML Prompt written to: ${debugFilePath}`);
-          } catch (debugError) {
-            const errorMessage = debugError instanceof Error ? debugError.message : String(debugError);
-            const errorStack = debugError instanceof Error ? debugError.stack : undefined;
-            logger.error({ error: errorMessage, stack: errorStack }, 'Failed to write debug prompt file');
-            console.error(`[DEBUG ERROR] Failed to write XML prompt file:`, errorMessage);
           }
           
           const response = await provider.callModel({
@@ -1180,7 +1169,7 @@ export class AIOrchestrator {
             }, 'Retrying translation with strict mode to save output tokens');
             
             // Retry with strict mode
-            const strictOptions = { ...options, strictMode: true };
+            const strictOptions = { ...optionsWithAddressRule, strictMode: true };
             const prompt = this.buildBatchPrompt(batchSegments, strictOptions, prevContextString, nextContextString, true);
             
             try {
@@ -1430,22 +1419,21 @@ export class AIOrchestrator {
     const targetLocale = options.targetLocale;
     const sourceLang = sourceLocale ? getLanguageName(sourceLocale) : 'Source';
     const targetLang = targetLocale ? getLanguageName(targetLocale) : 'Target';
-    
+    const isRuToEn = sourceLocale?.toLowerCase().startsWith('ru') && targetLocale?.toLowerCase().startsWith('en');
+
     // Detect if target is UK English for naturalness checks
     const isUKEnglish = targetLocale?.toLowerCase() === 'en-gb' || targetLocale?.toLowerCase() === 'en_gb';
-    
-    // Check if address formatting rules exist for compliance checking
-    const hasAddressRules = sourceLocale && targetLocale 
-      ? hasAddressFormattingRule(sourceLocale, targetLocale) 
-      : false;
-    
+
+    // Address formatting compliance only for ru→en (same as translation prompt)
+    const addressRuleForCritic = isRuToEn && sourceLocale && targetLocale
+      ? await getAddressFormattingRuleAsync(sourceLocale, targetLocale)
+      : undefined;
+
     const naturalnessCheck = this.buildCritiqueNaturalnessInstructions(
-      isUKEnglish, 
-      targetLang, 
+      isUKEnglish,
+      targetLang,
       targetLocale,
-      hasAddressRules,
-      sourceLocale || '',
-      targetLocale || ''
+      addressRuleForCritic
     );
     
     const prompt = [

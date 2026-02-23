@@ -4,18 +4,8 @@ import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { documentsApi } from '../api/documents.api';
 import { segmentsApi } from '../api/segments.api';
 import SegmentEditor from '../components/editor/SegmentEditor';
-import TMSuggestionsPanel from '../components/editor/TMSuggestionsPanel';
-import AITranslationPanel from '../components/editor/AITranslationPanel';
-import AIChatPanel from '../components/editor/AIChatPanel';
-import GuidelinesPanel from '../components/editor/GuidelinesPanel';
-import GlossaryPanel from '../components/editor/GlossaryPanel';
-import GlossaryModePanel from '../components/editor/GlossaryModePanel';
-import QAIssuesPanel from '../components/editor/QAIssuesPanel';
-import DebugInspectorPanel from '../components/editor/DebugInspectorPanel';
-import AnalysisInspector from '../components/editor/AnalysisInspector';
 import EditorToolbar from '../components/editor/EditorToolbar';
-import DocumentGlossary from '../components/DocumentGlossary';
-import AnalysisSidebar from '../components/AnalysisSidebar';
+import SidebarTabs from '../components/editor/SidebarTabs';
 import GlossaryReviewTable from '../components/Glossary/GlossaryReviewTable';
 import type { Segment, SegmentStatus } from '../api/segments.api';
 import type { GlossaryMode } from '../types/glossary';
@@ -68,6 +58,9 @@ export default function EditorPage() {
     details?: string;
   } | null>(null);
   const [showGlossaryReview, setShowGlossaryReview] = useState(false);
+  /** Page size for segment list; cap to avoid loading 50k+ segments and hanging the browser. */
+  const SEGMENTS_PAGE_SIZE = 500;
+  const [segmentsPage, setSegmentsPage] = useState(1);
 
   const { data: documentData, isLoading: isLoadingDocument } = useQuery({
     queryKey: ['documents', documentId],
@@ -76,16 +69,12 @@ export default function EditorPage() {
   });
 
   const { data: segmentsData, isLoading: isLoadingSegments, error: segmentsError, refetch: refetchSegments } = useQuery({
-    queryKey: ['segments', documentId, statusFilter, searchQuery],
+    queryKey: ['segments', documentId, statusFilter, searchQuery, segmentsPage],
     queryFn: async () => {
       if (searchQuery) {
-        // For search queries, use a reasonable limit (search results are typically smaller)
         return segmentsApi.list(documentId!, 1, 1000, searchQuery);
       }
-      // For full document view, first check total count, then load all segments
-      // Use a very large pageSize to load all segments in one request
-      // Backend supports this (no hard limit on segments)
-      return segmentsApi.list(documentId!, 1, 50000);
+      return segmentsApi.list(documentId!, segmentsPage, SEGMENTS_PAGE_SIZE);
     },
     enabled: !!documentId,
   });
@@ -126,7 +115,10 @@ export default function EditorPage() {
   }, [isLoadingDocument, isLoadingSegments, documentData, segmentsData]);
 
   const segments = segmentsData?.segments || [];
-  
+  const documentTotal = segmentsData?.total ?? segments.length;
+  const totalPages = segmentsData?.totalPages ?? 1;
+  const globalSegmentIndex = (segmentsPage - 1) * SEGMENTS_PAGE_SIZE + activeSegmentIndex + 1;
+
   // Debug: log what we have
   if (import.meta.env.DEV) {
     const segmentsWithTranslations = segments.filter(s => s.targetMt || s.targetFinal);
@@ -216,12 +208,21 @@ export default function EditorPage() {
     }
   }, [filteredSegments.length, activeSegmentIndex]);
 
+  // Reset to first segment when changing page
+  useEffect(() => {
+    setActiveSegmentIndex(0);
+  }, [segmentsPage]);
+
+  useEffect(() => {
+    setSegmentsPage(1);
+  }, [searchQuery]);
+
   const updateSegmentMutation = useMutation({
     mutationFn: ({ segmentId, updates }: { segmentId: string; updates: Partial<Segment> }) =>
       segmentsApi.update(segmentId, updates),
     onSuccess: (updatedSegment) => {
       // Optimistically update the query cache with the updated segment
-      queryClient.setQueryData(['segments', documentId, statusFilter, searchQuery], (oldData: any) => {
+      queryClient.setQueryData(['segments', documentId, statusFilter, searchQuery, segmentsPage], (oldData: any) => {
         if (!oldData) return oldData;
         return {
           ...oldData,
@@ -261,15 +262,9 @@ export default function EditorPage() {
   }, [handleNext]);
 
   const handleApplyTM = useCallback(async (targetText: string) => {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EditorPage.tsx:261',message:'handleApplyTM called',data:{targetText:targetText.substring(0,50),hasActiveSegment:!!activeSegment,activeSegmentId:activeSegment?.id,hasSegmentsData:!!segmentsData,documentId,statusFilter,searchQuery},timestamp:Date.now(),runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-    // #endregion
     if (activeSegment && segmentsData) {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EditorPage.tsx:264',message:'Updating query cache',data:{queryKey:['segments',documentId,statusFilter,searchQuery],activeSegmentId:activeSegment.id,targetText:targetText.substring(0,50)},timestamp:Date.now(),runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-      // #endregion
       // Optimistically update the query cache immediately for instant UI feedback
-      const updatedData = queryClient.setQueryData(['segments', documentId, statusFilter, searchQuery], (oldData: any) => {
+      queryClient.setQueryData(['segments', documentId, statusFilter, searchQuery, segmentsPage], (oldData: any) => {
         if (!oldData) return oldData;
         const updatedSegments = oldData.segments.map((seg: Segment) =>
           seg.id === activeSegment.id
@@ -281,19 +276,12 @@ export default function EditorPage() {
               }
             : seg
         );
-        // #region agent log
-        const foundSegment = updatedSegments.find((seg:Segment)=>seg.id===activeSegment.id);
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EditorPage.tsx:268',message:'Query cache update callback',data:{oldSegmentsCount:oldData.segments.length,updatedSegmentsCount:updatedSegments.length,foundSegment:foundSegment?{id:activeSegment.id,targetFinal:foundSegment.targetFinal?.substring(0,50),targetMt:foundSegment.targetMt?.substring(0,50)}:null},timestamp:Date.now(),runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-        // #endregion
         return {
           ...oldData,
           segments: updatedSegments,
         };
       });
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'EditorPage.tsx:279',message:'Query cache updated',data:{hasUpdatedData:!!updatedData,updatedSegmentsCount:updatedData?.segments?.length,updatedSegment:updatedData?.segments?.find((s:Segment)=>s.id===activeSegment.id)?{id:activeSegment.id,targetFinal:updatedData.segments.find((s:Segment)=>s.id===activeSegment.id).targetFinal?.substring(0,50)}:null},timestamp:Date.now(),runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-      // #endregion
-      
+
       // Also update via API to ensure data is saved to database
       try {
         await segmentsApi.update(activeSegment.id, {
@@ -312,7 +300,7 @@ export default function EditorPage() {
         queryClient.invalidateQueries({ queryKey: ['segment', activeSegment.id] });
       }, 500); // Reduced delay for faster sync
     }
-  }, [activeSegment, queryClient, documentId, statusFilter, searchQuery, segmentsData]);
+  }, [activeSegment, queryClient, documentId, statusFilter, searchQuery, segmentsData, segmentsPage]);
 
   const handleSegmentClick = useCallback((index: number) => {
     setActiveSegmentIndex(index);
@@ -423,7 +411,9 @@ export default function EditorPage() {
               </div>
               {segmentsData && segmentsData.segments && segmentsData.segments.length > 0 && (
                 <div className="mt-3 text-xs text-gray-500 text-center bg-gray-50 rounded px-3 py-2">
-                  ✓ {segmentsData.segments.length} segment{segmentsData.segments.length !== 1 ? 's' : ''} loaded
+                  ✓ {documentTotal > segmentsData.segments.length
+                    ? `${segmentsData.segments.length.toLocaleString()} of ${documentTotal.toLocaleString()}`
+                    : segmentsData.segments.length} segment{segmentsData.segments.length !== 1 ? 's' : ''} loaded
                 </div>
               )}
               {documentData && (
@@ -474,7 +464,7 @@ export default function EditorPage() {
   }
 
   const progress = {
-    total: segments.length,
+    total: documentTotal,
     confirmed: segments.filter((s) => s.status === 'CONFIRMED').length,
     edited: segments.filter((s) => s.status === 'EDITED').length,
     mt: segments.filter((s) => s.status === 'MT').length,
@@ -482,6 +472,7 @@ export default function EditorPage() {
   };
 
   const completionRate = progress.total > 0 ? (progress.confirmed / progress.total) * 100 : 0;
+  const showPagination = !searchQuery && documentTotal > SEGMENTS_PAGE_SIZE;
 
   return (
     <div className="h-screen flex flex-col bg-gray-50 fixed inset-0">
@@ -641,7 +632,7 @@ export default function EditorPage() {
                 </div>
               ) : (
                 <>
-                  <div className="mb-4 flex items-center justify-between">
+                  <div className="mb-4 flex items-center justify-between flex-wrap gap-2">
                     <div className="flex items-center space-x-3">
                       <button
                         onClick={() => {
@@ -661,6 +652,49 @@ export default function EditorPage() {
                         </span>
                       )}
                     </div>
+                    {showPagination && (
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm text-gray-600">
+                          Page {segmentsPage} of {totalPages} (segments {(segmentsPage - 1) * SEGMENTS_PAGE_SIZE + 1}–{Math.min(segmentsPage * SEGMENTS_PAGE_SIZE, documentTotal)} of {documentTotal.toLocaleString()})
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setSegmentsPage(1)}
+                          disabled={segmentsPage <= 1}
+                          className="btn btn-secondary text-sm disabled:opacity-50"
+                          title="First page"
+                        >
+                          First
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSegmentsPage((p) => Math.max(1, p - 1))}
+                          disabled={segmentsPage <= 1}
+                          className="btn btn-secondary text-sm disabled:opacity-50"
+                          title="Previous page"
+                        >
+                          Previous
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSegmentsPage((p) => Math.min(totalPages, p + 1))}
+                          disabled={segmentsPage >= totalPages}
+                          className="btn btn-secondary text-sm disabled:opacity-50"
+                          title="Next page"
+                        >
+                          Next
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSegmentsPage(totalPages)}
+                          disabled={segmentsPage >= totalPages}
+                          className="btn btn-secondary text-sm disabled:opacity-50"
+                          title="Last page"
+                        >
+                          Last
+                        </button>
+                      </div>
+                    )}
                   </div>
                   {filteredSegments.map((segment, index) => {
                     const isSelected = selectedSegmentIds.includes(segment.id);
@@ -738,72 +772,23 @@ export default function EditorPage() {
                 </div>
               </div>
                   <div
-                    className="border-l border-gray-200 bg-gray-50 overflow-y-auto p-4 space-y-4"
+                    className="border-l border-gray-200 bg-gray-50 flex flex-col min-h-0"
                     style={{ width: `${sidebarWidth}px`, minWidth: `${sidebarWidth}px`, maxWidth: `${sidebarWidth}px` }}
                     onClick={(e) => e.stopPropagation()}
                     onMouseDown={(e) => e.stopPropagation()}
                   >
-                    <AnalysisSidebar documentId={documentId!} />
-
-                    <AIChatPanel
-                      projectId={documentData.projectId}
+                    <SidebarTabs
                       documentId={documentId!}
-                      segmentId={activeSegment.id}
-                      sourceText={activeSegment.sourceText}
-                      targetText={activeSegment.targetFinal || activeSegment.targetMt}
-                    />
-
-                    <AITranslationPanel
-                      sourceText={activeSegment.sourceText}
+                      projectId={documentData.projectId}
                       sourceLocale={documentData.sourceLocale}
                       targetLocale={documentData.targetLocale}
-                      projectId={documentData.projectId}
                       segmentId={activeSegment.id}
+                      sourceText={activeSegment.sourceText}
+                      targetText={activeSegment.targetFinal || activeSegment.targetMt || ''}
                       glossaryMode={glossaryMode}
-                      currentTargetText={activeSegment.targetFinal || activeSegment.targetMt || ''}
-                      onApply={handleApplyTM}
+                      onGlossaryModeChange={setGlossaryMode}
+                      onApplyTM={handleApplyTM}
                     />
-
-                    <TMSuggestionsPanel
-                      sourceText={activeSegment.sourceText}
-                      sourceLocale={documentData.sourceLocale}
-                      targetLocale={documentData.targetLocale}
-                      projectId={documentData.projectId}
-                      segmentId={activeSegment.id}
-                      currentTargetText={activeSegment.targetFinal || activeSegment.targetMt}
-                      onApply={handleApplyTM}
-                    />
-
-                    <GlossaryModePanel
-                      mode={glossaryMode}
-                      onModeChange={(mode) => {
-                        setGlossaryMode(mode);
-                        if (typeof window !== 'undefined') {
-                          try {
-                            localStorage.setItem('ai-ts-glossary-mode', mode);
-                          } catch {
-                            // ignore storage errors
-                          }
-                        }
-                      }}
-                    />
-
-                    <DocumentGlossary documentId={documentId!} />
-
-                    <GuidelinesPanel projectId={documentData.projectId} />
-
-                    <GlossaryPanel
-                      sourceText={activeSegment.sourceText}
-                      sourceLocale={documentData.sourceLocale}
-                      targetLocale={documentData.targetLocale}
-                      projectId={documentData.projectId}
-                    />
-
-                    <QAIssuesPanel segmentId={activeSegment.id} />
-
-                    <AnalysisInspector segmentId={activeSegment.id} />
-
-                    <DebugInspectorPanel segmentId={activeSegment.id} />
                   </div>
             </>
           )}
@@ -819,7 +804,7 @@ export default function EditorPage() {
               <span>Confirmed: {progress.confirmed}</span>
             </div>
             <div>
-              Segment {activeSegmentIndex + 1} of {filteredSegments.length}
+              Segment {showPagination ? globalSegmentIndex : activeSegmentIndex + 1} of {documentTotal.toLocaleString()}
             </div>
           </div>
         </div>

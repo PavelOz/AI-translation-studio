@@ -935,6 +935,20 @@ const buildOrchestratorSegment = (
   documentName: documentName ?? undefined,
 });
 
+/** Collect target-language abbreviations from Document DNA abbreviationLogic for Style Governor tracking. */
+function getKnownTargetAbbreviations(abbreviationLogic: Record<string, unknown> | null | undefined): string[] {
+  if (!abbreviationLogic || typeof abbreviationLogic !== 'object') return [];
+  const out = new Set<string>();
+  for (const v of Object.values(abbreviationLogic)) {
+    const str = typeof v === 'string' ? v : (v && typeof v === 'object' && 'value' in v ? String((v as { value: unknown }).value) : null);
+    if (!str) continue;
+    const inParens = str.match(/\(([A-Z][A-Z0-9]{1,})\)/);
+    if (inParens) out.add(inParens[1]);
+    else if (/^[A-Z][A-Z0-9]{1,}$/.test(str.trim())) out.add(str.trim());
+  }
+  return Array.from(out);
+}
+
 export const listAIProviders = () => listAvailableProviders();
 
 export const getProjectAISettings = (projectId: string) =>
@@ -1056,11 +1070,21 @@ export const generateSegmentSuggestions = async (documentId: string): Promise<Se
       documentContext,
     );
 
-    // Fetch document with summary fields
+    // Fetch document with summary and Document DNA for PROJECT KNOWLEDGE BASE
     const documentWithSummary = await prisma.document.findUnique({
       where: { id: document.id },
       select: {
         name: true,
+        summary: true,
+        clusterSummary: true,
+        documentDna: {
+          select: {
+            technicalSchema: true,
+            namingConventions: true,
+            abbreviationLogic: true,
+            entityGroups: true,
+          },
+        },
       },
     });
 
@@ -1106,6 +1130,15 @@ export const generateSegmentSuggestions = async (documentId: string): Promise<Se
       'Stage 2: Document context fetched for translation',
     );
 
+    const documentDnaPayload = documentWithSummary?.documentDna
+      ? {
+          technicalSchema: documentWithSummary.documentDna.technicalSchema as Record<string, unknown> | null | undefined,
+          namingConventions: documentWithSummary.documentDna.namingConventions as Record<string, unknown> | null | undefined,
+          abbreviationLogic: documentWithSummary.documentDna.abbreviationLogic as Record<string, unknown> | null | undefined,
+          entityGroups: documentWithSummary.documentDna.entityGroups as Record<string, unknown> | null | undefined,
+        }
+      : undefined;
+
     const aiResults = await orchestrator.translateSegments({
       provider: context.settings?.provider,
       model: context.settings?.model,
@@ -1120,6 +1153,7 @@ export const generateSegmentSuggestions = async (documentId: string): Promise<Se
         summary: documentWithSummary.summary ?? undefined,
         clusterSummary: documentWithSummary.clusterSummary ?? undefined,
       } : undefined,
+      documentDna: documentDnaPayload ?? undefined,
       sourceLocale: document.sourceLocale, // Pass explicit source locale from document
       targetLocale: document.targetLocale, // Pass explicit target locale from document
       temperature: context.settings?.temperature ?? getDefaultTemperature(context.settings?.provider),
@@ -1636,15 +1670,32 @@ export const runSegmentMachineTranslationWithCritic = async (
     source: 'translateSegment:before-translateWithCritic',
   }, 'translateSegment: Calling translateWithCritic with dynamic maxTokens');
 
-  // Fetch document with summary fields for context
+  // Fetch document with summary and Document DNA for context
   const documentWithSummary = await prisma.document.findUnique({
     where: { id: segment.document.id },
     select: {
       name: true,
       summary: true,
       clusterSummary: true,
+      documentDna: {
+        select: {
+          technicalSchema: true,
+          namingConventions: true,
+          abbreviationLogic: true,
+          entityGroups: true,
+        },
+      },
     },
   });
+
+  const documentDnaPayload = documentWithSummary?.documentDna
+    ? {
+        technicalSchema: documentWithSummary.documentDna.technicalSchema as Record<string, unknown> | null | undefined,
+        namingConventions: documentWithSummary.documentDna.namingConventions as Record<string, unknown> | null | undefined,
+        abbreviationLogic: documentWithSummary.documentDna.abbreviationLogic as Record<string, unknown> | null | undefined,
+        entityGroups: documentWithSummary.documentDna.entityGroups as Record<string, unknown> | null | undefined,
+      }
+    : undefined;
 
   const aiResult = await orchestrator.translateWithCritic(
     buildOrchestratorSegment(segment, previous, next, segment.document.name),
@@ -1662,6 +1713,7 @@ export const runSegmentMachineTranslationWithCritic = async (
         summary: documentWithSummary.summary ?? undefined,
         clusterSummary: documentWithSummary.clusterSummary ?? undefined,
       } : undefined,
+      documentDna: documentDnaPayload,
       // #region agent log
       sourceLocale: segment.document.sourceLocale, // Pass explicit source locale from document
       targetLocale: segment.document.targetLocale, // Pass explicit target locale from document
@@ -2107,15 +2159,32 @@ export const runDocumentMachineTranslation = async (
         documentContext,
       );
 
-      // Fetch document with summary fields
+      // Fetch document with summary and Document DNA
       const documentWithSummary = await prisma.document.findUnique({
         where: { id: document.id },
         select: {
           name: true,
           summary: true,
           clusterSummary: true,
+          documentDna: {
+            select: {
+              technicalSchema: true,
+              namingConventions: true,
+              abbreviationLogic: true,
+              entityGroups: true,
+            },
+          },
         },
       });
+
+      const documentDnaPayloadBatch = documentWithSummary?.documentDna
+        ? {
+            technicalSchema: documentWithSummary.documentDna.technicalSchema as Record<string, unknown> | null | undefined,
+            namingConventions: documentWithSummary.documentDna.namingConventions as Record<string, unknown> | null | undefined,
+            abbreviationLogic: documentWithSummary.documentDna.abbreviationLogic as Record<string, unknown> | null | undefined,
+            entityGroups: documentWithSummary.documentDna.entityGroups as Record<string, unknown> | null | undefined,
+          }
+        : undefined;
 
       // Stage 2: Fetch document-specific context from Analyst Stage
       const documentStyleRules = await getDocumentStyleRules(document.id);
@@ -2168,6 +2237,7 @@ export const runDocumentMachineTranslation = async (
           summary: documentWithSummary.summary ?? undefined,
           clusterSummary: documentWithSummary.clusterSummary ?? undefined,
         } : undefined,
+        documentDna: documentDnaPayloadBatch,
         glossary: filteredGlossary,
         guidelines: context.guidelines,
         tmExamples: batchExamples, // Pass examples for RAG (using first segment's examples for batch)
@@ -2503,6 +2573,9 @@ export const pretranslateDocument = async (
           fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2137',message:'Pretranslate: Batch saved successfully',data:{documentId,savedCount:pendingUpdates.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
           // #endregion
           pendingUpdates = [];
+          // Update progress only after successful save so UI/export never show a count higher than what's in DB
+          const currentTmCount = responseLog.filter((r) => r.method === 'tm').length;
+          updateProgress(documentId, { tmApplied: currentTmCount, currentSegment: responseLog.length });
         }
         
         // Also check for cancellation after saving to ensure we stop promptly
@@ -2519,15 +2592,10 @@ export const pretranslateDocument = async (
           break; // Exit loop to allow processing of queued segments
         }
 
-        // Update progress counters after each save batch or at the end
-        // This ensures progress is updated frequently enough to show accurate counts
-        const currentTmCount = responseLog.filter((r) => r.method === 'tm').length;
-        if (pendingUpdates.length === 0 || i === eligibleSegments.length - 1) {
-          // Update after saving a batch or at the end
-          updateProgress(documentId, { 
-            tmApplied: currentTmCount,
-            currentSegment: responseLog.length, // Total completed so far
-          });
+        // Update progress at end of loop only when nothing is left pending (so count reflects what's actually saved)
+        if (pendingUpdates.length === 0) {
+          const currentTmCount = responseLog.filter((r) => r.method === 'tm').length;
+          updateProgress(documentId, { tmApplied: currentTmCount, currentSegment: responseLog.length });
         }
       } else {
         // No 100% match - check if we should queue for AI
@@ -2577,8 +2645,11 @@ export const pretranslateDocument = async (
     if (pendingUpdates.length > 0) {
       await prisma.$transaction(pendingUpdates);
       pendingUpdates = [];
+      // Progress was only updated after batch flushes; update to final count now that all TM updates are saved
+      const tmCount = responseLog.filter((r) => r.method === 'tm').length;
+      updateProgress(documentId, { tmApplied: tmCount, currentSegment: responseLog.length });
     }
-    
+
     const tmCount = responseLog.filter((r) => r.method === 'tm').length;
     if (!options?.skipTm) {
       addLogMessage(documentId, `✅ Pass 1 complete: ${tmCount} segments matched with 100% TM, ${queuedForAI.length} segments queued for AI`);
@@ -2686,15 +2757,32 @@ export const pretranslateDocument = async (
                 documentContext,
               );
 
-              // Fetch document with summary fields
+              // Fetch document with summary and Document DNA
               const documentWithSummary = await prisma.document.findUnique({
                 where: { id: document.id },
                 select: {
                   name: true,
                   summary: true,
                   clusterSummary: true,
+                  documentDna: {
+                    select: {
+                      technicalSchema: true,
+                      namingConventions: true,
+                      abbreviationLogic: true,
+                      entityGroups: true,
+                    },
+                  },
                 },
               });
+
+              const documentDnaSingle = documentWithSummary?.documentDna
+                ? {
+                    technicalSchema: documentWithSummary.documentDna.technicalSchema as Record<string, unknown> | null | undefined,
+                    namingConventions: documentWithSummary.documentDna.namingConventions as Record<string, unknown> | null | undefined,
+                    abbreviationLogic: documentWithSummary.documentDna.abbreviationLogic as Record<string, unknown> | null | undefined,
+                    entityGroups: documentWithSummary.documentDna.entityGroups as Record<string, unknown> | null | undefined,
+                  }
+                : undefined;
 
               const orchestratorSegment = buildOrchestratorSegment(
                 entry.segment,
@@ -2717,6 +2805,7 @@ export const pretranslateDocument = async (
                     summary: documentWithSummary.summary ?? undefined,
                     clusterSummary: documentWithSummary.clusterSummary ?? undefined,
                   } : undefined,
+                  documentDna: documentDnaSingle,
                   project: context.projectMeta,
                   sourceLocale: document.sourceLocale,
                   targetLocale: document.targetLocale,
@@ -2918,6 +3007,8 @@ export const pretranslateDocument = async (
         // Process AI translations in batches (faster, standard mode)
         const batchSize = 10; // Process 10 segments at a time
         addLogMessage(documentId, `📦 Processing ${queuedForAI.length} segments in batches of ${batchSize}...`);
+        /** Style Governor: abbreviations already expanded in previous batches (use abbreviation only in next batches) */
+        let introducedAbbreviations: string[] = [];
         for (let i = 0; i < queuedForAI.length; i += batchSize) {
           // Check for cancellation before each batch
           if (isCancelled(documentId)) {
@@ -2972,13 +3063,32 @@ export const pretranslateDocument = async (
             documentContext,
           );
 
-          // Fetch document with summary fields
+          // Fetch document with summary and Document DNA
           const documentWithSummary = await prisma.document.findUnique({
             where: { id: document.id },
             select: {
               name: true,
+              summary: true,
+              clusterSummary: true,
+              documentDna: {
+                select: {
+                  technicalSchema: true,
+                  namingConventions: true,
+                  abbreviationLogic: true,
+                  entityGroups: true,
+                },
+              },
             },
           });
+
+          const documentDnaPretranslate = documentWithSummary?.documentDna
+            ? {
+                technicalSchema: documentWithSummary.documentDna.technicalSchema as Record<string, unknown> | null | undefined,
+                namingConventions: documentWithSummary.documentDna.namingConventions as Record<string, unknown> | null | undefined,
+                abbreviationLogic: documentWithSummary.documentDna.abbreviationLogic as Record<string, unknown> | null | undefined,
+                entityGroups: documentWithSummary.documentDna.entityGroups as Record<string, unknown> | null | undefined,
+              }
+            : undefined;
 
           // Stage 2: Fetch document-specific context from Analyst Stage
           const documentStyleRules = await getDocumentStyleRules(document.id);
@@ -3024,6 +3134,7 @@ export const pretranslateDocument = async (
               summary: documentWithSummary.summary ?? undefined,
               clusterSummary: documentWithSummary.clusterSummary ?? undefined,
             } : undefined,
+            documentDna: documentDnaPretranslate,
             segments: orchestratorSegments,
             glossary: filteredGlossary,
             guidelines: context.guidelines,
@@ -3037,9 +3148,25 @@ export const pretranslateDocument = async (
             documentGlossary: documentGlossary.length > 0 ? documentGlossary : undefined,
             documentStyleRules: documentStyleRules.length > 0 ? documentStyleRules : undefined,
             documentId: document.id,
+            introducedAbbreviations, // Style Governor: already expanded in previous batches
           });
 
           const resultMap = new Map(aiResults.map((result) => [result.segmentId, result]));
+
+          // Style Governor: collect target-language abbreviations expanded in this batch (pattern "Full Term (ABBR)") for next batches
+          const knownAbbrevs = getKnownTargetAbbreviations(documentDnaPretranslate?.abbreviationLogic ?? undefined);
+          if (knownAbbrevs.length > 0) {
+            const newFromBatch = new Set<string>();
+            for (const r of aiResults) {
+              const text = r.targetText ?? '';
+              const re = /\(([A-Z][A-Z0-9]{1,})\)/g;
+              let m: RegExpExecArray | null;
+              while ((m = re.exec(text)) !== null) {
+                if (knownAbbrevs.includes(m[1])) newFromBatch.add(m[1]);
+              }
+            }
+            introducedAbbreviations = [...new Set([...introducedAbbreviations, ...newFromBatch])];
+          }
 
           // Update progress immediately after getting AI results (before saving to DB)
           // This shows real-time progress to the user
@@ -4150,15 +4277,32 @@ export const getSegmentDebugInfo = async (segmentId: string) => {
     searchMethod: match.searchMethod || 'fuzzy',
   }));
 
-  // Fetch document with summary fields
+  // Fetch document with summary and Document DNA
   const documentWithSummary = await prisma.document.findUnique({
     where: { id: segment.document.id },
     select: {
       name: true,
       summary: true,
       clusterSummary: true,
+      documentDna: {
+        select: {
+          technicalSchema: true,
+          namingConventions: true,
+          abbreviationLogic: true,
+          entityGroups: true,
+        },
+      },
     },
   });
+
+  const documentDnaDebug = documentWithSummary?.documentDna
+    ? {
+        technicalSchema: documentWithSummary.documentDna.technicalSchema as Record<string, unknown> | null | undefined,
+        namingConventions: documentWithSummary.documentDna.namingConventions as Record<string, unknown> | null | undefined,
+        abbreviationLogic: documentWithSummary.documentDna.abbreviationLogic as Record<string, unknown> | null | undefined,
+        entityGroups: documentWithSummary.documentDna.entityGroups as Record<string, unknown> | null | undefined,
+      }
+    : undefined;
 
   // Build the prompt using orchestrator's public method (with filtered glossary)
   const prompt = orchestrator.buildPromptForSegment(orchestratorSegment, {
@@ -4174,6 +4318,7 @@ export const getSegmentDebugInfo = async (segmentId: string) => {
       summary: documentWithSummary.summary ?? undefined,
       clusterSummary: documentWithSummary.clusterSummary ?? undefined,
     } : undefined,
+    documentDna: documentDnaDebug,
   });
 
   return {

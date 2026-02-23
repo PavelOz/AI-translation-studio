@@ -1,10 +1,13 @@
 /**
  * Document Context Analyzer
- * 
+ *
+ * @deprecated Use Document DNA (generateDocumentDna + summaryFromDna) as the single source of truth for document context.
+ * This analyzer used only the first 10k characters and did not use stride sampling or DNA.
+ *
  * Analyzes document text to generate a "Translation Context Profile" that helps
  * the AIOrchestrator understand the document's genre, tone, and key terminology
  * for better translation quality.
- * 
+ *
  * This analyzer uses fast/cheap AI models (Gemini Flash, GPT-4o-mini) since
  * it's a summarization task that doesn't require the highest quality models.
  */
@@ -144,8 +147,8 @@ Summary: [one sentence summary]
 }
 
 /**
- * Convenience function to analyze document context
- * Uses default provider and API key from environment
+ * Convenience function to analyze document context.
+ * @deprecated Use Document DNA (generateDocumentDna) and summaryFromDna for document summary instead.
  */
 export async function analyzeDocumentContext(
   fileName: string,

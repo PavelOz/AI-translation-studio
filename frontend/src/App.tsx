@@ -12,6 +12,7 @@ import ReportsPage from './pages/ReportsPage';
 import TranslationMemoryPage from './pages/TranslationMemoryPage';
 import GlossaryPage from './pages/GlossaryPage';
 import ClusteringPage from './pages/ClusteringPage';
+import ProfilesPage from './pages/ProfilesPage';
 import StageMonitoringDashboard from './components/StageMonitoringDashboard';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -116,6 +117,14 @@ function App() {
         element={
           <PrivateRoute>
             <GlossaryPage />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/profiles"
+        element={
+          <PrivateRoute>
+            <ProfilesPage />
           </PrivateRoute>
         }
       />

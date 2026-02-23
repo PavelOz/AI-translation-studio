@@ -124,6 +124,40 @@ export const analysisApi = {
     const response = await apiClient.get<StageMonitoringData>(`/documents/${documentId}/analysis/monitoring`);
     return response.data;
   },
+
+  // Document DNA (Project Knowledge Base)
+  getDocumentDna: async (documentId: string): Promise<DocumentDnaPayload | null> => {
+    try {
+      const response = await apiClient.get<DocumentDnaPayload>(`/documents/${documentId}/dna`);
+      return response.data;
+    } catch (err: any) {
+      if (err?.response?.status === 404) return null;
+      throw err;
+    }
+  },
+
+  updateDocumentDna: async (documentId: string, payload: DocumentDnaPayload): Promise<DocumentDnaPayload> => {
+    const response = await apiClient.put<DocumentDnaPayload>(`/documents/${documentId}/dna`, payload);
+    return response.data;
+  },
+
+  regenerateDocumentDna: async (documentId: string): Promise<DocumentDnaPayload> => {
+    const response = await apiClient.post<DocumentDnaPayload>(`/documents/${documentId}/dna/regenerate`);
+    return response.data;
+  },
+
+  /** Refine DNA (revision). When preview=true, returns refined payload without saving. */
+  refineDocumentDna: async (documentId: string, options?: { preview?: boolean }): Promise<DocumentDnaPayload> => {
+    const response = await apiClient.post<DocumentDnaPayload>(`/documents/${documentId}/refine-dna`, options ?? {});
+    return response.data;
+  },
+};
+
+export type DocumentDnaPayload = {
+  technicalSchema?: Record<string, unknown> | null;
+  namingConventions?: Record<string, unknown> | null;
+  abbreviationLogic?: Record<string, unknown> | null;
+  entityGroups?: Record<string, unknown> | null;
 };
 
 

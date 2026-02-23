@@ -18,26 +18,23 @@ import { listDocuments } from '../services/document.service';
 import { importDocumentFile } from '../services/file.service';
 import { ApiError } from '../utils/apiError';
 
-const createProjectSchema = z
-  .object({
-    name: z.string(),
-    description: z.string().optional(),
-    clientName: z.string().optional(),
-    sourceLocale: z.string().optional(),
-    sourceLang: z.string().optional(),
-    targetLocales: z.array(z.string()).min(1).optional(),
-    targetLang: z.string().optional(),
-    domain: z.string().optional(),
-    dueDate: z.string().datetime().optional(),
-  })
-  .refine(
-    (value) => value.sourceLocale || value.sourceLang,
-    'sourceLocale or sourceLang is required',
-  )
-  .refine(
-    (value) => value.targetLocales || value.targetLang,
-    'targetLocales or targetLang is required',
-  );
+const createProjectSchema = z.object({
+  name: z.string(),
+  description: z.string().optional(),
+  clientName: z.string().optional(),
+  sourceLocale: z.string().optional(),
+  sourceLang: z.string().optional(),
+  targetLocales: z.array(z.string()).optional(),
+  targetLang: z.string().optional(),
+  domain: z.string().optional(),
+  dueDate: z.string().datetime().optional(),
+}).refine(
+  (v) => v.sourceLocale ?? v.sourceLang,
+  { message: 'sourceLocale or sourceLang is required' },
+).refine(
+  (v) => (v.targetLocales?.length ?? 0) > 0 || v.targetLang,
+  { message: 'targetLocales (non-empty) or targetLang is required' },
+);
 
 const updateProjectSchema = z.object({
   name: z.string().optional(),
@@ -83,14 +80,16 @@ projectRoutes.post(
   '/',
   asyncHandler(async (req: AuthenticatedRequest, res) => {
     const payload = createProjectSchema.parse(req.body);
+    const sourceLocale = payload.sourceLocale ?? payload.sourceLang ?? 'ru';
+    const targetLocales = (payload.targetLocales?.length ? payload.targetLocales : [payload.targetLang ?? 'en']) as string[];
     const project = await createProject({
       name: payload.name,
       description: payload.description,
       clientName: payload.clientName,
-      sourceLocale: payload.sourceLocale ?? payload.sourceLang!,
-      sourceLang: payload.sourceLang ?? payload.sourceLocale!,
-      targetLocales: payload.targetLocales ?? [payload.targetLang!],
-      targetLang: payload.targetLang ?? payload.targetLocales![0],
+      sourceLocale,
+      sourceLang: payload.sourceLang ?? sourceLocale,
+      targetLocales,
+      targetLang: payload.targetLang ?? targetLocales[0],
       domain: payload.domain,
       dueDate: payload.dueDate ? new Date(payload.dueDate) : undefined,
       createdById: req.user!.userId,

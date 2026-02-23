@@ -19,6 +19,9 @@ type XlsxStructure = {
   styles?: unknown;
 };
 
+/** Standard XML declaration for OOXML; ensures Excel accepts the file (no BOM, valid syntax). */
+const XML_DECLARATION = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n';
+
 export class XlsxHandler implements FileHandler {
   private parser = new XMLParser({ 
     ignoreAttributes: false, 
@@ -46,10 +49,11 @@ export class XlsxHandler implements FileHandler {
       throw new Error(`Invalid XLSX file: ${(error as Error).message}`);
     }
 
-    // Try to load shared strings (may not exist in all Excel files)
+    // Try to load shared strings (may be missing if Excel "repaired" the file)
+    const hasSharedStringsFile = zip.files['xl/sharedStrings.xml'] != null;
     const sharedStringsXml = await zip.file('xl/sharedStrings.xml')?.async('string');
     let sharedStrings: string[] = [];
-    
+
     if (sharedStringsXml) {
       try {
         const sharedStringsParsed = this.parser.parse(sharedStringsXml);
@@ -59,11 +63,15 @@ export class XlsxHandler implements FileHandler {
         sharedStrings = siItems.map((si: any) => {
           const t = si.t;
           if (typeof t === 'string') return t;
-          if (Array.isArray(t)) return t.map((item: any) => (typeof item === 'string' ? item : item['#text'] ?? '')).join('');
-          return t?.['#text'] ?? '';
+          if (Array.isArray(t)) return t.map((item: any) => (typeof item === 'string' ? item : String(item['#text'] ?? ''))).join('');
+          if (t != null && typeof t === 'object') return String(t['#text'] ?? '');
+          // Rich text: <si><r><t>...</t></r></si>
+          const r = si.r;
+          if (Array.isArray(r)) return r.map((run: any) => (typeof run?.t === 'string' ? run.t : String(run?.t?.['#text'] ?? run?.['#text'] ?? ''))).join('');
+          if (r && typeof r === 'object') return typeof r.t === 'string' ? r.t : String(r.t?.['#text'] ?? '');
+          return '';
         });
       } catch (error) {
-        // If shared strings parsing fails, continue without them
         console.warn('Failed to parse shared strings:', error);
       }
     }
@@ -215,12 +223,15 @@ export class XlsxHandler implements FileHandler {
           let cellText = '';
 
           // Extract text based on cell type
-          if (cellType === 's' && typeof cellValue === 'string') {
-            // Shared string reference
-            const sharedIndex = parseInt(cellValue, 10);
-            if (!isNaN(sharedIndex) && sharedStrings[sharedIndex]) {
+          if (cellType === 's' && (cellValue !== undefined && cellValue !== null)) {
+            // Shared string reference: value is the index (parser may return number or string)
+            const sharedIndex = typeof cellValue === 'number'
+              ? Math.floor(cellValue)
+              : parseInt(String(cellValue), 10);
+            if (!isNaN(sharedIndex) && sharedIndex >= 0 && sharedStrings[sharedIndex] !== undefined) {
               cellText = sharedStrings[sharedIndex];
             }
+            // Never use the index as segment text; only use resolved shared string
           } else if (cellType === 'inlineStr') {
             // Inline string
             const is = cell.is;
@@ -234,16 +245,19 @@ export class XlsxHandler implements FileHandler {
                 cellText = t?.['#text'] ?? '';
               }
             }
-          } else if (cellValue !== undefined && cellValue !== null) {
-            // Number, date, or other value - convert to string
+          } else if (cellType !== 's' && cellType !== 'n' && cellValue !== undefined && cellValue !== null) {
+            // Other types (e.g. inlineStr already handled, or date as string): use as text.
+            // Explicitly skip 's' so we never use shared-string index as segment text.
             cellText = String(cellValue);
           }
 
-          // Only add non-empty text as a segment
-          if (cellText.trim()) {
+          // Coerce to string (sharedStrings or inlineStr can be number/object from parser)
+          const cellTextStr = typeof cellText === 'string' ? cellText : String(cellText ?? '');
+          // Only add non-empty text as a segment (numeric-only cells are skipped above)
+          if (cellTextStr.trim()) {
             segments.push({
               index: segments.length,
-              sourceText: cellText.trim(),
+              sourceText: cellTextStr.trim(),
               sharedStringIndex: cellType === 's' && typeof cellValue === 'string' ? parseInt(cellValue, 10) : undefined,
             });
           }
@@ -264,6 +278,12 @@ export class XlsxHandler implements FileHandler {
     }
 
     if (segments.length === 0) {
+      if (!hasSharedStringsFile || sharedStrings.length === 0) {
+        throw new Error(
+          'XLSX text content is missing. This often happens after Excel "repaired" the file (e.g. due to XML errors in sharedStrings.xml). ' +
+          'Use the original file before repair, or re-save the workbook from the application that created it.'
+        );
+      }
       throw new Error('XLSX file does not contain any text cells to translate. Please ensure the file has text content.');
     }
 
@@ -310,6 +330,87 @@ export class XlsxHandler implements FileHandler {
     return ref + row;
   }
 
+  /**
+   * Builds segment index -> shared string index mapping by iterating cells in the same order as parse().
+   * Only includes cells that would produce a segment (non-empty text); uses sharedStrings to match import logic.
+   */
+  private async buildSegmentToSharedIndexMapping(zip: JSZip, sharedStrings: string[]): Promise<number[]> {
+    const workbookXml = await zip.file('xl/workbook.xml')?.async('string');
+    if (!workbookXml) return [];
+
+    const workbookParsed = this.parser.parse(workbookXml);
+    let sheets: any[] = [];
+    if (workbookParsed.workbook?.sheets?.sheet) {
+      const d = workbookParsed.workbook.sheets.sheet;
+      sheets = Array.isArray(d) ? d : d ? [d] : [];
+    } else if (workbookParsed.workbook?.sheet) {
+      const d = workbookParsed.workbook.sheet;
+      sheets = Array.isArray(d) ? d : d ? [d] : [];
+    } else if (workbookParsed.sheets?.sheet) {
+      const d = workbookParsed.sheets.sheet;
+      sheets = Array.isArray(d) ? d : d ? [d] : [];
+    } else if (workbookParsed.sheet) {
+      const d = workbookParsed.sheet;
+      sheets = Array.isArray(d) ? d : d ? [d] : [];
+    }
+    let sheetArray = Array.isArray(sheets) ? sheets : sheets ? [sheets] : [];
+    if (sheetArray.length === 0) {
+      const allWorksheetFiles = Object.keys(zip.files).filter((n) => n.startsWith('xl/worksheets/') && n.endsWith('.xml') && !n.includes('_rels'));
+      if (allWorksheetFiles.length > 0) {
+        sheetArray = allWorksheetFiles.sort().map((filename, index) => {
+          const m = filename.match(/sheet(\d+)\.xml/i);
+          return { '@_sheetId': m ? m[1] : String(index + 1), '@_name': `Sheet${index + 1}` };
+        });
+      }
+    }
+
+    const segmentToShared: number[] = [];
+    for (const sheet of sheetArray) {
+      const sheetId = sheet['@_sheetId'] ?? sheet['sheetId'] ?? sheet['@_id'] ?? sheet['id'];
+      const paths = [`xl/worksheets/sheet${sheetId}.xml`, `xl/worksheets/Sheet${sheetId}.xml`];
+      let sheetXml: string | undefined;
+      for (const p of paths) {
+        sheetXml = await zip.file(p)?.async('string');
+        if (sheetXml) break;
+      }
+      if (!sheetXml) {
+        const list = Object.keys(zip.files).filter((n) => n.startsWith('xl/worksheets/') && n.endsWith('.xml')).sort();
+        const idx = parseInt(String(sheetId), 10);
+        if (!isNaN(idx) && list[idx - 1]) sheetXml = await zip.file(list[idx - 1])?.async('string');
+        else if (list[0]) sheetXml = await zip.file(list[0])?.async('string');
+      }
+      if (!sheetXml) continue;
+
+      const sheetParsed = this.parser.parse(sheetXml);
+      const sheetData = sheetParsed.worksheet?.sheetData?.row ?? [];
+      const rows = Array.isArray(sheetData) ? sheetData : sheetData ? [sheetData] : [];
+      for (const row of rows) {
+        const rowCells = row.c ?? [];
+        const cellArray = Array.isArray(rowCells) ? rowCells : rowCells ? [rowCells] : [];
+        for (const cell of cellArray) {
+          const cellType = cell['@_t'] ?? 'n';
+          const cellValue = cell.v;
+          let cellText: unknown = '';
+          if (cellType === 's' && (cellValue !== undefined && cellValue !== null)) {
+            const sharedIndex = typeof cellValue === 'number' ? Math.floor(cellValue) : parseInt(String(cellValue), 10);
+            if (!isNaN(sharedIndex) && sharedIndex >= 0 && sharedStrings[sharedIndex] !== undefined) {
+              cellText = sharedStrings[sharedIndex];
+            }
+            if (String(cellText ?? '').trim()) segmentToShared.push(sharedIndex);
+          } else if (cellType === 'inlineStr' && cell.is) {
+            const t = cell.is.t;
+            cellText = typeof t === 'string' ? t : (Array.isArray(t) ? t.map((x: any) => x?.['#text'] ?? x).join('') : t?.['#text'] ?? '');
+            if (String(cellText ?? '').trim()) segmentToShared.push(-1);
+          } else if (cellType !== 's' && cellType !== 'n' && cellValue !== undefined && cellValue !== null) {
+            cellText = String(cellValue);
+            if (String(cellText ?? '').trim()) segmentToShared.push(-1);
+          }
+        }
+      }
+    }
+    return segmentToShared;
+  }
+
   async export(options: ExportOptions): Promise<Buffer> {
     if (!options.originalBuffer) {
       throw new Error('Original XLSX buffer required for export');
@@ -324,20 +425,43 @@ export class XlsxHandler implements FileHandler {
     const sharedStringsParsed = this.parser.parse(sharedStringsXml);
     const siArray = sharedStringsParsed['sst']?.['si'] ?? [];
     const siItems = Array.isArray(siArray) ? siArray : siArray ? [siArray] : [];
+    // Use same extraction as parse() so segment count matches (rich text and array t must be handled)
+    const sharedStrings = siItems.map((si: any) => {
+      const t = si.t;
+      if (typeof t === 'string') return t;
+      if (Array.isArray(t)) return t.map((item: any) => (typeof item === 'string' ? item : String(item['#text'] ?? ''))).join('');
+      if (t != null && typeof t === 'object') return String(t['#text'] ?? '');
+      const r = si.r;
+      if (Array.isArray(r)) return r.map((run: any) => (typeof run?.t === 'string' ? run.t : String(run?.t?.['#text'] ?? run?.['#text'] ?? ''))).join('');
+      if (r && typeof r === 'object') return typeof r.t === 'string' ? r.t : String(r.t?.['#text'] ?? '');
+      return '';
+    });
 
+    const segmentToSharedIndex = await this.buildSegmentToSharedIndexMapping(zip, sharedStrings);
     const segmentMap = new Map(options.segments.map((seg) => [seg.index, seg.targetText]));
 
-    for (let i = 0; i < siItems.length; i++) {
-      const translatedText = segmentMap.get(i);
-      if (translatedText !== undefined) {
-        siItems[i] = {
+    for (let segIndex = 0; segIndex < segmentToSharedIndex.length; segIndex++) {
+      const sharedIndex = segmentToSharedIndex[segIndex];
+      if (sharedIndex < 0) continue;
+      const translatedText = segmentMap.get(segIndex);
+      if (translatedText !== undefined && sharedIndex < siItems.length) {
+        siItems[sharedIndex] = {
           t: { '#text': translatedText },
         };
       }
     }
 
     sharedStringsParsed['sst']['si'] = siItems;
-    const updatedSharedStringsXml = this.builder.build(sharedStringsParsed);
+    let updatedSharedStringsXml = this.builder.build(sharedStringsParsed);
+    // Ensure a valid XML declaration (Excel rejects malformed declaration at line 1, column 17)
+    if (updatedSharedStringsXml.startsWith('<?xml')) {
+      const endDecl = updatedSharedStringsXml.indexOf('?>');
+      if (endDecl !== -1) {
+        updatedSharedStringsXml = XML_DECLARATION + updatedSharedStringsXml.slice(endDecl + 2).trimStart();
+      }
+    } else {
+      updatedSharedStringsXml = XML_DECLARATION + updatedSharedStringsXml;
+    }
     zip.file('xl/sharedStrings.xml', updatedSharedStringsXml);
 
     return Buffer.from(await zip.generateAsync({ type: 'nodebuffer' }));

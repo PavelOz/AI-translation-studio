@@ -1,8 +1,9 @@
 import { prisma } from '../db/prisma';
 import { ApiError } from '../utils/apiError';
 import { logger } from '../utils/logger';
+import { getLanguageName } from '../utils/languages';
 import { stripFormattingTags } from '../utils/segmentation';
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 // @ts-ignore - compromise doesn't have TypeScript types
 import nlp from 'compromise';
 
@@ -5372,6 +5373,523 @@ ${batchCandidates.join('\n')}
  * Extracts style rules from document source text
  * Analyzes formatting patterns like date formats, number formats, list styles, etc.
  */
+
+/** Max characters to send for Document DNA; beyond this we use stride sampling */
+const DOCUMENT_DNA_TOKEN_BUDGET = 300_000;
+/** Number of evenly distributed excerpts when document exceeds budget (stride sampling) */
+export const STRIDE_SAMPLE_COUNT = 150;
+/** Size of each excerpt in characters */
+export const STRIDE_CHUNK_SIZE = 2_000;
+
+const DOCUMENT_DNA_SAMPLE_COUNT = STRIDE_SAMPLE_COUNT;
+const DOCUMENT_DNA_CHUNK_SIZE = STRIDE_CHUNK_SIZE;
+
+/**
+ * Build stride-sampled text from full document text (same algorithm as Document DNA).
+ * Use when you need to "see" the whole document in a bounded string (e.g. for clustering summary).
+ * @param fullText - Concatenated document text
+ * @param options - Optional overrides; default sampleCount=150, chunkSize=2000
+ */
+export function buildStrideSampledText(
+  fullText: string,
+  options?: { sampleCount?: number; chunkSize?: number },
+): string {
+  const sampleCount = options?.sampleCount ?? STRIDE_SAMPLE_COUNT;
+  const chunkSize = options?.chunkSize ?? STRIDE_CHUNK_SIZE;
+  if (fullText.length <= chunkSize) return fullText;
+  const n = sampleCount;
+  const L = fullText.length;
+  const stride = (L - chunkSize) / Math.max(1, n - 1);
+  const parts: string[] = [];
+  for (let i = 0; i < n; i++) {
+    const start = Math.min(Math.floor(i * stride), Math.max(0, L - chunkSize));
+    const end = Math.min(start + chunkSize, L);
+    parts.push(fullText.slice(start, end));
+    if (i < n - 1) {
+      parts.push('\n... [gap] ...\n');
+    }
+  }
+  return parts.join('');
+}
+
+/**
+ * Document DNA payload shape returned by AI and stored in DB
+ */
+export type DocumentDnaPayload = {
+  technicalSchema?: Record<string, unknown> | null;
+  namingConventions?: Record<string, unknown> | null;
+  abbreviationLogic?: Record<string, unknown> | null;
+  entityGroups?: Record<string, unknown> | null;
+};
+
+/**
+ * Pre-flight analysis: generate Document DNA (technical schema, naming conventions,
+ * abbreviations, entity groups) from document content. Uses all segments; for documents
+ * exceeding the token budget (300k chars), uses stride sampling: 150 evenly distributed
+ * excerpts of 2000 chars each, with separators "... [gap: ~N segments] ..." so the model
+ * sees scale and structure. Covers the full document including the end.
+ *
+ * @param documentId - Document ID (must have segments)
+ * @param options - Optional profileId and provider/model/apiKey override for the DNA generation call
+ */
+export const generateDocumentDna = async (
+  documentId: string,
+  options?: { profileId?: string | null; provider?: string; model?: string; apiKey?: string; yandexFolderId?: string },
+): Promise<DocumentDnaPayload> => {
+  const document = await prisma.document.findUnique({
+    where: { id: documentId },
+    select: { id: true, projectId: true, name: true, sourceLocale: true, targetLocale: true, profileId: true },
+  });
+  if (!document) {
+    throw ApiError.notFound('Document not found');
+  }
+
+  const effectiveProfileId = options?.profileId ?? document.profileId ?? null;
+  let profile: { name: string; expertRole: string; instructions: string; terminologyJSON: unknown } | null = null;
+  if (effectiveProfileId) {
+    const row = await prisma.profile.findUnique({
+      where: { id: effectiveProfileId },
+      select: { name: true, expertRole: true, instructions: true, terminologyJSON: true },
+    });
+    if (row) {
+      profile = row;
+      logger.info(
+        { documentId, profileId: effectiveProfileId, profileName: profile.name },
+        'Document DNA: using profile for expertRole and instructions',
+      );
+    }
+  }
+
+  const segments = await prisma.segment.findMany({
+    where: { documentId },
+    orderBy: { segmentIndex: 'asc' },
+    select: { sourceText: true },
+  });
+  if (segments.length === 0) {
+    logger.warn({ documentId }, 'Document has no segments; skipping Document DNA generation');
+    return {};
+  }
+
+  const nonEmpty = segments
+    .map((s) => s.sourceText.trim())
+    .filter((t) => t.length > 0);
+  const fullText = nonEmpty.join('\n\n');
+  if (!fullText) {
+    logger.warn({ documentId }, 'No source text in segments; skipping Document DNA generation');
+    return {};
+  }
+
+  // Segment start offsets in fullText (for gap annotation in stride sampling)
+  const segmentStarts: number[] = [];
+  let offset = 0;
+  for (let i = 0; i < nonEmpty.length; i++) {
+    segmentStarts.push(offset);
+    offset += nonEmpty[i].length + 2; // +2 for \n\n
+  }
+  const charOffsetToSegmentIndex = (pos: number): number => {
+    let lo = 0;
+    let hi = segmentStarts.length;
+    while (lo < hi - 1) {
+      const mid = (lo + hi) >> 1;
+      if (segmentStarts[mid] <= pos) lo = mid;
+      else hi = mid;
+    }
+    return lo;
+  };
+
+  // Use 150 fragments of 2000 chars distributed across the file whenever document exceeds one chunk,
+  // so the analyst sees representative context and we stay within budget (~300k chars total).
+  let textToAnalyze: string;
+  if (fullText.length <= DOCUMENT_DNA_CHUNK_SIZE) {
+    textToAnalyze = fullText;
+  } else {
+    const n = DOCUMENT_DNA_SAMPLE_COUNT;
+    const chunkSize = DOCUMENT_DNA_CHUNK_SIZE;
+    const L = fullText.length;
+    const stride = (L - chunkSize) / Math.max(1, n - 1);
+    const parts: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const start = Math.min(Math.floor(i * stride), Math.max(0, L - chunkSize));
+      const end = Math.min(start + chunkSize, L);
+      parts.push(fullText.slice(start, end));
+      if (i < n - 1) {
+        const nextStart = Math.min(Math.floor((i + 1) * stride), Math.max(0, L - chunkSize));
+        const segEnd = charOffsetToSegmentIndex(end);
+        const segNext = charOffsetToSegmentIndex(nextStart);
+        const gapSegments = Math.max(0, segNext - segEnd - 1);
+        parts.push(`\n... [gap: ~${gapSegments} segments] ...\n`);
+      }
+    }
+    textToAnalyze = parts.join('');
+  }
+
+  logger.info(
+    { documentId, segmentCount: segments.length, fullLength: fullText.length, analyzedLength: textToAnalyze.length },
+    'Generating Document DNA (pre-flight analysis)',
+  );
+
+  const sourceLocale = document.sourceLocale || 'en';
+  const targetLocale = document.targetLocale || 'en';
+  const sourceLangHint = getLanguageName(sourceLocale);
+  const targetLangHint = getLanguageName(targetLocale);
+
+  const expertRoleLine = profile
+    ? `You are a ${profile.expertRole}. Your task is to analyze the provided document sample and produce a structured "Document DNA" JSON that will be used as a PROJECT KNOWLEDGE BASE for translation. Identify technical terms and provide translations from ${sourceLocale} (${sourceLangHint}) to ${targetLocale} (${targetLangHint}).`
+    : `You are a Lead technical engineer with expertise in international standards and terminology. Your task is to analyze the provided document sample and produce a structured "Document DNA" JSON that will be used as a PROJECT KNOWLEDGE BASE for translation. Identify technical terms and provide translations from ${sourceLocale} (${sourceLangHint}) to ${targetLocale} (${targetLangHint}).`;
+
+  const profileTerminologyBlock =
+    profile?.terminologyJSON != null
+      ? `\n\nBASE TERMINOLOGY (from profile "${profile.name}" – merge with document findings):\n${typeof profile.terminologyJSON === 'string' ? profile.terminologyJSON : JSON.stringify(profile.terminologyJSON, null, 2)}`
+      : '';
+
+  const profileInstructionsBlock =
+    profile?.instructions?.trim()
+      ? `\n\nPRIORITY RULES (from profile – apply these first):\n${profile.instructions}`
+      : '';
+
+  const isSourceRussian = sourceLocale.toLowerCase().startsWith('ru');
+  const isTargetEnglish = targetLocale.toLowerCase().startsWith('en');
+  const ruEnSubstationBlock = isSourceRussian && isTargetEnglish ? `
+SUBSTATION TOPOLOGY (apply when the document describes switchgear, substations, or power equipment):
+- РУ / Switchgear → bays (not "cells"). Ячейка / ЯЧ → Bay (never "Cell" in substation context).
+- Шина / СШ → Busbar. Секция шин → Busbar section.
+- ШСВ → Bus Tie Breaker (BTB). ОВ → Bypass Breaker. В / Выключатель → Circuit Breaker (CB).
+- ТН → Voltage Transformer (VT). ТТ → Current Transformer (CT). ОПН → Surge Arrester (SA).
+- Use IEC/IEEE standard abbreviations in abbreviationLogic (VT, CT, SA, BTB, CB, etc.).
+` : '';
+  const phaseLettersRule = isSourceRussian && isTargetEnglish
+    ? ` When the source uses Cyrillic phase letters, include this MANDATORY rule: "phaseLetters": "Phases indicated by Cyrillic letters (А, В, С, etc.) must ALWAYS be converted to Latin (A, B, C) in the target text."`
+    : ' Document phase names, type labels, symbols, and units in both source and target where relevant.';
+
+  const defaultKnowledgeBlock = `
+
+DEFAULT KNOWLEDGE (combine with profile and document sample when applicable):
+${ruEnSubstationBlock}
+BILINGUAL REQUIREMENT: The DNA must serve the TRANSLATOR. For each abbreviation or term in the SOURCE language (${sourceLangHint}), provide the correct TARGET language (${targetLangHint}) technical equivalent so the translator can substitute it directly. Keys in abbreviationLogic/namingConventions must be in the SOURCE language; values must be in the TARGET language.
+
+Extract and return ONLY a valid JSON object with exactly these four top-level keys (each can be an object or null if not applicable):
+
+1. "technicalSchema" – Domain/object types and structure. Where the source uses local terms, include the ${targetLangHint} equivalent (e.g. source term → target term).
+
+2. "namingConventions" – Rules for naming and notation.${phaseLettersRule}
+
+3. "abbreviationLogic" – SOURCE-language abbreviation or term (key) → TARGET-language value (${targetLangHint}) for SUBSTITUTION. The value must be ONLY what should appear in the target text. Never put the source abbreviation inside the value. Prefer standard abbreviations in the target language where applicable.
+
+4. "entityGroups" – Groupings of term variations and synonyms; prefer ${targetLangHint} canonical form as the main value where applicable.
+
+DOMAIN HEURISTICS (apply automatically from document context):
+- Electrical/Power/Substation: use IEC/IEEE terminology; abbreviationLogic must use standard target-language abbreviations.
+- Legal/Contract: use conventional legal style in the target language; entityGroups and namingConventions should reflect legal terminology.
+
+CRITICAL:
+- Return ONLY the JSON object. No markdown code blocks, no explanation before or after.
+- Use null for any key where you cannot infer meaningful content.
+- Keys in abbreviationLogic and namingConventions must be in the SOURCE language (${sourceLangHint}); values must be in the TARGET language (${targetLangHint}) so the translator can paste them into the target text.`;
+
+  const systemPrompt =
+    expertRoleLine + profileTerminologyBlock + profileInstructionsBlock + defaultKnowledgeBlock;
+
+  const userPrompt = `Document name: "${document.name}"
+Translation direction: from ${sourceLocale} (${sourceLangHint}) to ${targetLocale} (${targetLangHint}). Identify technical terms and provide translations from ${sourceLocale} to ${targetLocale}. All abbreviation expansions and terminology values in the DNA must be in the target language (${targetLangHint}).
+
+Analyze the following document sample and produce the Document DNA JSON (technicalSchema, namingConventions, abbreviationLogic, entityGroups):
+
+--- BEGIN SAMPLE ---
+${textToAnalyze}
+--- END SAMPLE ---`;
+
+  const { getProvider } = await import('../ai/providers/registry');
+  const { getProjectAISettings } = await import('./ai.service');
+  const aiSettings = await getProjectAISettings(document.projectId);
+
+  let apiKey: string | undefined = options?.apiKey;
+  let yandexFolderId: string | undefined = options?.yandexFolderId;
+  if (!apiKey && aiSettings?.config && typeof aiSettings.config === 'object' && !Array.isArray(aiSettings.config)) {
+    const config = aiSettings.config as Record<string, unknown>;
+    const providerName = (options?.provider ?? aiSettings?.provider)?.toLowerCase();
+    const keyName = providerName ? `${providerName}ApiKey` : null;
+    if (keyName && keyName in config) apiKey = config[keyName] as string;
+    else if ('apiKey' in config) apiKey = config.apiKey as string;
+    if ('yandexFolderId' in config) yandexFolderId = config.yandexFolderId as string;
+  }
+
+  const provider = getProvider(options?.provider ?? aiSettings?.provider, apiKey, yandexFolderId);
+  const model = options?.model ?? aiSettings?.model ?? provider.defaultModel;
+
+  const response = await provider.callModel({
+    prompt: userPrompt,
+    systemPrompt,
+    model,
+    temperature: 0.2,
+    maxTokens: 4096,
+    segments: [],
+  });
+
+  const rawText = (response.outputText || '').trim();
+  const cleaned = cleanJsonOutput(rawText);
+  let payload: DocumentDnaPayload = {};
+  try {
+    const parsed = JSON.parse(cleaned);
+    if (typeof parsed === 'object' && parsed !== null) {
+      payload = {
+        technicalSchema: parsed.technicalSchema ?? null,
+        namingConventions: parsed.namingConventions ?? null,
+        abbreviationLogic: parsed.abbreviationLogic ?? null,
+        entityGroups: parsed.entityGroups ?? null,
+      };
+    }
+  } catch (e) {
+    logger.warn({ documentId, error: (e as Error).message }, 'Document DNA JSON parse failed; storing empty');
+  }
+
+  const toJson = (v: Record<string, unknown> | null | undefined): Prisma.InputJsonValue | undefined =>
+    v === undefined ? undefined : v === null ? Prisma.JsonNull : (v as Prisma.InputJsonValue);
+
+  await prisma.documentDna.upsert({
+    where: { documentId },
+    create: {
+      documentId,
+      technicalSchema: toJson(payload.technicalSchema ?? undefined),
+      namingConventions: toJson(payload.namingConventions ?? undefined),
+      abbreviationLogic: toJson(payload.abbreviationLogic ?? undefined),
+      entityGroups: toJson(payload.entityGroups ?? undefined),
+    },
+    update: {
+      technicalSchema: toJson(payload.technicalSchema ?? undefined),
+      namingConventions: toJson(payload.namingConventions ?? undefined),
+      abbreviationLogic: toJson(payload.abbreviationLogic ?? undefined),
+      entityGroups: toJson(payload.entityGroups ?? undefined),
+      updatedAt: new Date(),
+    },
+  });
+
+  logger.info({ documentId }, 'Document DNA generated and saved');
+  return payload;
+};
+
+/**
+ * Get Document DNA for a document (for API / UI).
+ */
+export const getDocumentDna = async (documentId: string): Promise<DocumentDnaPayload | null> => {
+  const row = await prisma.documentDna.findUnique({
+    where: { documentId },
+    select: {
+      technicalSchema: true,
+      namingConventions: true,
+      abbreviationLogic: true,
+      entityGroups: true,
+    },
+  });
+  if (!row) return null;
+  return {
+    technicalSchema: row.technicalSchema as Record<string, unknown> | null | undefined,
+    namingConventions: row.namingConventions as Record<string, unknown> | null | undefined,
+    abbreviationLogic: row.abbreviationLogic as Record<string, unknown> | null | undefined,
+    entityGroups: row.entityGroups as Record<string, unknown> | null | undefined,
+  };
+};
+
+/**
+ * Build a short document summary string from Document DNA payload.
+ * Used to fill document.summary so DNA is the single source of truth for context.
+ */
+export function summaryFromDna(payload: DocumentDnaPayload | null | undefined): string {
+  if (!payload || (Object.keys(payload).length === 0)) {
+    return '';
+  }
+  const parts: string[] = [];
+  if (payload.technicalSchema && typeof payload.technicalSchema === 'object' && Object.keys(payload.technicalSchema).length > 0) {
+    parts.push('Technical domain: ' + Object.keys(payload.technicalSchema).slice(0, 5).join(', '));
+  }
+  if (payload.abbreviationLogic && typeof payload.abbreviationLogic === 'object' && Object.keys(payload.abbreviationLogic).length > 0) {
+    const abbrevs = Object.entries(payload.abbreviationLogic).slice(0, 8).map(([k, v]) => `${k}→${v}`).join('; ');
+    parts.push('Key abbreviations: ' + abbrevs);
+  }
+  if (payload.namingConventions && typeof payload.namingConventions === 'object' && Object.keys(payload.namingConventions).length > 0) {
+    parts.push('Naming conventions present.');
+  }
+  if (payload.entityGroups && typeof payload.entityGroups === 'object' && Object.keys(payload.entityGroups).length > 0) {
+    parts.push('Entity groups defined.');
+  }
+  return parts.length ? parts.join(' ') : '';
+}
+
+/**
+ * Update Document DNA manually (for API / UI).
+ */
+export const updateDocumentDna = async (
+  documentId: string,
+  payload: DocumentDnaPayload,
+): Promise<DocumentDnaPayload> => {
+  const toJson = (v: Record<string, unknown> | null | undefined): Prisma.InputJsonValue | undefined =>
+    v === undefined ? undefined : v === null ? Prisma.JsonNull : (v as Prisma.InputJsonValue);
+
+  await prisma.documentDna.upsert({
+    where: { documentId },
+    create: {
+      documentId,
+      technicalSchema: toJson(payload.technicalSchema ?? undefined),
+      namingConventions: toJson(payload.namingConventions ?? undefined),
+      abbreviationLogic: toJson(payload.abbreviationLogic ?? undefined),
+      entityGroups: toJson(payload.entityGroups ?? undefined),
+    },
+    update: {
+      technicalSchema: toJson(payload.technicalSchema ?? undefined),
+      namingConventions: toJson(payload.namingConventions ?? undefined),
+      abbreviationLogic: toJson(payload.abbreviationLogic ?? undefined),
+      entityGroups: toJson(payload.entityGroups ?? undefined),
+      updatedAt: new Date(),
+    },
+  });
+  const updated = await getDocumentDna(documentId);
+  return updated ?? payload;
+};
+
+const REFINE_DNA_SYSTEM_PROMPT = `You are the Document DNA Revisor. Your task is to enrich the JSON using the full document text.
+
+1. SCAN: Scan the entire document text for definitions of any remaining null or unclear terms in the JSON. Use explicit definitions, parenthetical explanations, table headers, and lists.
+
+2. TRANSLATE: Translate any source-language terms you find into the TARGET language indicated in the user message, using "Golden DNA" style and precision (e.g. preserve domain distinctions like flow vs bias). Keep keys in the SOURCE language and values in the TARGET language. Maintain consistency with existing fields in the JSON.
+
+3. PRIORITY RULES: If a term in the text has a unique definition (e.g. an acronym expanded only in this document), record it in abbreviationLogic or namingConventions as a priority translation rule so the translator uses it.
+
+4. FILL NULLS: Fill all nulls in technicalSchema, namingConventions, abbreviationLogic, and entityGroups using evidence from the text only. Do not invent terms.
+
+Return ONLY valid JSON with keys: technicalSchema, namingConventions, abbreviationLogic, entityGroups. No markdown, no commentary.`;
+
+/**
+ * Refine Document DNA: review current DNA against full document text, fix term inaccuracies and fill nulls.
+ * Uses project AI settings. Requires existing DNA in DB.
+ * @param options.preview - If true, return refined payload without saving to DB (for comparison UI).
+ */
+export const refineDocumentDna = async (
+  documentId: string,
+  options?: { provider?: string; model?: string; apiKey?: string; yandexFolderId?: string; preview?: boolean },
+): Promise<DocumentDnaPayload> => {
+  const document = await prisma.document.findUnique({
+    where: { id: documentId },
+    select: { id: true, projectId: true, name: true, sourceLocale: true, targetLocale: true },
+  });
+  if (!document) {
+    throw ApiError.notFound('Document not found');
+  }
+
+  const currentDna = await getDocumentDna(documentId);
+  if (!currentDna || (Object.keys(currentDna).length === 0)) {
+    throw ApiError.badRequest('Document has no DNA to refine. Run regenerate first.');
+  }
+
+  const segments = await prisma.segment.findMany({
+    where: { documentId },
+    orderBy: { segmentIndex: 'asc' },
+    select: { sourceText: true },
+  });
+  if (segments.length === 0) {
+    throw ApiError.badRequest('Document has no segments.');
+  }
+
+  const fullText = segments.map((s) => s.sourceText.trim()).filter(Boolean).join('\n\n');
+  const textToUse =
+    fullText.length <= DOCUMENT_DNA_CHUNK_SIZE
+      ? fullText
+      : buildStrideSampledText(fullText);
+
+  const dnaJson = JSON.stringify(currentDna, null, 2);
+
+  const sourceLocale = document.sourceLocale || 'en';
+  const targetLocale = document.targetLocale || 'en';
+  const userPrompt = `Document: "${document.name}"
+Translation direction: from ${sourceLocale} to ${targetLocale}. Keys in JSON must be in source language; values in target language.
+
+Current Document DNA (JSON):
+${dnaJson}
+
+Document text (or stratified sample):
+--- BEGIN TEXT ---
+${textToUse}
+--- END TEXT ---
+
+Review the JSON against the document, fix terms and fill nulls. Return only the corrected JSON with keys: technicalSchema, namingConventions, abbreviationLogic, entityGroups.`;
+
+  const { getProvider } = await import('../ai/providers/registry');
+  const { getProjectAISettings } = await import('./ai.service');
+  const aiSettings = await getProjectAISettings(document.projectId);
+
+  let apiKey: string | undefined = options?.apiKey;
+  let yandexFolderId: string | undefined = options?.yandexFolderId;
+  if (!apiKey && aiSettings?.config && typeof aiSettings.config === 'object' && !Array.isArray(aiSettings.config)) {
+    const config = aiSettings.config as Record<string, unknown>;
+    const providerName = (options?.provider ?? aiSettings?.provider)?.toLowerCase();
+    const keyName = providerName ? `${providerName}ApiKey` : null;
+    if (keyName && keyName in config) apiKey = config[keyName] as string;
+    else if ('apiKey' in config) apiKey = config.apiKey as string;
+    if ('yandexFolderId' in config) yandexFolderId = config.yandexFolderId as string;
+  }
+
+  const provider = getProvider(options?.provider ?? aiSettings?.provider, apiKey, yandexFolderId);
+  const providerName = (options?.provider ?? aiSettings?.provider)?.toLowerCase() ?? 'gemini';
+  const model =
+    options?.model ??
+    aiSettings?.model ??
+    (providerName === 'openai' ? 'gpt-4o' : providerName === 'gemini' ? 'gemini-1.5-pro' : provider.defaultModel);
+
+  const response = await provider.callModel({
+    prompt: userPrompt,
+    systemPrompt: REFINE_DNA_SYSTEM_PROMPT,
+    model,
+    temperature: 0.2,
+    maxTokens: 4096,
+    segments: [],
+  });
+
+  const rawText = (response.outputText || '').trim();
+  const cleaned = cleanJsonOutput(rawText);
+  let payload: DocumentDnaPayload = {};
+  try {
+    const parsed = JSON.parse(cleaned);
+    if (typeof parsed === 'object' && parsed !== null) {
+      payload = {
+        technicalSchema: parsed.technicalSchema ?? null,
+        namingConventions: parsed.namingConventions ?? null,
+        abbreviationLogic: parsed.abbreviationLogic ?? null,
+        entityGroups: parsed.entityGroups ?? null,
+      };
+    }
+  } catch (e) {
+    logger.warn({ documentId, error: (e as Error).message }, 'Refine DNA JSON parse failed; keeping current DNA');
+    return currentDna;
+  }
+
+  if (options?.preview) {
+    logger.info({ documentId }, 'Document DNA refined (preview only, not saved)');
+    return payload;
+  }
+
+  const toJson = (v: Record<string, unknown> | null | undefined): Prisma.InputJsonValue | undefined =>
+    v === undefined ? undefined : v === null ? Prisma.JsonNull : (v as Prisma.InputJsonValue);
+
+  await prisma.documentDna.upsert({
+    where: { documentId },
+    create: {
+      documentId,
+      technicalSchema: toJson(payload.technicalSchema ?? undefined),
+      namingConventions: toJson(payload.namingConventions ?? undefined),
+      abbreviationLogic: toJson(payload.abbreviationLogic ?? undefined),
+      entityGroups: toJson(payload.entityGroups ?? undefined),
+    },
+    update: {
+      technicalSchema: toJson(payload.technicalSchema ?? undefined),
+      namingConventions: toJson(payload.namingConventions ?? undefined),
+      abbreviationLogic: toJson(payload.abbreviationLogic ?? undefined),
+      entityGroups: toJson(payload.entityGroups ?? undefined),
+      updatedAt: new Date(),
+    },
+  });
+
+  logger.info({ documentId }, 'Document DNA refined and saved');
+  return payload;
+};
+
 /**
  * Perform semantic analysis to extract domain, tone, and translation strategy
  * This provides global context that applies to the entire document

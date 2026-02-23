@@ -317,7 +317,9 @@ export const searchTranslationMemory = async ({
   const cacheKey = getCacheKey(cleanSourceText, sourceLocale ?? '', targetLocale ?? '', projectId ?? undefined, entryType);
   const cached = getCachedResults(cacheKey);
   if (cached) {
-    return cached.slice(0, limit);
+    // Filter by minScore so callers (e.g. pretranslate with minScore: 100) only get matches that meet their threshold
+    const filtered = cached.filter((r) => r.fuzzyScore >= minScore);
+    return filtered.slice(0, limit);
   }
 
   const normalizedLimit = Math.max(1, Math.min(100, limit));

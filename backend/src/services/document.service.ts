@@ -22,6 +22,39 @@ export const listDocuments = (projectId?: string) =>
     include: { project: true },
   });
 
+export type ListDocumentsPaginatedResult = {
+  documents: Awaited<ReturnType<typeof listDocuments>>;
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+};
+
+export const listDocumentsPaginated = async (
+  projectId: string,
+  page = 1,
+  pageSize = 20,
+): Promise<ListDocumentsPaginatedResult> => {
+  const skip = (page - 1) * pageSize;
+  const [documents, total] = await Promise.all([
+    prisma.document.findMany({
+      where: { projectId },
+      include: { project: true, profile: { select: { id: true, name: true } } },
+      orderBy: { createdAt: 'desc' },
+      skip,
+      take: pageSize,
+    }),
+    prisma.document.count({ where: { projectId } }),
+  ]);
+  return {
+    documents,
+    page,
+    pageSize,
+    total,
+    totalPages: Math.max(1, Math.ceil(total / pageSize)),
+  };
+};
+
 export const createDocument = (input: CreateDocumentInput) =>
   prisma.document.create({
     data: {
@@ -38,7 +71,10 @@ export const createDocument = (input: CreateDocumentInput) =>
 export const getDocument = async (documentId: string) => {
   const document = await prisma.document.findUnique({
     where: { id: documentId },
-    include: { segments: true },
+    include: {
+      segments: true,
+      profile: { select: { id: true, name: true } },
+    },
   });
   if (!document) {
     throw ApiError.notFound('Document not found');
@@ -54,7 +90,14 @@ export const updateDocumentStatus = (documentId: string, status: DocumentStatus)
 
 export const updateDocument = async (
   documentId: string,
-  data: { name?: string; filename?: string; sourceLocale?: string; targetLocale?: string; status?: DocumentStatus },
+  data: {
+    name?: string;
+    filename?: string;
+    sourceLocale?: string;
+    targetLocale?: string;
+    status?: DocumentStatus;
+    profileId?: string | null;
+  },
 ) => {
   const document = await prisma.document.findUnique({ where: { id: documentId } });
   if (!document) {
@@ -63,6 +106,9 @@ export const updateDocument = async (
   return prisma.document.update({
     where: { id: documentId },
     data,
+    include: {
+      profile: { select: { id: true, name: true } },
+    },
   });
 };
 

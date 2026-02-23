@@ -16,6 +16,8 @@ export type Document = {
   wordCount: number;
   totalSegments: number;
   totalWords: number;
+  profileId?: string | null;
+  profile?: { id: string; name: string } | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -36,10 +38,24 @@ export type UploadDocumentRequest = {
   segmentationMode?: 'paragraphs' | 'sentences';
 };
 
+const DOCUMENTS_PAGE_SIZE_DEFAULT = 20;
+
 export const documentsApi = {
   list: async (projectId?: string): Promise<Document[]> => {
     const params = projectId ? { projectId } : {};
     const response = await apiClient.get<Document[]>('/documents', { params });
+    return response.data;
+  },
+
+  /** Paginated list for project documents (e.g. many DOCX/Word files). */
+  listPaginated: async (
+    projectId: string,
+    page = 1,
+    pageSize = DOCUMENTS_PAGE_SIZE_DEFAULT,
+  ): Promise<DocumentListResponse> => {
+    const response = await apiClient.get<DocumentListResponse>('/documents', {
+      params: { projectId, page, pageSize },
+    });
     return response.data;
   },
 
@@ -99,6 +115,20 @@ export const documentsApi = {
       responseType: 'blob',
     });
     return response.data;
+  },
+
+  /** Download document as TMX (Translation Memory eXchange) for Trados. Returns blob and optional filename from Content-Disposition. */
+  downloadTmx: async (documentId: string): Promise<{ blob: Blob; filename?: string }> => {
+    const response = await apiClient.get(`/documents/${documentId}/export-tmx`, {
+      responseType: 'blob',
+    });
+    let filename: string | undefined;
+    const disp = response.headers['content-disposition'];
+    if (typeof disp === 'string') {
+      const match = disp.match(/filename\*?=(?:UTF-8'')?["']?([^"'\s;]+)["']?/i) ?? disp.match(/filename=["']?([^"'\s;]+)["']?/i);
+      if (match) filename = decodeURIComponent(match[1].trim());
+    }
+    return { blob: response.data, filename };
   },
 
   pretranslate: async (

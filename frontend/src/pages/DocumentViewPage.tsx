@@ -2,6 +2,7 @@ import Layout from '../components/Layout';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { documentsApi } from '../api/documents.api';
+import { profilesApi } from '../api/profiles.api';
 import { segmentsApi } from '../api/segments.api';
 import { getLanguageName } from '../utils/languages';
 import { stripFormattingMarkers } from '../utils/formatting';
@@ -22,6 +23,23 @@ export default function DocumentViewPage() {
     queryKey: ['segments', documentId],
     queryFn: () => segmentsApi.list(documentId!, 1, 200),
     enabled: !!documentId,
+  });
+
+  const { data: profiles = [] } = useQuery({
+    queryKey: ['profiles'],
+    queryFn: () => profilesApi.list(),
+  });
+
+  const updateDocumentMutation = useMutation({
+    mutationFn: (data: { profileId: string | null }) =>
+      documentsApi.update(documentId!, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['documents', documentId] });
+      toast.success('Profile updated');
+    },
+    onError: (error: any) => {
+      toast.error(error.response?.data?.message || 'Failed to update profile');
+    },
   });
 
   const deleteDocumentMutation = useMutation({
@@ -60,6 +78,31 @@ export default function DocumentViewPage() {
             <p className="text-gray-600 mt-2">
               {getLanguageName(document.sourceLocale)} → {getLanguageName(document.targetLocale)}
             </p>
+            <div className="mt-2 flex items-center gap-2">
+              <label htmlFor="profile-select" className="text-sm font-medium text-gray-700">
+                Profile:
+              </label>
+              <select
+                id="profile-select"
+                className="input w-auto min-w-[200px]"
+                value={document.profileId ?? ''}
+                onChange={(e) => {
+                  const value = e.target.value || null;
+                  updateDocumentMutation.mutate({ profileId: value });
+                }}
+                disabled={updateDocumentMutation.isPending}
+              >
+                <option value="">None (document context only)</option>
+                {profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+              {updateDocumentMutation.isPending && (
+                <span className="text-sm text-gray-500">Updating...</span>
+              )}
+            </div>
           </div>
           <div className="flex items-center gap-2">
             <Link

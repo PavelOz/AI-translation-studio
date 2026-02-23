@@ -9,6 +9,7 @@
     "start": "node dist/server.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev --name init --create-only",
+    "prisma:seed": "prisma db seed",
     "lint": "echo \"Add linting\"",
     "import:glossary": "ts-node scripts/importGlossary.ts",
     "fix:truncated-terms": "ts-node scripts/fix-truncated-glossary-terms.ts",
@@ -19,6 +20,9 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
+  "prisma": {
+    "seed": "ts-node prisma/seed.ts"
+  },
   "dependencies": {
     "@prisma/client": "5.22.0",
     "@types/diff-match-patch": "^1.0.36",

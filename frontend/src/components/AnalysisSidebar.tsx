@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { Link } from 'react-router-dom';
-import { analysisApi, type AnalysisResults, type AnalysisStatus } from '../api/analysis.api';
+import { analysisApi, type AnalysisResults, type AnalysisStatus, type DocumentDnaPayload } from '../api/analysis.api';
+import { documentsApi } from '../api/documents.api';
 import toast from 'react-hot-toast';
 
 interface AnalysisSidebarProps {
@@ -298,6 +299,23 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
     }
   };
 
+  const handleExportTmx = async () => {
+    try {
+      const { blob, filename } = await documentsApi.downloadTmx(documentId);
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename ?? 'translation-memory.tmx';
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      toast.success('TMX file downloaded');
+    } catch (error: any) {
+      toast.error(error.response?.data?.message || error.message || 'Failed to export TMX');
+    }
+  };
+
   const getStatusColor = (status: AnalysisStatus) => {
     switch (status) {
       case 'COMPLETED':
@@ -407,6 +425,14 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
           >
             📊 Monitor
           </Link>
+          <button
+            type="button"
+            onClick={handleExportTmx}
+            className="text-xs text-blue-600 hover:text-blue-800 underline font-medium"
+            title="Export translation memory (TMX) for Trados"
+          >
+            Export TMX
+          </button>
         </div>
       </div>
 
@@ -911,6 +937,326 @@ export default function AnalysisSidebar({ documentId }: AnalysisSidebarProps) {
               )}
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Document DNA (Project Knowledge Base) */}
+      <DocumentDnaBlock documentId={documentId} />
+    </div>
+  );
+}
+
+type DiffKind = 'unchanged' | 'filled' | 'changed';
+
+function isNullish(v: unknown): boolean {
+  return v === null || v === undefined;
+}
+
+function valueEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (isNullish(a) && isNullish(b)) return true;
+  if (typeof a !== typeof b) return false;
+  if (typeof a === 'object' && a !== null && b !== null) {
+    return JSON.stringify(a) === JSON.stringify(b);
+  }
+  return false;
+}
+
+function getDiffKind(draft: unknown, refined: unknown): DiffKind {
+  if (valueEqual(draft, refined)) return 'unchanged';
+  if (isNullish(draft) && !isNullish(refined)) return 'filled';
+  if (!isNullish(draft) && !isNullish(refined)) return 'changed';
+  return 'unchanged';
+}
+
+function DnaJsonWithDiff({
+  draft,
+  refined,
+  label,
+}: {
+  draft: Record<string, unknown> | null | undefined;
+  refined: Record<string, unknown> | null | undefined;
+  label: string;
+}) {
+  const draftObj = draft ?? {};
+  const refinedObj = refined ?? {};
+  const keys = new Set([...Object.keys(draftObj), ...Object.keys(refinedObj)]);
+  if (keys.size === 0) return null;
+  return (
+    <details className="border border-gray-200 rounded p-2">
+      <summary className="text-xs font-medium cursor-pointer">{label}</summary>
+      <div className="grid grid-cols-2 gap-2 mt-1 text-xs font-mono">
+        <div className="overflow-auto max-h-40">
+          <div className="text-gray-500 mb-1">Draft DNA</div>
+          <pre className="whitespace-pre-wrap break-all">{JSON.stringify(draftObj || null, null, 2)}</pre>
+        </div>
+        <div className="overflow-auto max-h-40">
+          <div className="text-gray-500 mb-1">Refined DNA</div>
+          <pre className="whitespace-pre-wrap break-all">
+            {Array.from(keys).map((k) => {
+              const v = refinedObj[k];
+              const d = draftObj[k];
+              const kind = getDiffKind(d, v);
+              const cls =
+                kind === 'filled'
+                  ? 'bg-green-100 text-green-900 rounded px-0.5'
+                  : kind === 'changed'
+                    ? 'bg-blue-100 text-blue-900 rounded px-0.5'
+                    : '';
+              const str = typeof v === 'object' && v !== null ? JSON.stringify(v, null, 2) : JSON.stringify(v);
+              return (
+                <span key={k} className={cls ? `block ${cls}` : undefined}>
+                  {`"${k}": `}
+                  {typeof v === 'object' && v !== null ? '\n' : ''}
+                  {str}
+                  {'\n'}
+                </span>
+              );
+            })}
+          </pre>
+        </div>
+      </div>
+    </details>
+  );
+}
+
+function DnaDiffView({
+  draft,
+  refined,
+}: {
+  draft: DocumentDnaPayload;
+  refined: DocumentDnaPayload;
+}) {
+  const sections = [
+    { key: 'technicalSchema' as const, label: 'Technical schema' },
+    { key: 'namingConventions' as const, label: 'Naming conventions' },
+    { key: 'abbreviationLogic' as const, label: 'Abbreviations' },
+    { key: 'entityGroups' as const, label: 'Entity groups' },
+  ];
+  return (
+    <div className="space-y-2">
+      {sections.map(({ key, label }) => (
+        <DnaJsonWithDiff
+          key={key}
+          label={label}
+          draft={(draft[key] as Record<string, unknown>) ?? undefined}
+          refined={(refined[key] as Record<string, unknown>) ?? undefined}
+        />
+      ))}
+      <p className="text-xs text-gray-500 mt-1">
+        <span className="inline-block w-3 h-3 rounded bg-green-100 align-middle mr-1" /> New (was null)
+        {' · '}
+        <span className="inline-block w-3 h-3 rounded bg-blue-100 align-middle mr-1" /> Refined term
+      </p>
+    </div>
+  );
+}
+
+function DocumentDnaBlock({ documentId }: { documentId: string }) {
+  const queryClient = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [editJson, setEditJson] = useState('');
+  const [comparisonMode, setComparisonMode] = useState(false);
+  const [draftDna, setDraftDna] = useState<DocumentDnaPayload | null>(null);
+  const [refinedDna, setRefinedDna] = useState<DocumentDnaPayload | null>(null);
+
+  const { data: dna, isLoading: dnaLoading, refetch: refetchDna } = useQuery({
+    queryKey: ['document-dna', documentId],
+    queryFn: () => analysisApi.getDocumentDna(documentId),
+    enabled: !!documentId,
+    retry: false,
+  });
+
+  const regenerateMutation = useMutation({
+    mutationFn: () => analysisApi.regenerateDocumentDna(documentId),
+    onSuccess: () => {
+      toast.success('Document DNA regenerated');
+      queryClient.invalidateQueries({ queryKey: ['document-dna', documentId] });
+      refetchDna();
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.message || err?.message || 'Failed to regenerate Document DNA');
+    },
+  });
+
+  const refineMutation = useMutation({
+    mutationFn: () => analysisApi.refineDocumentDna(documentId, { preview: true }),
+    onSuccess: (refined) => {
+      setDraftDna(dna ?? null);
+      setRefinedDna(refined);
+      setComparisonMode(true);
+      toast.success('Refined DNA ready for comparison');
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.message || err?.message || 'Failed to refine DNA');
+    },
+  });
+
+  const saveMutation = useMutation({
+    mutationFn: (payload: DocumentDnaPayload) => analysisApi.updateDocumentDna(documentId, payload),
+    onSuccess: () => {
+      toast.success('Document DNA saved');
+      setEditing(false);
+      setComparisonMode(false);
+      setRefinedDna(null);
+      setDraftDna(null);
+      queryClient.invalidateQueries({ queryKey: ['document-dna', documentId] });
+      refetchDna();
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.message || err?.message || 'Failed to save');
+    },
+  });
+
+  const handleStartEdit = () => {
+    setEditJson(JSON.stringify(dna ?? {}, null, 2));
+    setEditing(true);
+  };
+
+  const handleSaveEdit = () => {
+    try {
+      const parsed = JSON.parse(editJson) as DocumentDnaPayload;
+      saveMutation.mutate(parsed);
+    } catch {
+      toast.error('Invalid JSON');
+    }
+  };
+
+  const handleAcceptRefinement = () => {
+    if (refinedDna) saveMutation.mutate(refinedDna);
+  };
+
+  const hasData = dna && (
+    (dna.technicalSchema && Object.keys(dna.technicalSchema).length > 0) ||
+    (dna.namingConventions && Object.keys(dna.namingConventions).length > 0) ||
+    (dna.abbreviationLogic && Object.keys(dna.abbreviationLogic).length > 0) ||
+    (dna.entityGroups && Object.keys(dna.entityGroups).length > 0)
+  );
+
+  if (comparisonMode && draftDna && refinedDna) {
+    return (
+      <div className="mt-4 pt-4 border-t border-gray-200">
+        <h4 className="text-sm font-semibold text-gray-900 mb-2">Document DNA — Compare</h4>
+        <p className="text-xs text-gray-500 mb-2">
+          Draft (primary analysis) vs Refined (after revision). Green = new value (was null), Blue = refined term.
+        </p>
+        <DnaDiffView draft={draftDna} refined={refinedDna} />
+        <div className="flex gap-2 flex-wrap mt-3">
+          <button
+            type="button"
+            onClick={handleAcceptRefinement}
+            disabled={saveMutation.isLoading}
+            className="btn btn-primary text-sm"
+          >
+            {saveMutation.isLoading ? 'Saving...' : 'Accept Refinement'}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setComparisonMode(false);
+              setRefinedDna(null);
+              setDraftDna(null);
+            }}
+            className="btn btn-secondary text-sm"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-4 pt-4 border-t border-gray-200">
+      <h4 className="text-sm font-semibold text-gray-900 mb-2">Document DNA (Project Knowledge Base)</h4>
+      <p className="text-xs text-gray-500 mb-2">
+        Technical schema, naming, abbreviations, and entity groups used as context for all translation providers.
+      </p>
+      {dnaLoading ? (
+        <div className="text-xs text-gray-500">Loading...</div>
+      ) : editing ? (
+        <div className="space-y-2">
+          <textarea
+            value={editJson}
+            onChange={(e) => setEditJson(e.target.value)}
+            className="w-full h-48 px-3 py-2 text-xs font-mono border border-gray-300 rounded-md"
+            spellCheck={false}
+          />
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={handleSaveEdit}
+              disabled={saveMutation.isLoading}
+              className="btn btn-primary text-sm"
+            >
+              {saveMutation.isLoading ? 'Saving...' : 'Save'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditing(false)}
+              className="btn btn-secondary text-sm"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : !hasData ? (
+        <div className="text-xs text-gray-500 mb-2">
+          Not generated yet. Generated automatically after import, or run Regenerate.
+        </div>
+      ) : (
+        <div className="space-y-2 mb-2">
+          {dna.technicalSchema && Object.keys(dna.technicalSchema).length > 0 && (
+            <details className="border border-gray-200 rounded p-2">
+              <summary className="text-xs font-medium cursor-pointer">Technical schema</summary>
+              <pre className="mt-1 text-xs overflow-auto max-h-32 whitespace-pre-wrap">{JSON.stringify(dna.technicalSchema, null, 2)}</pre>
+            </details>
+          )}
+          {dna.namingConventions && Object.keys(dna.namingConventions).length > 0 && (
+            <details className="border border-gray-200 rounded p-2">
+              <summary className="text-xs font-medium cursor-pointer">Naming conventions</summary>
+              <pre className="mt-1 text-xs overflow-auto max-h-32 whitespace-pre-wrap">{JSON.stringify(dna.namingConventions, null, 2)}</pre>
+            </details>
+          )}
+          {dna.abbreviationLogic && Object.keys(dna.abbreviationLogic).length > 0 && (
+            <details className="border border-gray-200 rounded p-2">
+              <summary className="text-xs font-medium cursor-pointer">Abbreviations</summary>
+              <pre className="mt-1 text-xs overflow-auto max-h-32 whitespace-pre-wrap">{JSON.stringify(dna.abbreviationLogic, null, 2)}</pre>
+            </details>
+          )}
+          {dna.entityGroups && Object.keys(dna.entityGroups).length > 0 && (
+            <details className="border border-gray-200 rounded p-2">
+              <summary className="text-xs font-medium cursor-pointer">Entity groups</summary>
+              <pre className="mt-1 text-xs overflow-auto max-h-32 whitespace-pre-wrap">{JSON.stringify(dna.entityGroups, null, 2)}</pre>
+            </details>
+          )}
+        </div>
+      )}
+      {!editing && (
+        <div className="flex gap-2 flex-wrap">
+          {hasData && (
+            <>
+              <button type="button" onClick={handleStartEdit} className="text-xs text-blue-600 hover:underline">
+                Edit JSON
+              </button>
+              <button
+                type="button"
+                onClick={() => refineMutation.mutate()}
+                disabled={refineMutation.isLoading}
+                className="text-xs text-blue-600 hover:underline disabled:opacity-50"
+              >
+                {refineMutation.isLoading ? 'Refining...' : 'Refine & Compare'}
+              </button>
+            </>
+          )}
+          <button
+            type="button"
+            onClick={() => regenerateMutation.mutate()}
+            disabled={regenerateMutation.isLoading}
+            className="text-xs text-gray-600 hover:underline disabled:opacity-50"
+          >
+            {regenerateMutation.isLoading ? 'Regenerating...' : 'Regenerate'}
+          </button>
         </div>
       )}
     </div>

@@ -31,12 +31,18 @@ export default function ProjectDetailPage() {
   const [segmentationMode, setSegmentationMode] = useState<'paragraphs' | 'sentences'>('paragraphs');
   const [sortBy, setSortBy] = useState<'name' | 'size' | 'importTime'>('importTime');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
+  const DOCUMENTS_PAGE_SIZE = 20;
+  const [documentsPage, setDocumentsPage] = useState(1);
 
-  const { data: documents } = useQuery({
-    queryKey: ['documents', projectId],
-    queryFn: () => documentsApi.list(projectId),
+  const { data: documentsData } = useQuery({
+    queryKey: ['documents', projectId, documentsPage],
+    queryFn: () => documentsApi.listPaginated(projectId!, documentsPage, DOCUMENTS_PAGE_SIZE),
     enabled: !!projectId,
   });
+
+  const documents = documentsData?.documents ?? [];
+  const documentTotal = documentsData?.total ?? documents.length;
+  const documentsTotalPages = documentsData?.totalPages ?? 1;
 
   const deleteDocumentMutation = useMutation({
     mutationFn: documentsApi.delete,
@@ -105,12 +111,13 @@ export default function ProjectDetailPage() {
           segmentationMode,
         },
         (progress) => {
-          // Upload progress (file transfer)
+          // Upload progress (file transfer). When transfer is complete, show processing stage so user knows server is working.
+          const transferComplete = progress.total > 0 && progress.loaded >= progress.total;
           setUploadProgress({
-            percentage: Math.min(progress.percentage, 90), // Reserve 10% for processing
+            percentage: transferComplete ? 90 : Math.min(progress.percentage, 90),
             loaded: progress.loaded,
             total: progress.total,
-            stage: 'uploading',
+            stage: transferComplete ? 'processing' : 'uploading',
           });
         },
       );
@@ -138,6 +145,7 @@ export default function ProjectDetailPage() {
       });
 
       queryClient.invalidateQueries({ queryKey: ['documents', projectId] });
+      setDocumentsPage(1);
       toast.success(`Document uploaded successfully (${result.importedSegments} segments)`);
 
       // Clear progress after a delay
@@ -309,7 +317,7 @@ export default function ProjectDetailPage() {
               <div className="flex justify-between items-center mb-2">
                 <span className="text-sm font-medium text-blue-900">
                   {uploadProgress.stage === 'uploading' && 'Uploading file...'}
-                  {uploadProgress.stage === 'processing' && 'Processing segments...'}
+                  {uploadProgress.stage === 'processing' && 'Processing file on server…'}
                   {uploadProgress.stage === 'complete' && 'Upload complete!'}
                 </span>
                 <span className="text-sm text-blue-700">
@@ -349,6 +357,51 @@ export default function ProjectDetailPage() {
           
           {sortedDocuments && sortedDocuments.length > 0 ? (
             <div className="space-y-2">
+              {documentsTotalPages > 1 && (
+                <div className="flex items-center justify-between flex-wrap gap-2 py-2 border-b border-gray-200">
+                  <span className="text-sm text-gray-600">
+                    Page {documentsPage} of {documentsTotalPages} (documents {(documentsPage - 1) * DOCUMENTS_PAGE_SIZE + 1}–{Math.min(documentsPage * DOCUMENTS_PAGE_SIZE, documentTotal)} of {documentTotal.toLocaleString()})
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setDocumentsPage(1)}
+                      disabled={documentsPage <= 1}
+                      className="btn btn-secondary text-sm disabled:opacity-50"
+                      title="First page"
+                    >
+                      First
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDocumentsPage((p) => Math.max(1, p - 1))}
+                      disabled={documentsPage <= 1}
+                      className="btn btn-secondary text-sm disabled:opacity-50"
+                      title="Previous"
+                    >
+                      Previous
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDocumentsPage((p) => Math.min(documentsTotalPages, p + 1))}
+                      disabled={documentsPage >= documentsTotalPages}
+                      className="btn btn-secondary text-sm disabled:opacity-50"
+                      title="Next"
+                    >
+                      Next
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDocumentsPage(documentsTotalPages)}
+                      disabled={documentsPage >= documentsTotalPages}
+                      className="btn btn-secondary text-sm disabled:opacity-50"
+                      title="Last page"
+                    >
+                      Last
+                    </button>
+                  </div>
+                </div>
+              )}
               {sortedDocuments.map((doc) => (
                 <div key={doc.id} className="border-b border-gray-200 pb-3 flex justify-between items-center">
                   <div>
@@ -414,7 +467,7 @@ export default function ProjectDetailPage() {
                   <div className="flex justify-between items-center mb-2">
                     <span className="text-sm font-medium text-blue-900">
                       {uploadProgress.stage === 'uploading' && 'Uploading file...'}
-                      {uploadProgress.stage === 'processing' && 'Processing segments...'}
+                      {uploadProgress.stage === 'processing' && 'Processing file on server…'}
                       {uploadProgress.stage === 'complete' && 'Upload complete!'}
                     </span>
                     <span className="text-sm text-blue-700">

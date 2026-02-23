@@ -5,15 +5,17 @@ import fs from 'fs/promises';
 import path from 'path';
 import { asyncHandler } from '../utils/asyncHandler';
 import { requireAuth } from '../utils/authMiddleware';
-import { listDocuments, getDocument, updateDocumentStatus, updateDocument, deleteDocument } from '../services/document.service';
+import { listDocuments, listDocumentsPaginated, getDocument, updateDocumentStatus, updateDocument, deleteDocument } from '../services/document.service';
 import { importDocumentFile, exportDocumentFile } from '../services/file.service';
+import { exportDocumentToTmx } from '../services/tmx.service';
 import { ApiError } from '../utils/apiError';
 import { logger } from '../utils/logger';
 import { getDocumentSegments } from '../services/segment.service';
 import { runDocumentMachineTranslation, pretranslateDocument } from '../services/ai.service';
 import { getDocumentMetricsSummary, runDocumentQualityCheck } from '../services/quality.service';
 import { getProgress, cancelProgress, clearProgress } from '../services/pretranslateProgress';
-import { runFullAnalysis, getAnalysisResults, cancelAnalysis, resetAnalysisStatus, getStageMonitoringData, listDocumentGlossary, updateDocumentGlossaryEntry, translateSingleTerm } from '../services/analysis.service';
+import { runFullAnalysis, getAnalysisResults, cancelAnalysis, resetAnalysisStatus, getStageMonitoringData, listDocumentGlossary, updateDocumentGlossaryEntry, translateSingleTerm, getDocumentDna, updateDocumentDna, generateDocumentDna, refineDocumentDna } from '../services/analysis.service';
+import { getProfile } from '../services/profile.service';
 
 // Configure multer to preserve UTF-8 encoding for filenames (including Cyrillic)
 // Multer handles UTF-8 filenames correctly when sent from modern browsers
@@ -32,6 +34,7 @@ const updateDocumentSchema = z.object({
   sourceLocale: z.string().optional(),
   targetLocale: z.string().optional(),
   status: z.enum(['NEW', 'IN_PROGRESS', 'COMPLETED']).optional(),
+  profileId: z.string().uuid().nullable().optional(),
 });
 
 const batchTranslationSchema = z.object({
@@ -76,7 +79,17 @@ documentRoutes.use(requireAuth);
 documentRoutes.get(
   '/',
   asyncHandler(async (req, res) => {
-    const documents = await listDocuments(req.query.projectId as string | undefined);
+    const projectId = req.query.projectId as string | undefined;
+    const page = req.query.page != null ? Number(req.query.page) : undefined;
+    const pageSize = req.query.pageSize != null ? Number(req.query.pageSize) : undefined;
+
+    if (projectId && page != null && pageSize != null && !Number.isNaN(page) && !Number.isNaN(pageSize) && page >= 1 && pageSize >= 1) {
+      const result = await listDocumentsPaginated(projectId, page, Math.min(pageSize, 100));
+      res.json(result);
+      return;
+    }
+
+    const documents = await listDocuments(projectId);
     res.json(documents);
   }),
 );
@@ -125,10 +138,34 @@ documentRoutes.get(
   }),
 );
 
+documentRoutes.get(
+  '/:documentId/export-tmx',
+  asyncHandler(async (req, res) => {
+    const document = await getDocument(req.params.documentId);
+    if (!document) throw ApiError.notFound('Document not found');
+    const buffer = await exportDocumentToTmx(req.params.documentId);
+    const baseName = (document.filename ?? document.name ?? 'export').replace(
+      /\.(docx|xlsx|xliff|xlf)$/i,
+      '',
+    );
+    const filename = `${baseName}.tmx`;
+    const encoded = encodeURIComponent(filename);
+    res.setHeader('Content-Type', 'application/xml');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${encoded}"; filename*=UTF-8''${encoded}`,
+    );
+    res.send(buffer);
+  }),
+);
+
 documentRoutes.patch(
   '/:documentId',
   asyncHandler(async (req, res) => {
     const payload = updateDocumentSchema.parse(req.body);
+    if (payload.profileId !== undefined && payload.profileId !== null) {
+      await getProfile(payload.profileId);
+    }
     const document = await updateDocument(req.params.documentId, payload);
     res.json(document);
   }),
@@ -371,6 +408,51 @@ documentRoutes.patch(
       payload,
     );
     res.json(result);
+  }),
+);
+
+// Document DNA (Project Knowledge Base) routes
+const documentDnaSchema = z.object({
+  technicalSchema: z.record(z.string(), z.unknown()).nullable().optional(),
+  namingConventions: z.record(z.string(), z.unknown()).nullable().optional(),
+  abbreviationLogic: z.record(z.string(), z.unknown()).nullable().optional(),
+  entityGroups: z.record(z.string(), z.unknown()).nullable().optional(),
+});
+
+documentRoutes.get(
+  '/:documentId/dna',
+  asyncHandler(async (req, res) => {
+    const dna = await getDocumentDna(req.params.documentId);
+    if (dna === null) {
+      return res.status(404).json({ error: 'Document DNA not found. Run analysis or regenerate after import.' });
+    }
+    res.json(dna);
+  }),
+);
+
+documentRoutes.put(
+  '/:documentId/dna',
+  asyncHandler(async (req, res) => {
+    const payload = documentDnaSchema.parse(req.body);
+    const updated = await updateDocumentDna(req.params.documentId, payload);
+    res.json(updated);
+  }),
+);
+
+documentRoutes.post(
+  '/:documentId/dna/regenerate',
+  asyncHandler(async (req, res) => {
+    const dna = await generateDocumentDna(req.params.documentId);
+    res.json(dna);
+  }),
+);
+
+documentRoutes.post(
+  '/:documentId/refine-dna',
+  asyncHandler(async (req, res) => {
+    const preview = req.body && typeof req.body === 'object' && req.body.preview === true;
+    const dna = await refineDocumentDna(req.params.documentId, { preview });
+    res.json(dna);
   }),
 );
 

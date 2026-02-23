@@ -228,7 +228,7 @@ export default function ProjectCreateModal({
             <button
               type="submit"
               className="btn btn-primary"
-              disabled={isLoading || !formData.name || formData.targetLocales.length === 0}
+              disabled={isLoading || !formData.name || !formData.sourceLocale || formData.targetLocales.length === 0}
             >
               {isLoading ? 'Creating...' : 'Create Project'}
             </button>

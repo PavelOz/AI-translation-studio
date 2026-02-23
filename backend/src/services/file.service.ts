@@ -9,13 +9,13 @@ import { logger } from '../utils/logger';
 import { prisma } from '../db/prisma';
 import { createDocument, getDocument } from './document.service';
 import { bulkUpsertSegments, getDocumentSegments } from './segment.service';
+import { stripTags } from '../utils/segmentation';
 import {
   generateDocumentEmbedding,
-  generateDocumentSummary,
   assignDocumentToCluster,
   updateClusterSummary,
 } from './document-clustering.service';
-import { analyzeDocumentContext } from '../ai/documentAnalyzer';
+import { generateDocumentDna, getDocumentDna, summaryFromDna } from './analysis.service';
 
 export type ImportDocumentInput = {
   projectId: string;
@@ -76,38 +76,7 @@ export const importDocumentFile = async (
 
   // Preserve original filename with proper encoding
   const originalFilename = Buffer.from(file.originalname, 'latin1').toString('utf8');
-  
-  // Extract full text from segments for context analysis
-  // Combine all segment texts to create a full document text
-  const fullText = parsed.segments
-    .map((segment) => segment.sourceText)
-    .join('\n\n')
-    .trim();
 
-  // Analyze document context using DocumentAnalyzer
-  // This provides genre, tone, and key terminology for better translation quality
-  let summary = '';
-  try {
-    logger.info(
-      { filename: originalFilename, textLength: fullText.length },
-      'Analyzing document context...',
-    );
-    summary = await analyzeDocumentContext(originalFilename, fullText);
-    logger.info(
-      { filename: originalFilename, summaryLength: summary.length },
-      'Document context analysis completed',
-    );
-  } catch (error) {
-    // Log warning but don't fail the upload - context analysis is helpful but not critical
-    logger.warn(
-      {
-        error: error instanceof Error ? error.message : String(error),
-        filename: originalFilename,
-      },
-      'Auto-summary failed, continuing without it',
-    );
-  }
-  
   const document = await createDocument({
     projectId: input.projectId,
     name: originalFilename,
@@ -119,7 +88,7 @@ export const importDocumentFile = async (
     wordCount: totalWords,
     totalSegments,
     totalWords,
-    summary: summary || undefined, // Only include if summary was generated
+    summary: undefined, // Filled from Document DNA in background
   });
 
   // Store segmentation mode in document metadata (if available)
@@ -159,14 +128,12 @@ export const importDocumentFile = async (
         'Starting document clustering process (background)',
       );
 
-      // Generate document summary
+      // Generate Document DNA and set summary from it (single source of truth)
       try {
-        logger.info({ documentId: document.id }, 'Generating document summary...');
-        const summary = await generateDocumentSummary(
-          parsed.segments.map((s) => ({ sourceText: s.sourceText })),
-          input.sourceLocale,
-        );
-
+        logger.info({ documentId: document.id }, 'Generating Document DNA...');
+        await generateDocumentDna(document.id);
+        const dnaPayload = await getDocumentDna(document.id);
+        const summary = summaryFromDna(dnaPayload);
         if (summary) {
           await prisma.document.update({
             where: { id: document.id },
@@ -177,18 +144,18 @@ export const importDocumentFile = async (
           });
           logger.info(
             { documentId: document.id, summaryLength: summary.length },
-            '✅ Document summary generated',
+            '✅ Document summary set from DNA',
           );
         }
-      } catch (summaryError: any) {
+      } catch (dnaError: any) {
         logger.error(
           {
             documentId: document.id,
-            error: summaryError.message,
+            error: dnaError.message,
           },
-          'Failed to generate document summary (non-critical)',
+          'Failed to generate Document DNA / summary (non-critical)',
         );
-        // Continue with embedding generation even if summary fails
+        // Continue with embedding generation even if DNA/summary fails
       }
 
       // Generate document embedding
@@ -238,6 +205,18 @@ export const importDocumentFile = async (
           { documentId: document.id },
           '✅ Document clustering process completed',
         );
+
+        // Pre-flight: generate Document DNA (project knowledge base) for model-agnostic context
+        try {
+          logger.info({ documentId: document.id }, 'Generating Document DNA...');
+          await generateDocumentDna(document.id);
+          logger.info({ documentId: document.id }, '✅ Document DNA generated');
+        } catch (dnaError: any) {
+          logger.warn(
+            { documentId: document.id, error: dnaError.message },
+            'Document DNA generation failed (non-critical)',
+          );
+        }
       } catch (clusterError: any) {
         logger.error(
           {
@@ -281,24 +260,25 @@ export const exportDocumentFile = async (documentId: string): Promise<Buffer> =>
 
 
   const originalBuffer = await fs.readFile(document.storagePath);
-  const segments = await getDocumentSegments(documentId, 1, 10000);
 
+  // Fetch all segments for export (documents can have 90k+ segments; 10k limit left most without translations)
+  const exportPageSize = Math.min(500000, Math.max(10000, (document.totalSegments ?? 0) + 1000));
+  const segments = await getDocumentSegments(documentId, 1, exportPageSize);
 
-
-  const exportSegments = segments.segments.map((seg) => ({
-    index: seg.segmentIndex,
-    targetText: seg.targetFinal ?? seg.targetMt ?? seg.sourceText,
-    segmentType: 'paragraph' as const, // Segment model doesn't store segmentType, default to 'paragraph'
-    metadata: {
-      sourceText: seg.sourceText, // Include sourceText for verification matching
-    },
-    // Note: documentParagraphIndex metadata is not stored in DB,
-    // Export will use heuristic approach to group sentence segments
-  }));
-
-  
-
-
+  const exportSegments = segments.segments.map((seg) => {
+    const rawTarget = seg.targetFinal ?? seg.targetMt ?? seg.sourceText ?? '';
+    const targetText = stripTags(rawTarget) || seg.sourceText || '';
+    return {
+      index: seg.segmentIndex,
+      targetText, // Prefer translation; fallback to source so export is never empty
+      segmentType: 'paragraph' as const, // Segment model doesn't store segmentType, default to 'paragraph'
+      metadata: {
+        sourceText: seg.sourceText, // Include sourceText for verification matching
+      },
+      // Note: documentParagraphIndex metadata is not stored in DB,
+      // Export will use heuristic approach to group sentence segments
+    };
+  });
 
   // Check if document was segmented by sentences by looking at segment types and patterns
   // Improved heuristic: check multiple indicators

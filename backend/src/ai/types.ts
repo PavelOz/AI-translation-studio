@@ -64,6 +64,20 @@ export type TranslateSegmentsOptions = {
   documentStyleRules?: Array<{ ruleType: string; pattern: string; description: string | null; examples: any }>;
   documentId?: string; // Optional: for per-segment glossary lookup
   strictMode?: boolean; // If true, omit analysis field to save output tokens
+  /** Document DNA: project knowledge base for model-agnostic context (PROJECT KNOWLEDGE BASE block) */
+  documentDna?: DocumentDnaPayload | null;
+  /** Address/system instructions from profile (e.g. Technical Default); resolved async by caller */
+  addressRule?: { instructions: string } | null;
+  /** Style Governor: abbreviations already expanded in previous segments (use abbreviation only for these) */
+  introducedAbbreviations?: string[];
+};
+
+/** Document DNA payload: technical schema, naming, abbreviations, entity groups (1:1 per document) */
+export type DocumentDnaPayload = {
+  technicalSchema?: Record<string, unknown> | null;
+  namingConventions?: Record<string, unknown> | null;
+  abbreviationLogic?: Record<string, unknown> | null;
+  entityGroups?: Record<string, unknown> | null;
 };
 
 // Valid provider names for translation results

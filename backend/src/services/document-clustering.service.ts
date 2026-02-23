@@ -3,6 +3,7 @@ import { logger } from '../utils/logger';
 import { generateEmbedding } from './embedding.service';
 import { getDocumentSegments } from './segment.service';
 import { env } from '../utils/env';
+import { buildStrideSampledText } from './analysis.service';
 import OpenAI from 'openai';
 
 const openai = new OpenAI({
@@ -176,11 +177,12 @@ export async function findSimilarDocuments(
 }
 
 /**
- * Generate document summary using AI
+ * Generate document summary using AI.
+ * Uses stride sampling (same as Document DNA) so the summary reflects the whole document.
  */
 export async function generateDocumentSummary(
   segments: Array<{ sourceText: string }>,
-  sourceLocale: string,
+  _sourceLocale: string,
 ): Promise<string> {
   if (!env.openAiApiKey) {
     logger.warn('OPENAI_API_KEY not configured, skipping document summary generation');
@@ -188,38 +190,11 @@ export async function generateDocumentSummary(
   }
 
   try {
-    // Sample segments: first 5, middle 5, last 5
-    const totalSegments = segments.length;
-    const sampleSize = Math.min(15, totalSegments);
-    const sampleIndices = new Set<number>();
+    const fullText = segments.map((s) => s.sourceText).join('\n\n').trim();
+    if (!fullText) return '';
 
-    // Add first segments
-    for (let i = 0; i < Math.min(5, totalSegments); i++) {
-      sampleIndices.add(i);
-    }
-
-    // Add middle segments
-    if (totalSegments > 10) {
-      const middleStart = Math.floor(totalSegments / 2) - 2;
-      for (let i = middleStart; i < middleStart + 5 && i < totalSegments; i++) {
-        sampleIndices.add(i);
-      }
-    }
-
-    // Add last segments
-    for (let i = Math.max(0, totalSegments - 5); i < totalSegments; i++) {
-      sampleIndices.add(i);
-    }
-
-    const sampleSegments = Array.from(sampleIndices)
-      .sort((a, b) => a - b)
-      .map((idx) => segments[idx])
-      .slice(0, sampleSize);
-
-    const sampleText = sampleSegments
-      .map((s) => s.sourceText)
-      .join('\n\n')
-      .substring(0, 4000); // Limit to avoid token limits
+    const strideSampled = buildStrideSampledText(fullText);
+    const sampleText = strideSampled.substring(0, 4000); // Limit for model context
 
     const prompt = `Analyze this document sample and create a concise summary (2-3 sentences) describing:
 - Document type/category (e.g., contract, report, specification)
@@ -286,7 +261,6 @@ export async function generateClusterSummary(
     const allSamples: Array<{ text: string; documentName: string }> = [];
 
     for (const docId of documentIds.slice(0, 5)) {
-      // Limit to 5 documents to avoid token limits
       const segments = await getDocumentSegments(docId, 1, 100);
       const document = await prisma.document.findUnique({
         where: { id: docId },
@@ -294,12 +268,14 @@ export async function generateClusterSummary(
       });
 
       if (segments.segments && segments.segments.length > 0) {
-        // Sample first 3 segments from each document
-        const sample = segments.segments.slice(0, 3).map((s) => s.sourceText).join('\n');
-        allSamples.push({
-          text: sample,
-          documentName: document?.name || 'Unknown',
-        });
+        const fullText = segments.segments.map((s) => s.sourceText).join('\n\n').trim();
+        if (fullText) {
+          const sampled = buildStrideSampledText(fullText, { sampleCount: 5, chunkSize: 400 });
+          allSamples.push({
+            text: sampled.substring(0, 800),
+            documentName: document?.name || 'Unknown',
+          });
+        }
       }
     }
 

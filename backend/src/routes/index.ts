@@ -10,6 +10,7 @@ import { chatRoutes } from './chat.routes';
 import { reportRoutes } from './reports.routes';
 import { healthRoutes } from './health.routes';
 import { clusteringRoutes } from './clustering.routes';
+import { profileRoutes } from './profiles.routes';
 
 export const routes = Router();
 
@@ -24,4 +25,5 @@ routes.use('/ai', aiRoutes);
 routes.use('/chat', chatRoutes);
 routes.use('/reports', reportRoutes);
 routes.use('/clustering', clusteringRoutes);
+routes.use('/profiles', profileRoutes);
 

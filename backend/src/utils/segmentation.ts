@@ -18,6 +18,15 @@ export function stripFormattingTags(text: string): string {
 }
 
 /**
+ * Strip formatting/validation tags for export and display (CSV, Excel, UI).
+ * Same as stripFormattingTags; use this when preparing final text for download or display
+ * so that {{n}}/{{/n}} markers are not shown to the end user.
+ */
+export function stripTags(text: string): string {
+  return stripFormattingTags(text);
+}
+
+/**
  * Split text into sentences using the sbd library
  * 
  * @param text - The text to split into sentences
