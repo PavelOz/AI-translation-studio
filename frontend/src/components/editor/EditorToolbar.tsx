@@ -258,6 +258,7 @@ export default function EditorToolbar({
           onClick={() => handleDownload(true)}
           disabled={isExporting}
           className="btn btn-primary text-sm disabled:opacity-50 relative"
+          title="Assemble current translation into original format (DOCX/XLSX/XLIFF) using stable export"
         >
           {isExporting && exportProgress ? (
             <span className="flex items-center gap-2">
@@ -265,7 +266,7 @@ export default function EditorToolbar({
               {exportProgress.message}
             </span>
           ) : (
-            'Export Translated'
+            'Download Draft DOCX/XLSX'
           )}
         </button>
         {exportProgress && exportProgress.stage !== 'complete' && (

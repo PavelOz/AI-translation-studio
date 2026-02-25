@@ -2,7 +2,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import type { Express } from 'express';
 import type { DocumentFileType } from '@prisma/client';
-import { resolveHandler } from '../utils/file-handlers';
+import * as UniversalFileService from './universalFile.service';
 import { ApiError } from '../utils/apiError';
 import { env } from '../utils/env';
 import { logger } from '../utils/logger';
@@ -33,17 +33,16 @@ export const importDocumentFile = async (
     throw ApiError.badRequest('File is required');
   }
 
-  const handler = resolveHandler(file.originalname, file.mimetype);
-  
-  if (!handler) {
-    throw ApiError.badRequest('Unsupported file format');
-  }
+  const parseOptions = { segmentationMode: input.segmentationMode || 'paragraphs' };
 
   let parsed;
-  const parseOptions = { segmentationMode: input.segmentationMode || 'paragraphs' };
-  
   try {
-    parsed = await handler.parse(file.buffer, parseOptions);
+    parsed = await UniversalFileService.parse(
+      file.buffer,
+      file.originalname,
+      file.mimetype,
+      parseOptions,
+    );
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     logger.error({ error: errorMessage, filename: file.originalname }, 'Failed to parse document file');
@@ -253,12 +252,6 @@ export const exportDocumentFile = async (documentId: string): Promise<Buffer> =>
     throw ApiError.notFound('Document not found');
   }
 
-  const handler = resolveHandler(document.filename ?? document.name, undefined);
-  if (!handler || !handler.export) {
-    throw ApiError.badRequest('Export not supported for this file format');
-  }
-
-
   const originalBuffer = await fs.readFile(document.storagePath);
 
   // Fetch all segments for export (documents can have 90k+ segments; 10k limit left most without translations)
@@ -312,30 +305,30 @@ export const exportDocumentFile = async (documentId: string): Promise<Buffer> =>
   
 
   try {
-    
-    
-    const exportedBuffer = await handler.export({
-      segments: exportSegments,
-      originalBuffer,
-      metadata: {
-        documentId: document.id,
-        filename: document.filename ?? document.name,
-        likelySentenceSegmented, // Pass hint to export handler
+    const exportedBuffer = await UniversalFileService.exportDocument(
+      {
+        segments: exportSegments,
+        originalBuffer,
+        metadata: {
+          documentId: document.id,
+          filename: document.filename ?? document.name,
+          likelySentenceSegmented,
+        },
       },
-    });
-    
-    
-    
+      document.filename ?? document.name,
+    );
     return exportedBuffer;
   } catch (error) {
-    
     const errorMessage = error instanceof Error ? error.message : String(error);
-    logger.error({ 
-      error: errorMessage, 
+    logger.error({
+      error: errorMessage,
       documentId: document.id,
       filename: document.filename ?? document.name,
-      stack: error instanceof Error ? error.stack : undefined
+      stack: error instanceof Error ? error.stack : undefined,
     }, 'Failed to export document file');
+    if (errorMessage.includes('Unsupported file format') || errorMessage.includes('Export not supported')) {
+      throw ApiError.badRequest(errorMessage);
+    }
     throw ApiError.internalServerError(`Failed to export document: ${errorMessage}`);
   }
 };

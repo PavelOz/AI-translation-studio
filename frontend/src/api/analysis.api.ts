@@ -136,8 +136,8 @@ export const analysisApi = {
     }
   },
 
-  updateDocumentDna: async (documentId: string, payload: DocumentDnaPayload): Promise<DocumentDnaPayload> => {
-    const response = await apiClient.put<DocumentDnaPayload>(`/documents/${documentId}/dna`, payload);
+  updateDocumentDna: async (documentId: string, payload: DocumentDnaPayload): Promise<UpdateDocumentDnaResponse> => {
+    const response = await apiClient.put<UpdateDocumentDnaResponse>(`/documents/${documentId}/dna`, payload);
     return response.data;
   },
 
@@ -158,6 +158,13 @@ export type DocumentDnaPayload = {
   namingConventions?: Record<string, unknown> | null;
   abbreviationLogic?: Record<string, unknown> | null;
   entityGroups?: Record<string, unknown> | null;
+};
+
+/** Response from PUT /documents/:id/dna (includes affected segments for smart retranslation). */
+export type UpdateDocumentDnaResponse = DocumentDnaPayload & {
+  affectedSegmentIds?: string[];
+  affectedCount?: number;
+  delta?: { addedKeys: string[]; changedKeys: string[]; removedKeys: string[] };
 };
 
 

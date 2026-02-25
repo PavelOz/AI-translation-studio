@@ -213,5 +213,18 @@ export const documentsApi = {
     const response = await apiClient.post(`/documents/${documentId}/pretranslate/cancel`);
     return response.data;
   },
+
+  /** Retranslate only the given segments (e.g. after DNA change). Uses same progress as pretranslate. */
+  patchTranslate: async (
+    documentId: string,
+    segmentIds: string[],
+    options?: { glossaryMode?: GlossaryMode; provider?: string; model?: string; temperature?: number },
+  ): Promise<{ status: string; documentId: string }> => {
+    const response = await apiClient.post(`/documents/${documentId}/patch-translate`, {
+      segmentIds,
+      ...options,
+    });
+    return response.data;
+  },
 };
 

@@ -13,7 +13,10 @@ import { searchGlossaryByVector } from './vector-search.service';
 import { env } from '../utils/env';
 import type { GlossaryMode } from '../types/glossary';
 import type { ContextRules } from './glossary.service';
-import { getDocumentGlossaryForSegment, getDocumentStyleRules } from './analysis.service';
+import { getDocumentGlossaryForSegment, getDocumentStyleRules, getDocumentDna } from './analysis.service';
+import { applyTotalCyrillicBan, deduplicateFullFormDash } from './translation.service';
+import { validateDocumentDnaPayload, validateDnaForCycles } from './dnaValidation';
+import { normalizeDocumentDnaPayloadOrNull } from './dnaSchema';
 import { splitIntoSentences, stripFormattingTags } from '../utils/segmentation';
 import pLimit from 'p-limit';
 
@@ -1228,6 +1231,7 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
   let bestTmEntryId: string | null = null;
   let aiResult: { targetText: string; provider: string; model: string; confidence: number; usage?: any; fullPrompt?: string; analysis?: string } | null = null;
   const metadata: TranslationMetadata[] = [];
+  let documentDnaPayload: Awaited<ReturnType<typeof getDocumentDna>> | null = null;
 
   // Priority 1: Check for direct TM match (≥70%)
   if (tmAllowed) {
@@ -1428,6 +1432,40 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
       },
     });
 
+    // First Mention Only: load document DNA and already-expanded terms from previous segments
+    documentDnaPayload = await getDocumentDna(segment.document.id);
+    let introducedAbbreviations: string[] = [];
+    if (documentDnaPayload?.abbreviationLogic && typeof documentDnaPayload.abbreviationLogic === 'object') {
+      const knownAbbrevs = getKnownTargetAbbreviations(documentDnaPayload.abbreviationLogic);
+      if (knownAbbrevs.length > 0) {
+        const previousSegments = await prisma.segment.findMany({
+          where: {
+            documentId: segment.document.id,
+            segmentIndex: { lt: segment.segmentIndex },
+          },
+          orderBy: { segmentIndex: 'asc' },
+          select: { targetFinal: true, targetMt: true },
+        });
+        const newFromPrevious = new Set<string>();
+        for (const s of previousSegments) {
+          const text = (s.targetFinal ?? s.targetMt ?? '').trim();
+          const re = /\(([A-Z][A-Z0-9]{1,})\)/g;
+          let m: RegExpExecArray | null;
+          while ((m = re.exec(text)) !== null) {
+            if (knownAbbrevs.includes(m[1])) newFromPrevious.add(m[1]);
+          }
+        }
+        introducedAbbreviations = Array.from(newFromPrevious);
+      }
+    }
+
+    if (documentDnaPayload) {
+      const segValidation = validateDocumentDnaPayload(documentDnaPayload);
+      if (!segValidation.valid) {
+        throw ApiError.badRequest(`Invalid Document DNA: ${segValidation.errors.join('; ')}`);
+      }
+    }
+
     // Calculate dynamic maxTokens based on source text length
     // Rule of thumb: 1 token ≈ 4 characters, translation needs 2-3x input tokens
     // Add buffer for prompt, glossary, examples, etc.
@@ -1471,6 +1509,8 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
         temperature: context.settings?.temperature ?? getDefaultTemperature(context.settings?.provider),
         maxTokens,
         glossaryMode, // Pass glossary mode to orchestrator
+        documentDna: documentDnaPayload ?? undefined,
+        introducedAbbreviations, // First Mention Only: already expanded in previous segments
       },
     );
     translationText = aiResult.targetText;
@@ -1480,6 +1520,10 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
 
   if (!translationText) {
     translationText = segment.sourceText;
+  }
+  if (translationText && documentDnaPayload?.abbreviationLogic) {
+    translationText = applyTotalCyrillicBan(translationText, documentDnaPayload.abbreviationLogic as Record<string, unknown>, segment.document.targetLocale);
+    translationText = deduplicateFullFormDash(translationText, documentDnaPayload.abbreviationLogic as Record<string, unknown>);
   }
 
   const updatedSegment = await prisma.segment.update({
@@ -3007,8 +3051,25 @@ export const pretranslateDocument = async (
         // Process AI translations in batches (faster, standard mode)
         const batchSize = 10; // Process 10 segments at a time
         addLogMessage(documentId, `📦 Processing ${queuedForAI.length} segments in batches of ${batchSize}...`);
-        /** Style Governor: abbreviations already expanded in previous batches (use abbreviation only in next batches) */
+        /** Segment Context Filter: session expandedTerms is cleared so each run starts fresh; orchestrator updates it after each batch. */
+        orchestrator.clearSessionState(document.id);
         let introducedAbbreviations: string[] = [];
+        const dnaForValidation = await getDocumentDna(document.id);
+        const dnaValidation = validateDocumentDnaPayload(dnaForValidation ?? null);
+        const cycleCheck = validateDnaForCycles(dnaForValidation ?? null);
+        if (!dnaValidation.valid) {
+          const msg = `Invalid Document DNA: ${dnaValidation.errors.join('; ')}`;
+          addLogMessage(documentId, `❌ ${msg}`);
+          setError(documentId, msg);
+        } else if (!cycleCheck.valid) {
+          const msg = `Document DNA recursion risk: ${cycleCheck.errors.join('; ')}`;
+          addLogMessage(documentId, `❌ ${msg}`);
+          setError(documentId, msg);
+        } else {
+          const abbrevCount = dnaForValidation?.abbreviationLogic && typeof dnaForValidation.abbreviationLogic === 'object'
+            ? Object.keys(dnaForValidation.abbreviationLogic).length
+            : 0;
+          logger.info({ documentId, abbreviationLogicKeys: abbrevCount }, 'Pretranslate: DNA valid, starting batch translation');
         for (let i = 0; i < queuedForAI.length; i += batchSize) {
           // Check for cancellation before each batch
           if (isCancelled(documentId)) {
@@ -3153,11 +3214,12 @@ export const pretranslateDocument = async (
 
           const resultMap = new Map(aiResults.map((result) => [result.segmentId, result]));
 
-          // Style Governor: collect target-language abbreviations expanded in this batch (pattern "Full Term (ABBR)") for next batches
+          // Persistent state: session expandedTerms (Set) — updated after each batch and passed to next
           const knownAbbrevs = getKnownTargetAbbreviations(documentDnaPretranslate?.abbreviationLogic ?? undefined);
           if (knownAbbrevs.length > 0) {
             const newFromBatch = new Set<string>();
             for (const r of aiResults) {
+              if (r.expandedTerms) for (const t of r.expandedTerms) newFromBatch.add(t);
               const text = r.targetText ?? '';
               const re = /\(([A-Z][A-Z0-9]{1,})\)/g;
               let m: RegExpExecArray | null;
@@ -3167,12 +3229,18 @@ export const pretranslateDocument = async (
             }
             introducedAbbreviations = [...new Set([...introducedAbbreviations, ...newFromBatch])];
           }
+          logger.debug(
+            { documentId, batchIndex: Math.floor(i / batchSize) + 1, expandedTermsCount: introducedAbbreviations.length },
+            'Pretranslate: batch completed, expandedTerms updated',
+          );
 
           // Update progress immediately after getting AI results (before saving to DB)
           // This shows real-time progress to the user
           batch.forEach((entry) => {
             const aiResult = resultMap.get(entry.segment.id);
-            const targetText = aiResult?.targetText ?? entry.segment.sourceText;
+            let targetText = aiResult?.targetText ?? entry.segment.sourceText;
+            targetText = applyTotalCyrillicBan(targetText, documentDnaPretranslate?.abbreviationLogic as Record<string, unknown> | null | undefined, document.targetLocale);
+            targetText = deduplicateFullFormDash(targetText, documentDnaPretranslate?.abbreviationLogic as Record<string, unknown> | null | undefined);
             // Add to pending updates
             pendingUpdates.push(
               prisma.segment.update({
@@ -3229,6 +3297,7 @@ export const pretranslateDocument = async (
             }, 'Pretranslation cancelled - stopping after saving current batch');
             break; // Exit loop, updates already saved
           }
+        }
         }
       }
     }
@@ -3413,6 +3482,357 @@ export const pretranslateDocument = async (
     setError(documentId, errorMessage);
     addLogMessage(documentId, `❌ Error: ${errorMessage}`);
     throw error;
+  }
+};
+
+/** Segment shape used for patch-translate queue (same as pretranslate AI phase). */
+type PatchTranslateEntry = {
+  segment: { id: string; sourceText: string; segmentIndex: number };
+  previous?: { sourceText: string } | null;
+  next?: { sourceText: string } | null;
+};
+
+/**
+ * Retranslate only the given segments (e.g. after DNA change). Uses same AI batch loop as
+ * pretranslate, with introducedAbbreviations computed from segments before the first affected.
+ */
+export const patchTranslate = async (
+  documentId: string,
+  affectedSegmentIds: string[],
+  options?: {
+    glossaryMode?: GlossaryMode;
+    useCritic?: boolean;
+    provider?: string;
+    model?: string;
+    temperature?: number;
+  },
+) => {
+  const glossaryMode = options?.glossaryMode ?? 'strict_source';
+  const { createProgress, updateProgress, addResult, completeProgress, cancelProgress, isCancelled, setError, clearProgress, addLogMessage } = await import('./pretranslateProgress');
+  clearProgress(documentId);
+
+  if (affectedSegmentIds.length === 0) {
+    return { documentId, aiApplied: 0, totalProcessed: 0, results: [] };
+  }
+
+  const document = await prisma.document.findUnique({
+    where: { id: documentId },
+    select: { id: true, name: true, projectId: true, sourceLocale: true, targetLocale: true },
+  });
+  if (!document) {
+    throw ApiError.notFound('Document not found');
+  }
+
+  const affectedSegments = await prisma.segment.findMany({
+    where: { id: { in: affectedSegmentIds }, documentId },
+    select: { id: true, sourceText: true, segmentIndex: true, targetMt: true, targetFinal: true, status: true },
+    orderBy: { segmentIndex: 'asc' },
+  });
+  if (affectedSegments.length !== affectedSegmentIds.length) {
+    throw ApiError.badRequest('One or more segment IDs do not belong to this document');
+  }
+
+  const minIndex = affectedSegments[0].segmentIndex;
+  const maxIndex = affectedSegments[affectedSegments.length - 1].segmentIndex;
+  const neighborSegments = await prisma.segment.findMany({
+    where: {
+      documentId,
+      segmentIndex: { gte: minIndex - 1, lte: maxIndex + 1 },
+    },
+    select: { id: true, sourceText: true, segmentIndex: true },
+    orderBy: { segmentIndex: 'asc' },
+  });
+  const segmentByIndex = new Map(neighborSegments.map((s) => [s.segmentIndex, s]));
+
+  const firstAffectedIndex = minIndex;
+  const documentDna = await getDocumentDna(documentId);
+  // Consistency: DNA snapshot is frozen for the entire patch run. Normalize once and use only this snapshot in the loop (no refetch).
+  const frozenDna = normalizeDocumentDnaPayloadOrNull(documentDna) ?? documentDna ?? null;
+  const cycleCheck = validateDnaForCycles(frozenDna);
+  if (!cycleCheck.valid) {
+    const msg = `Document DNA: ${cycleCheck.errors.join('; ')}`;
+    addLogMessage(documentId, `❌ ${msg}`);
+    setError(documentId, msg);
+    completeProgress(documentId);
+    return { documentId, aiApplied: 0, totalProcessed: 0, results: [] };
+  }
+  const knownAbbrevs = getKnownTargetAbbreviations((frozenDna?.abbreviationLogic as Record<string, unknown>) ?? undefined);
+  let introducedAbbreviations: string[] = [];
+  if (firstAffectedIndex > 0 && knownAbbrevs.length > 0) {
+    const segmentsBefore = await prisma.segment.findMany({
+      where: {
+        documentId,
+        segmentIndex: { lt: firstAffectedIndex },
+        OR: [{ targetFinal: { not: null } }, { targetMt: { not: null } }],
+      },
+      select: { targetFinal: true, targetMt: true },
+      orderBy: { segmentIndex: 'asc' },
+    });
+    const seen = new Set<string>();
+    const re = /\(([A-Z][A-Z0-9]{1,})\)/g;
+    for (const seg of segmentsBefore) {
+      const text = (seg.targetFinal ?? seg.targetMt) ?? '';
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text)) !== null) {
+        if (knownAbbrevs.includes(m[1]) && !seen.has(m[1])) {
+          seen.add(m[1]);
+          introducedAbbreviations.push(m[1]);
+        }
+      }
+    }
+  }
+
+  const queuedForAI: PatchTranslateEntry[] = [];
+  for (const segment of affectedSegments) {
+    const prev = segmentByIndex.get(segment.segmentIndex - 1);
+    const next = segmentByIndex.get(segment.segmentIndex + 1);
+    queuedForAI.push({
+      segment: { id: segment.id, sourceText: segment.sourceText, segmentIndex: segment.segmentIndex },
+      previous: prev ? { sourceText: prev.sourceText } : undefined,
+      next: next ? { sourceText: next.sourceText } : undefined,
+    });
+  }
+
+  const SAVE_BATCH_SIZE = 5;
+  let pendingUpdates: Prisma.PrismaPromise<unknown>[] = [];
+  const responseLog: Array<{ segmentId: string; method: 'ai'; targetMt: string | null; fuzzyScore?: number }> = [];
+
+  try {
+    const context = await buildAiContext(
+      document.projectId,
+      document.sourceLocale,
+      document.targetLocale,
+    );
+    const effectiveProvider = options?.provider || context.settings?.provider;
+    const effectiveModel = options?.model || context.settings?.model;
+    const effectiveTemperature = options?.temperature !== undefined
+      ? options.temperature
+      : (context.settings?.temperature ?? getDefaultTemperature(effectiveProvider || 'gemini'));
+    const hasAiConfig = context.settings || (options?.provider && options?.model);
+    const hasApiKey = !!context.apiKey || (effectiveProvider === 'yandex' && !!context.yandexFolderId);
+
+    createProgress(documentId, queuedForAI.length, {
+      provider: effectiveProvider,
+      model: effectiveModel,
+      configured: hasAiConfig && hasApiKey,
+    });
+    addLogMessage(documentId, `🚀 Patch translation: ${queuedForAI.length} segments`);
+    if (!effectiveProvider || !effectiveModel) {
+      addLogMessage(documentId, `⚠️ AI not configured. Patch translation requires AI.`);
+      completeProgress(documentId);
+      return { documentId, aiApplied: 0, totalProcessed: 0, results: responseLog };
+    }
+
+    const dnaValidation = validateDocumentDnaPayload(frozenDna ?? null);
+    if (!dnaValidation.valid) {
+      const msg = `Invalid Document DNA: ${dnaValidation.errors.join('; ')}`;
+      addLogMessage(documentId, `❌ ${msg}`);
+      setError(documentId, msg);
+      completeProgress(documentId);
+      throw new Error(msg);
+    }
+
+    const useCritic = options?.useCritic ?? false;
+    if (useCritic) {
+      addLogMessage(documentId, `🤖 Patch translate (Critic Mode) not implemented for batch; using batch mode.`);
+    }
+    updateProgress(documentId, {
+      currentPhase: 'ai_translation',
+      currentSegmentText: `Starting AI for ${queuedForAI.length} segments...`,
+      aiApplied: 0,
+      currentSegment: 0,
+    });
+
+    orchestrator.clearSessionState(document.id);
+    const batchSize = 10;
+    const aiConfig = {
+      provider: effectiveProvider!,
+      model: effectiveModel!,
+      apiKey: context.apiKey,
+      yandexFolderId: context.yandexFolderId,
+      temperature: effectiveTemperature,
+    };
+
+    for (let i = 0; i < queuedForAI.length; i += batchSize) {
+      if (isCancelled(documentId)) {
+        if (pendingUpdates.length > 0) {
+          await prisma.$transaction(pendingUpdates);
+          pendingUpdates = [];
+        }
+        break;
+      }
+      const batch = queuedForAI.slice(i, i + batchSize);
+      const batchNumber = Math.floor(i / batchSize) + 1;
+      const totalBatches = Math.ceil(queuedForAI.length / batchSize);
+      addLogMessage(documentId, `📦 Batch ${batchNumber}/${totalBatches} (${batch.length} segments)...`);
+
+      const orchestratorSegments = batch.map((entry) =>
+        buildOrchestratorSegment(entry.segment, entry.previous, entry.next, document.name ?? undefined),
+      );
+      updateProgress(documentId, {
+        currentSegment: i,
+        currentSegmentId: batch[0].segment.id,
+        currentSegmentText: batch[0].segment.sourceText.substring(0, 100) + (batch[0].segment.sourceText.length > 100 ? '...' : ''),
+        aiApplied: responseLog.length,
+      });
+
+      const documentContext: DocumentContext = {
+        projectDomain: context.projectMeta.domain,
+        projectClient: context.projectMeta.client,
+        documentName: document.name,
+        documentType: undefined,
+      };
+      const combinedSourceText = orchestratorSegments.map((s) => s.sourceText).join(' ');
+      const filteredGlossary = await getRelevantGlossaryEntries(
+        combinedSourceText,
+        document.sourceLocale,
+        document.targetLocale,
+        document.projectId,
+        documentContext,
+      );
+      const documentWithSummary = await prisma.document.findUnique({
+        where: { id: document.id },
+        select: { name: true, summary: true, clusterSummary: true },
+      });
+      const documentDnaPretranslate = frozenDna
+        ? {
+            technicalSchema: frozenDna.technicalSchema as Record<string, unknown> | null | undefined,
+            namingConventions: frozenDna.namingConventions as Record<string, unknown> | null | undefined,
+            abbreviationLogic: frozenDna.abbreviationLogic as Record<string, unknown> | null | undefined,
+            entityGroups: frozenDna.entityGroups as Record<string, unknown> | null | undefined,
+          }
+        : undefined;
+      const documentStyleRules = await getDocumentStyleRules(document.id);
+      const documentGlossaryMap = new Map<string, { sourceTerm: string; targetTerm: string; status: string; occurrenceCount: number }>();
+      for (const segment of orchestratorSegments) {
+        const matchingTerms = await getDocumentGlossaryForSegment(document.id, segment.sourceText);
+        for (const term of matchingTerms) {
+          const existing = documentGlossaryMap.get(term.sourceTerm);
+          if (!existing || term.status === 'PREFERRED' || (term.status === 'CANDIDATE' && existing.status !== 'PREFERRED')) {
+            documentGlossaryMap.set(term.sourceTerm, term);
+          }
+        }
+      }
+      const documentGlossary = Array.from(documentGlossaryMap.values())
+        .sort((a, b) => {
+          const statusPriority = { PREFERRED: 3, CANDIDATE: 2, DEPRECATED: 1 };
+          const aP = statusPriority[a.status as keyof typeof statusPriority] || 0;
+          const bP = statusPriority[b.status as keyof typeof statusPriority] || 0;
+          if (aP !== bP) return bP - aP;
+          return b.occurrenceCount - a.occurrenceCount;
+        })
+        .slice(0, 20)
+        .filter((term) => term.status !== 'DEPRECATED');
+
+      const aiResults = await orchestrator.translateSegments({
+        provider: aiConfig.provider,
+        model: aiConfig.model,
+        apiKey: context.apiKey,
+        yandexFolderId: context.yandexFolderId,
+        document: documentWithSummary
+          ? { name: documentWithSummary.name, summary: documentWithSummary.summary ?? undefined, clusterSummary: documentWithSummary.clusterSummary ?? undefined }
+          : undefined,
+        documentDna: documentDnaPretranslate,
+        segments: orchestratorSegments,
+        glossary: filteredGlossary,
+        guidelines: context.guidelines,
+        project: context.projectMeta,
+        sourceLocale: document.sourceLocale,
+        targetLocale: document.targetLocale,
+        temperature: aiConfig.temperature,
+        maxTokens: context.settings?.maxTokens ?? 1024,
+        glossaryMode,
+        documentGlossary: documentGlossary.length > 0 ? documentGlossary : undefined,
+        documentStyleRules: documentStyleRules.length > 0 ? documentStyleRules : undefined,
+        documentId: document.id,
+        introducedAbbreviations,
+      });
+
+      const knownAbbrevsBatch = getKnownTargetAbbreviations(documentDnaPretranslate?.abbreviationLogic ?? undefined);
+      if (knownAbbrevsBatch.length > 0) {
+        const newFromBatch = new Set<string>();
+        for (const r of aiResults) {
+          if (r.expandedTerms) for (const t of r.expandedTerms) newFromBatch.add(t);
+          const text = r.targetText ?? '';
+          const re = /\(([A-Z][A-Z0-9]{1,})\)/g;
+          let mm: RegExpExecArray | null;
+          while ((mm = re.exec(text)) !== null) {
+            if (knownAbbrevsBatch.includes(mm[1])) newFromBatch.add(mm[1]);
+          }
+        }
+        introducedAbbreviations = [...new Set([...introducedAbbreviations, ...newFromBatch])];
+      }
+
+      const resultMap = new Map(aiResults.map((r) => [r.segmentId, r]));
+      batch.forEach((entry) => {
+        const aiResult = resultMap.get(entry.segment.id);
+        let targetText = aiResult?.targetText ?? entry.segment.sourceText;
+        targetText = applyTotalCyrillicBan(targetText, documentDnaPretranslate?.abbreviationLogic as Record<string, unknown> | null | undefined, document.targetLocale);
+        targetText = deduplicateFullFormDash(targetText, documentDnaPretranslate?.abbreviationLogic as Record<string, unknown> | null | undefined);
+        pendingUpdates.push(
+          prisma.segment.update({
+            where: { id: entry.segment.id },
+            data: {
+              targetMt: targetText,
+              targetFinal: targetText,
+              fuzzyScore: aiResult ? Math.round((aiResult.confidence ?? 0.85) * 100) : null,
+              bestTmEntryId: null,
+              status: 'MT',
+              ...(aiResult && {
+                mtFullPrompt: aiResult.fullPrompt ?? undefined,
+                mtAnalysis: aiResult.analysis ?? undefined,
+              }),
+            },
+          }),
+        );
+        const result = {
+          segmentId: entry.segment.id,
+          method: 'ai' as const,
+          targetMt: targetText,
+          fuzzyScore: aiResult ? Math.round((aiResult.confidence ?? 0.85) * 100) : undefined,
+        };
+        responseLog.push(result);
+        addResult(documentId, result);
+      });
+
+      const currentAiCount = responseLog.length;
+      updateProgress(documentId, {
+        aiApplied: currentAiCount,
+        currentSegment: currentAiCount,
+        currentSegmentText: `Batch ${batchNumber}/${totalBatches} done: ${currentAiCount} segments`,
+      });
+      addLogMessage(documentId, `✅ Batch ${batchNumber}/${totalBatches} complete (${currentAiCount} total)`);
+
+      if (pendingUpdates.length > 0) {
+        await prisma.$transaction(pendingUpdates);
+        pendingUpdates = [];
+      }
+      if (isCancelled(documentId)) break;
+    }
+
+    if (pendingUpdates.length > 0) {
+      await prisma.$transaction(pendingUpdates);
+      pendingUpdates = [];
+    }
+    const aiApplied = responseLog.length;
+    completeProgress(documentId);
+    addLogMessage(documentId, `🎉 Patch translation complete: ${aiApplied} segments updated`);
+    return { documentId, aiApplied, totalProcessed: aiApplied, results: responseLog };
+  } catch (err: unknown) {
+    if (pendingUpdates.length > 0) {
+      try {
+        await prisma.$transaction(pendingUpdates);
+        pendingUpdates = [];
+      } catch (_) {}
+    }
+    const message = err instanceof Error ? err.message : 'Unknown error';
+    setError(documentId, message);
+    addLogMessage(documentId, `❌ ${message}`);
+    if (isCancelled(documentId)) {
+      cancelProgress(documentId);
+      return { documentId, aiApplied: responseLog.length, totalProcessed: responseLog.length, results: responseLog };
+    }
+    throw err;
   }
 };
 

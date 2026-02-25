@@ -72,6 +72,20 @@ export type TranslateSegmentsOptions = {
   introducedAbbreviations?: string[];
 };
 
+/**
+ * Value shape for abbreviationLogic entries (documented; runtime uses Record<string, unknown>).
+ * - string: "Full Name (ABBR)" or "ABBR"
+ * - { value: string }: same as above
+ * - { longForm?: string; shortForm?: string }: explicit first mention (longForm) vs subsequent (shortForm)
+ * - { aliases?: string[] }: optional variants (case/typo) for matching; resolves to same longForm/shortForm
+ */
+export type AbbreviationLogicValue = string | {
+  value?: string;
+  longForm?: string;
+  shortForm?: string;
+  aliases?: string[];
+};
+
 /** Document DNA payload: technical schema, naming, abbreviations, entity groups (1:1 per document) */
 export type DocumentDnaPayload = {
   technicalSchema?: Record<string, unknown> | null;
@@ -105,10 +119,12 @@ export type OrchestratorResult = {
   fullPrompt?: string;
   /** Brief analysis from the model (e.g. "legal term", "past tense"). */
   analysis?: string;
+  /** Abbreviation codes the model expanded for the first time in this segment (Full Name (ABBR)); used to update alreadyExpanded for next segments. */
+  expandedTerms?: string[];
 };
 
 // Re-export types for external use
-export type { ProviderUsage, TranslationProvider };
+export type { ProviderUsage };
 
 
 

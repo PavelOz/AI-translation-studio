@@ -10,11 +10,16 @@ import { importDocumentFile, exportDocumentFile } from '../services/file.service
 import { exportDocumentToTmx } from '../services/tmx.service';
 import { ApiError } from '../utils/apiError';
 import { logger } from '../utils/logger';
-import { getDocumentSegments } from '../services/segment.service';
-import { runDocumentMachineTranslation, pretranslateDocument } from '../services/ai.service';
+import { getDocumentSegments, findSegmentIdsContainingTerms } from '../services/segment.service';
+import { runDocumentMachineTranslation, pretranslateDocument, patchTranslate } from '../services/ai.service';
 import { getDocumentMetricsSummary, runDocumentQualityCheck } from '../services/quality.service';
 import { getProgress, cancelProgress, clearProgress } from '../services/pretranslateProgress';
 import { runFullAnalysis, getAnalysisResults, cancelAnalysis, resetAnalysisStatus, getStageMonitoringData, listDocumentGlossary, updateDocumentGlossaryEntry, translateSingleTerm, getDocumentDna, updateDocumentDna, generateDocumentDna, refineDocumentDna } from '../services/analysis.service';
+import { validateDocumentDnaPayload } from '../services/dnaValidation';
+import { normalizeAbbreviationLogic } from '../services/abbreviationLogicNormalize';
+import { computeDnaDelta } from '../services/dnaDiff';
+import { normalizeDocumentDnaPayload, sanitizeDocumentDnaPayloadForPut } from '../services/dnaSchema';
+import { validateDnaForCycles } from '../services/dnaValidation';
 import { getProfile } from '../services/profile.service';
 
 // Configure multer to preserve UTF-8 encoding for filenames (including Cyrillic)
@@ -63,6 +68,14 @@ const pretranslateSchema = z.object({
   model: z.string().optional(), // Override project AI model
   temperature: z.number().min(0).max(1).optional(), // Override AI temperature
   skipTm: z.boolean().optional(), // Skip Phase 1 (TM matching)
+});
+
+const patchTranslateSchema = z.object({
+  segmentIds: z.array(z.string().uuid()),
+  glossaryMode: z.enum(['off', 'strict_source', 'strict_semantic']).optional(),
+  provider: z.enum(['gemini', 'openai', 'yandex', 'deepseek']).optional(),
+  model: z.string().optional(),
+  temperature: z.number().min(0).max(1).optional(),
 });
 
 const uploadSchema = z.object({
@@ -215,6 +228,27 @@ documentRoutes.post(
       });
     // Return immediately with status
     res.json({ status: 'started', documentId: req.params.documentId });
+  }),
+);
+
+documentRoutes.post(
+  '/:documentId/patch-translate',
+  asyncHandler(async (req, res) => {
+    const payload = patchTranslateSchema.parse(req.body);
+    const documentId = req.params.documentId;
+    const { clearProgress } = await import('../services/pretranslateProgress');
+    clearProgress(documentId);
+    patchTranslate(documentId, payload.segmentIds, {
+      glossaryMode: payload.glossaryMode ?? 'strict_source',
+      provider: payload.provider,
+      model: payload.model,
+      temperature: payload.temperature,
+    })
+      .then(() => {})
+      .catch((error) => {
+        console.error('Patch translation error:', error);
+      });
+    res.json({ status: 'started', documentId });
   }),
 );
 
@@ -417,25 +451,77 @@ const documentDnaSchema = z.object({
   namingConventions: z.record(z.string(), z.unknown()).nullable().optional(),
   abbreviationLogic: z.record(z.string(), z.unknown()).nullable().optional(),
   entityGroups: z.record(z.string(), z.unknown()).nullable().optional(),
-});
+}).refine(
+  (data) => {
+    if (data.abbreviationLogic && typeof data.abbreviationLogic === 'object') {
+      return !Object.keys(data.abbreviationLogic).some((k) => k === '' || /^\s+$/.test(k));
+    }
+    return true;
+  },
+  { message: 'abbreviationLogic must not have empty or whitespace-only keys' },
+);
 
 documentRoutes.get(
   '/:documentId/dna',
   asyncHandler(async (req, res) => {
     const dna = await getDocumentDna(req.params.documentId);
     if (dna === null) {
-      return res.status(404).json({ error: 'Document DNA not found. Run analysis or regenerate after import.' });
+      res.status(404).json({ error: 'Document DNA not found. Run analysis or regenerate after import.' });
+      return;
     }
     res.json(dna);
+  }),
+);
+
+documentRoutes.get(
+  '/:documentId/dna/validate',
+  asyncHandler(async (req, res) => {
+    const dna = await getDocumentDna(req.params.documentId);
+    const result = validateDocumentDnaPayload(dna ?? null);
+    const abbreviationCount = dna?.abbreviationLogic && typeof dna.abbreviationLogic === 'object'
+      ? Object.keys(dna.abbreviationLogic).length
+      : 0;
+    res.json({ valid: result.valid, errors: result.errors, abbreviationCount });
   }),
 );
 
 documentRoutes.put(
   '/:documentId/dna',
   asyncHandler(async (req, res) => {
-    const payload = documentDnaSchema.parse(req.body);
-    const updated = await updateDocumentDna(req.params.documentId, payload);
-    res.json(updated);
+    const parsed = documentDnaSchema.safeParse(req.body);
+    if (!parsed.success) {
+      const issues = parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`);
+      res.status(400).json({ error: 'Invalid Document DNA payload', details: issues });
+      return;
+    }
+    const sanitized = sanitizeDocumentDnaPayloadForPut(parsed.data as Record<string, unknown>);
+    let normalized: ReturnType<typeof normalizeDocumentDnaPayload>;
+    try {
+      normalized = normalizeDocumentDnaPayload(sanitized);
+    } catch (err: any) {
+      res.status(400).json({ error: 'Invalid Document DNA structure', details: [err?.message ?? String(err)] });
+      return;
+    }
+    const cycleCheck = validateDnaForCycles(normalized);
+    if (!cycleCheck.valid) {
+      res.status(400).json({ error: 'Document DNA recursion risk', details: cycleCheck.errors });
+      return;
+    }
+    const documentId = req.params.documentId;
+    const previousDna = await getDocumentDna(documentId);
+    const updated = await updateDocumentDna(documentId, normalized);
+    const delta = computeDnaDelta(previousDna, normalized);
+    const termsForLookup = [...delta.addedKeys, ...delta.changedKeys];
+    const affectedSegments = termsForLookup.length > 0
+      ? await findSegmentIdsContainingTerms(documentId, termsForLookup)
+      : [];
+    const affectedSegmentIds = [...new Set(affectedSegments.map((s) => s.id))];
+    res.json({
+      ...updated,
+      affectedSegmentIds,
+      affectedCount: affectedSegmentIds.length,
+      delta: { addedKeys: delta.addedKeys, changedKeys: delta.changedKeys, removedKeys: delta.removedKeys },
+    });
   }),
 );
 
@@ -453,6 +539,24 @@ documentRoutes.post(
     const preview = req.body && typeof req.body === 'object' && req.body.preview === true;
     const dna = await refineDocumentDna(req.params.documentId, { preview });
     res.json(dna);
+  }),
+);
+
+documentRoutes.post(
+  '/:documentId/dna/normalize',
+  asyncHandler(async (req, res) => {
+    const dna = await getDocumentDna(req.params.documentId);
+    if (!dna) {
+      res.status(404).json({ error: 'Document has no DNA. Regenerate or create DNA first.' });
+      return;
+    }
+    const abbrev = dna.abbreviationLogic && typeof dna.abbreviationLogic === 'object' ? dna.abbreviationLogic : {};
+    const normalized = normalizeAbbreviationLogic(abbrev);
+    const updated = await updateDocumentDna(req.params.documentId, {
+      ...dna,
+      abbreviationLogic: Object.keys(normalized).length > 0 ? normalized : dna.abbreviationLogic,
+    });
+    res.json(updated);
   }),
 );
 

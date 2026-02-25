@@ -3,6 +3,7 @@ import { useParams, Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { documentsApi } from '../api/documents.api';
 import { segmentsApi } from '../api/segments.api';
+import { analysisApi } from '../api/analysis.api';
 import SegmentEditor from '../components/editor/SegmentEditor';
 import EditorToolbar from '../components/editor/EditorToolbar';
 import SidebarTabs from '../components/editor/SidebarTabs';
@@ -77,6 +78,14 @@ export default function EditorPage() {
       return segmentsApi.list(documentId!, segmentsPage, SEGMENTS_PAGE_SIZE);
     },
     enabled: !!documentId,
+  });
+
+  // Load latest Document DNA when opening the document (shared cache with AnalysisSidebar)
+  useQuery({
+    queryKey: ['document-dna', documentId],
+    queryFn: () => analysisApi.getDocumentDna(documentId!),
+    enabled: !!documentId,
+    retry: false,
   });
 
   // Track loading progress with detailed stages

@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { Link } from 'react-router-dom';
-import { analysisApi, type AnalysisResults, type AnalysisStatus, type DocumentDnaPayload } from '../api/analysis.api';
+import { analysisApi, type AnalysisResults, type AnalysisStatus, type DocumentDnaPayload, type UpdateDocumentDnaResponse } from '../api/analysis.api';
 import { documentsApi } from '../api/documents.api';
 import toast from 'react-hot-toast';
+import { DocumentDnaEditor } from './DocumentDnaEditor';
 
 interface AnalysisSidebarProps {
   documentId: string;
@@ -1054,11 +1055,21 @@ function DnaDiffView({
 
 function DocumentDnaBlock({ documentId }: { documentId: string }) {
   const queryClient = useQueryClient();
-  const [editing, setEditing] = useState(false);
+  const [editingMode, setEditingMode] = useState<null | 'json' | 'form'>(null);
+  const [dnaDraft, setDnaDraft] = useState<DocumentDnaPayload | null>(null);
   const [editJson, setEditJson] = useState('');
   const [comparisonMode, setComparisonMode] = useState(false);
   const [draftDna, setDraftDna] = useState<DocumentDnaPayload | null>(null);
   const [refinedDna, setRefinedDna] = useState<DocumentDnaPayload | null>(null);
+  const [lastSaveAffected, setLastSaveAffected] = useState<{ affectedCount: number; affectedSegmentIds: string[] } | null>(null);
+  const [patchProgress, setPatchProgress] = useState<{
+    status: 'running' | 'completed' | 'cancelled' | 'error';
+    currentSegment: number;
+    totalSegments: number;
+    aiApplied: number;
+    error?: string;
+  } | null>(null);
+  const patchPollRef = useRef<NodeJS.Timeout | null>(null);
 
   const { data: dna, isLoading: dnaLoading, refetch: refetchDna } = useQuery({
     queryKey: ['document-dna', documentId],
@@ -1094,23 +1105,38 @@ function DocumentDnaBlock({ documentId }: { documentId: string }) {
 
   const saveMutation = useMutation({
     mutationFn: (payload: DocumentDnaPayload) => analysisApi.updateDocumentDna(documentId, payload),
-    onSuccess: () => {
+    onSuccess: (data: UpdateDocumentDnaResponse) => {
       toast.success('Document DNA saved');
-      setEditing(false);
+      setEditingMode(null);
+      setDnaDraft(null);
       setComparisonMode(false);
       setRefinedDna(null);
       setDraftDna(null);
+      const count = data.affectedCount ?? 0;
+      const ids = data.affectedSegmentIds ?? [];
+      if (count > 0 && ids.length > 0) {
+        setLastSaveAffected({ affectedCount: count, affectedSegmentIds: ids });
+      } else {
+        setLastSaveAffected(null);
+      }
       queryClient.invalidateQueries({ queryKey: ['document-dna', documentId] });
       refetchDna();
     },
     onError: (err: any) => {
-      toast.error(err?.response?.data?.message || err?.message || 'Failed to save');
+      const data = err?.response?.data;
+      const msg = data?.error || data?.message || err?.message || 'Failed to save';
+      const details = Array.isArray(data?.details) ? data.details.join('; ') : data?.details;
+      toast.error(details ? `${msg}: ${details}` : msg);
     },
   });
 
-  const handleStartEdit = () => {
+  const handleStartEditJson = () => {
     setEditJson(JSON.stringify(dna ?? {}, null, 2));
-    setEditing(true);
+    setEditingMode('json');
+  };
+  const handleStartEditForm = () => {
+    setDnaDraft(dna ?? {});
+    setEditingMode('form');
   };
 
   const handleSaveEdit = () => {
@@ -1124,6 +1150,61 @@ function DocumentDnaBlock({ documentId }: { documentId: string }) {
 
   const handleAcceptRefinement = () => {
     if (refinedDna) saveMutation.mutate(refinedDna);
+  };
+
+  const handleRetranslateAffected = async () => {
+    if (!lastSaveAffected?.affectedSegmentIds?.length) return;
+    setPatchProgress({ status: 'running', currentSegment: 0, totalSegments: lastSaveAffected.affectedCount, aiApplied: 0 });
+    try {
+      await documentsApi.patchTranslate(documentId, lastSaveAffected.affectedSegmentIds);
+    } catch (err: any) {
+      setPatchProgress((p) => (p ? { ...p, status: 'error' as const, error: err?.response?.data?.message || err?.message || 'Failed to start' } : null));
+      toast.error(err?.response?.data?.message || err?.message || 'Failed to start retranslation');
+      return;
+    }
+  };
+
+  useEffect(() => {
+    if (patchProgress?.status !== 'running') return;
+    const poll = async () => {
+      try {
+        const p = await documentsApi.getPretranslateProgress(documentId);
+        setPatchProgress({
+          status: p.status,
+          currentSegment: p.currentSegment,
+          totalSegments: p.totalSegments,
+          aiApplied: p.aiApplied,
+          error: p.error,
+        });
+        if (p.status === 'completed') {
+          toast.success(`Retranslated ${p.aiApplied} segments`);
+          setLastSaveAffected(null);
+          setPatchProgress(null);
+          queryClient.invalidateQueries({ queryKey: ['document-segments', documentId] });
+        } else if (p.status === 'error' && p.error) {
+          toast.error(p.error);
+        } else if (p.status === 'cancelled') {
+          toast('Retranslation cancelled');
+          setPatchProgress(null);
+        }
+      } catch {
+        // keep polling
+      }
+    };
+    const id = setInterval(poll, 1500);
+    patchPollRef.current = id;
+    return () => {
+      if (patchPollRef.current) clearInterval(patchPollRef.current);
+      patchPollRef.current = null;
+    };
+  }, [documentId, patchProgress?.status, queryClient]);
+
+  const cancelPatchTranslate = async () => {
+    try {
+      await documentsApi.cancelPretranslate(documentId);
+    } catch {
+      // ignore
+    }
   };
 
   const hasData = dna && (
@@ -1174,7 +1255,32 @@ function DocumentDnaBlock({ documentId }: { documentId: string }) {
       </p>
       {dnaLoading ? (
         <div className="text-xs text-gray-500">Loading...</div>
-      ) : editing ? (
+      ) : editingMode === 'form' ? (
+        <div className="space-y-2">
+          <DocumentDnaEditor
+            dna={dnaDraft}
+            onChange={setDnaDraft}
+            disabled={saveMutation.isLoading}
+          />
+          <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => dnaDraft && saveMutation.mutate(dnaDraft)}
+              disabled={saveMutation.isLoading || !dnaDraft}
+              className="btn btn-primary text-sm"
+            >
+              {saveMutation.isLoading ? 'Saving...' : 'Save'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { setEditingMode(null); setDnaDraft(null); }}
+              className="btn btn-secondary text-sm"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : editingMode === 'json' ? (
         <div className="space-y-2">
           <textarea
             value={editJson}
@@ -1193,7 +1299,7 @@ function DocumentDnaBlock({ documentId }: { documentId: string }) {
             </button>
             <button
               type="button"
-              onClick={() => setEditing(false)}
+              onClick={() => setEditingMode(null)}
               className="btn btn-secondary text-sm"
             >
               Cancel
@@ -1232,23 +1338,25 @@ function DocumentDnaBlock({ documentId }: { documentId: string }) {
           )}
         </div>
       )}
-      {!editing && (
-        <div className="flex gap-2 flex-wrap">
+      {!editingMode && (
+        <div className="flex gap-2 flex-wrap items-center">
           {hasData && (
-            <>
-              <button type="button" onClick={handleStartEdit} className="text-xs text-blue-600 hover:underline">
-                Edit JSON
-              </button>
-              <button
-                type="button"
-                onClick={() => refineMutation.mutate()}
-                disabled={refineMutation.isLoading}
-                className="text-xs text-blue-600 hover:underline disabled:opacity-50"
-              >
-                {refineMutation.isLoading ? 'Refining...' : 'Refine & Compare'}
-              </button>
-            </>
+            <button
+              type="button"
+              onClick={() => refineMutation.mutate()}
+              disabled={refineMutation.isLoading}
+              className="btn btn-primary text-sm disabled:opacity-50"
+              title="Re-analyze existing DNA against full document text (AI revision)"
+            >
+              {refineMutation.isLoading ? 'Refining...' : 'Refine with AI'}
+            </button>
           )}
+          <button type="button" onClick={handleStartEditForm} className="text-xs text-blue-600 hover:underline">
+            Safe edit
+          </button>
+          <button type="button" onClick={handleStartEditJson} className="text-xs text-gray-600 hover:underline">
+            Edit JSON
+          </button>
           <button
             type="button"
             onClick={() => regenerateMutation.mutate()}
@@ -1258,6 +1366,29 @@ function DocumentDnaBlock({ documentId }: { documentId: string }) {
             {regenerateMutation.isLoading ? 'Regenerating...' : 'Regenerate'}
           </button>
         </div>
+      )}
+      {lastSaveAffected && lastSaveAffected.affectedCount > 0 && patchProgress?.status !== 'running' && (
+        <div className="mt-3 p-2 bg-amber-50 border border-amber-200 rounded text-xs">
+          <p className="text-amber-800 mb-1">DNA changed. {lastSaveAffected.affectedCount} segments affected.</p>
+          <button
+            type="button"
+            onClick={handleRetranslateAffected}
+            className="btn btn-primary text-sm"
+          >
+            Retranslate only these
+          </button>
+        </div>
+      )}
+      {patchProgress?.status === 'running' && (
+        <div className="mt-3 p-2 bg-blue-50 border border-blue-200 rounded text-xs">
+          <p className="text-blue-800">Retranslating… {patchProgress.aiApplied}/{patchProgress.totalSegments}</p>
+          <button type="button" onClick={cancelPatchTranslate} className="mt-1 text-blue-600 hover:underline">
+            Cancel
+          </button>
+        </div>
+      )}
+      {patchProgress?.status === 'error' && patchProgress.error && (
+        <p className="mt-2 text-xs text-red-600">{patchProgress.error}</p>
       )}
     </div>
   );

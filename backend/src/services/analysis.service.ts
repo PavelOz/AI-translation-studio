@@ -2,7 +2,15 @@ import { prisma } from '../db/prisma';
 import { ApiError } from '../utils/apiError';
 import { logger } from '../utils/logger';
 import { getLanguageName } from '../utils/languages';
+import {
+  buildDnaGenerateSystemPrompt,
+  buildDnaGenerateUserPrompt,
+  buildDnaRefineSystemPrompt,
+  buildDnaRefineUserPrompt,
+  getTranslationDirection,
+} from './dnaPrompts';
 import { stripFormattingTags } from '../utils/segmentation';
+import { normalizeDocumentDnaPayload } from './dnaSchema';
 import { Prisma } from '@prisma/client';
 // @ts-ignore - compromise doesn't have TypeScript types
 import nlp from 'compromise';
@@ -5532,71 +5540,26 @@ export const generateDocumentDna = async (
   const targetLocale = document.targetLocale || 'en';
   const sourceLangHint = getLanguageName(sourceLocale);
   const targetLangHint = getLanguageName(targetLocale);
+  const direction = getTranslationDirection(sourceLocale, targetLocale);
+  logger.info({ documentId, direction, sourceLocale, targetLocale }, 'Document DNA: building prompt for direction');
 
-  const expertRoleLine = profile
-    ? `You are a ${profile.expertRole}. Your task is to analyze the provided document sample and produce a structured "Document DNA" JSON that will be used as a PROJECT KNOWLEDGE BASE for translation. Identify technical terms and provide translations from ${sourceLocale} (${sourceLangHint}) to ${targetLocale} (${targetLangHint}).`
-    : `You are a Lead technical engineer with expertise in international standards and terminology. Your task is to analyze the provided document sample and produce a structured "Document DNA" JSON that will be used as a PROJECT KNOWLEDGE BASE for translation. Identify technical terms and provide translations from ${sourceLocale} (${sourceLangHint}) to ${targetLocale} (${targetLangHint}).`;
-
-  const profileTerminologyBlock =
-    profile?.terminologyJSON != null
-      ? `\n\nBASE TERMINOLOGY (from profile "${profile.name}" – merge with document findings):\n${typeof profile.terminologyJSON === 'string' ? profile.terminologyJSON : JSON.stringify(profile.terminologyJSON, null, 2)}`
-      : '';
-
-  const profileInstructionsBlock =
-    profile?.instructions?.trim()
-      ? `\n\nPRIORITY RULES (from profile – apply these first):\n${profile.instructions}`
-      : '';
-
-  const isSourceRussian = sourceLocale.toLowerCase().startsWith('ru');
-  const isTargetEnglish = targetLocale.toLowerCase().startsWith('en');
-  const ruEnSubstationBlock = isSourceRussian && isTargetEnglish ? `
-SUBSTATION TOPOLOGY (apply when the document describes switchgear, substations, or power equipment):
-- РУ / Switchgear → bays (not "cells"). Ячейка / ЯЧ → Bay (never "Cell" in substation context).
-- Шина / СШ → Busbar. Секция шин → Busbar section.
-- ШСВ → Bus Tie Breaker (BTB). ОВ → Bypass Breaker. В / Выключатель → Circuit Breaker (CB).
-- ТН → Voltage Transformer (VT). ТТ → Current Transformer (CT). ОПН → Surge Arrester (SA).
-- Use IEC/IEEE standard abbreviations in abbreviationLogic (VT, CT, SA, BTB, CB, etc.).
-` : '';
-  const phaseLettersRule = isSourceRussian && isTargetEnglish
-    ? ` When the source uses Cyrillic phase letters, include this MANDATORY rule: "phaseLetters": "Phases indicated by Cyrillic letters (А, В, С, etc.) must ALWAYS be converted to Latin (A, B, C) in the target text."`
-    : ' Document phase names, type labels, symbols, and units in both source and target where relevant.';
-
-  const defaultKnowledgeBlock = `
-
-DEFAULT KNOWLEDGE (combine with profile and document sample when applicable):
-${ruEnSubstationBlock}
-BILINGUAL REQUIREMENT: The DNA must serve the TRANSLATOR. For each abbreviation or term in the SOURCE language (${sourceLangHint}), provide the correct TARGET language (${targetLangHint}) technical equivalent so the translator can substitute it directly. Keys in abbreviationLogic/namingConventions must be in the SOURCE language; values must be in the TARGET language.
-
-Extract and return ONLY a valid JSON object with exactly these four top-level keys (each can be an object or null if not applicable):
-
-1. "technicalSchema" – Domain/object types and structure. Where the source uses local terms, include the ${targetLangHint} equivalent (e.g. source term → target term).
-
-2. "namingConventions" – Rules for naming and notation.${phaseLettersRule}
-
-3. "abbreviationLogic" – SOURCE-language abbreviation or term (key) → TARGET-language value (${targetLangHint}) for SUBSTITUTION. The value must be ONLY what should appear in the target text. Never put the source abbreviation inside the value. Prefer standard abbreviations in the target language where applicable.
-
-4. "entityGroups" – Groupings of term variations and synonyms; prefer ${targetLangHint} canonical form as the main value where applicable.
-
-DOMAIN HEURISTICS (apply automatically from document context):
-- Electrical/Power/Substation: use IEC/IEEE terminology; abbreviationLogic must use standard target-language abbreviations.
-- Legal/Contract: use conventional legal style in the target language; entityGroups and namingConventions should reflect legal terminology.
-
-CRITICAL:
-- Return ONLY the JSON object. No markdown code blocks, no explanation before or after.
-- Use null for any key where you cannot infer meaningful content.
-- Keys in abbreviationLogic and namingConventions must be in the SOURCE language (${sourceLangHint}); values must be in the TARGET language (${targetLangHint}) so the translator can paste them into the target text.`;
-
-  const systemPrompt =
-    expertRoleLine + profileTerminologyBlock + profileInstructionsBlock + defaultKnowledgeBlock;
-
-  const userPrompt = `Document name: "${document.name}"
-Translation direction: from ${sourceLocale} (${sourceLangHint}) to ${targetLocale} (${targetLangHint}). Identify technical terms and provide translations from ${sourceLocale} to ${targetLocale}. All abbreviation expansions and terminology values in the DNA must be in the target language (${targetLangHint}).
-
-Analyze the following document sample and produce the Document DNA JSON (technicalSchema, namingConventions, abbreviationLogic, entityGroups):
-
---- BEGIN SAMPLE ---
-${textToAnalyze}
---- END SAMPLE ---`;
+  const systemPrompt = buildDnaGenerateSystemPrompt({
+    sourceLocale,
+    targetLocale,
+    sourceLangHint,
+    targetLangHint,
+    profile,
+    profileContext: profile?.name,
+  });
+  const userPrompt = buildDnaGenerateUserPrompt({
+    sourceLocale,
+    targetLocale,
+    sourceLangHint,
+    targetLangHint,
+    profile,
+    documentName: document.name,
+    textToAnalyze,
+  });
 
   const { getProvider } = await import('../ai/providers/registry');
   const { getProjectAISettings } = await import('./ai.service');
@@ -5745,18 +5708,6 @@ export const updateDocumentDna = async (
   return updated ?? payload;
 };
 
-const REFINE_DNA_SYSTEM_PROMPT = `You are the Document DNA Revisor. Your task is to enrich the JSON using the full document text.
-
-1. SCAN: Scan the entire document text for definitions of any remaining null or unclear terms in the JSON. Use explicit definitions, parenthetical explanations, table headers, and lists.
-
-2. TRANSLATE: Translate any source-language terms you find into the TARGET language indicated in the user message, using "Golden DNA" style and precision (e.g. preserve domain distinctions like flow vs bias). Keep keys in the SOURCE language and values in the TARGET language. Maintain consistency with existing fields in the JSON.
-
-3. PRIORITY RULES: If a term in the text has a unique definition (e.g. an acronym expanded only in this document), record it in abbreviationLogic or namingConventions as a priority translation rule so the translator uses it.
-
-4. FILL NULLS: Fill all nulls in technicalSchema, namingConventions, abbreviationLogic, and entityGroups using evidence from the text only. Do not invent terms.
-
-Return ONLY valid JSON with keys: technicalSchema, namingConventions, abbreviationLogic, entityGroups. No markdown, no commentary.`;
-
 /**
  * Refine Document DNA: review current DNA against full document text, fix term inaccuracies and fill nulls.
  * Uses project AI settings. Requires existing DNA in DB.
@@ -5798,18 +5749,15 @@ export const refineDocumentDna = async (
 
   const sourceLocale = document.sourceLocale || 'en';
   const targetLocale = document.targetLocale || 'en';
-  const userPrompt = `Document: "${document.name}"
-Translation direction: from ${sourceLocale} to ${targetLocale}. Keys in JSON must be in source language; values in target language.
 
-Current Document DNA (JSON):
-${dnaJson}
-
-Document text (or stratified sample):
---- BEGIN TEXT ---
-${textToUse}
---- END TEXT ---
-
-Review the JSON against the document, fix terms and fill nulls. Return only the corrected JSON with keys: technicalSchema, namingConventions, abbreviationLogic, entityGroups.`;
+  const systemPromptRefine = buildDnaRefineSystemPrompt({ sourceLocale, targetLocale });
+  const userPromptRefine = buildDnaRefineUserPrompt({
+    sourceLocale,
+    targetLocale,
+    documentName: document.name,
+    currentDnaJson: dnaJson,
+    textToUse,
+  });
 
   const { getProvider } = await import('../ai/providers/registry');
   const { getProjectAISettings } = await import('./ai.service');
@@ -5834,8 +5782,8 @@ Review the JSON against the document, fix terms and fill nulls. Return only the 
     (providerName === 'openai' ? 'gpt-4o' : providerName === 'gemini' ? 'gemini-1.5-pro' : provider.defaultModel);
 
   const response = await provider.callModel({
-    prompt: userPrompt,
-    systemPrompt: REFINE_DNA_SYSTEM_PROMPT,
+    prompt: userPromptRefine,
+    systemPrompt: systemPromptRefine,
     model,
     temperature: 0.2,
     maxTokens: 4096,
@@ -5843,7 +5791,10 @@ Review the JSON against the document, fix terms and fill nulls. Return only the 
   });
 
   const rawText = (response.outputText || '').trim();
-  const cleaned = cleanJsonOutput(rawText);
+  // Revisor may output DRAFT then "FINAL JSON:" + JSON; extract JSON part for parsing
+  const finalJsonMarker = /FINAL JSON:\s*/i;
+  const jsonPart = finalJsonMarker.test(rawText) ? rawText.replace(/^[\s\S]*?FINAL JSON:\s*/i, '').trim() : rawText;
+  const cleaned = cleanJsonOutput(jsonPart);
   let payload: DocumentDnaPayload = {};
   try {
     const parsed = JSON.parse(cleaned);
@@ -5861,8 +5812,15 @@ Review the JSON against the document, fix terms and fill nulls. Return only the 
   }
 
   if (options?.preview) {
-    logger.info({ documentId }, 'Document DNA refined (preview only, not saved)');
-    return payload;
+    // Return normalized payload so "Accept Refinement" (PUT /dna) always receives a valid shape.
+    try {
+      const normalized = normalizeDocumentDnaPayload(payload);
+      logger.info({ documentId }, 'Document DNA refined (preview only, not saved)');
+      return normalized;
+    } catch (normErr: any) {
+      logger.warn({ documentId, error: normErr?.message }, 'Refine DNA normalization failed; returning raw payload');
+      return payload;
+    }
   }
 
   const toJson = (v: Record<string, unknown> | null | undefined): Prisma.InputJsonValue | undefined =>

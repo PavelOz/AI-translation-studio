@@ -137,6 +137,45 @@ export const getDocumentSegments = async (documentId: string, page = 1, pageSize
   };
 };
 
+const PAGINATED_SCAN_PAGE_SIZE = 10000;
+
+/**
+ * Find segment ids and segmentIndex for segments whose sourceText contains any of the given terms (case-insensitive).
+ * Uses paginated scan for large documents to avoid huge queries.
+ */
+export const findSegmentIdsContainingTerms = async (
+  documentId: string,
+  terms: string[],
+): Promise<Array<{ id: string; segmentIndex: number }>> => {
+  if (terms.length === 0) return [];
+  const normalizedTerms = terms.map((t) => t.trim().toLowerCase()).filter(Boolean);
+  if (normalizedTerms.length === 0) return [];
+
+  const result: Array<{ id: string; segmentIndex: number }> = [];
+  let skip = 0;
+
+  while (true) {
+    const chunk = await prisma.segment.findMany({
+      where: { documentId },
+      orderBy: { segmentIndex: 'asc' },
+      skip,
+      take: PAGINATED_SCAN_PAGE_SIZE,
+      select: { id: true, segmentIndex: true, sourceText: true },
+    });
+    if (chunk.length === 0) break;
+    for (const seg of chunk) {
+      const lower = (seg.sourceText ?? '').toLowerCase();
+      if (normalizedTerms.some((t) => lower.includes(t))) {
+        result.push({ id: seg.id, segmentIndex: seg.segmentIndex });
+      }
+    }
+    if (chunk.length < PAGINATED_SCAN_PAGE_SIZE) break;
+    skip += PAGINATED_SCAN_PAGE_SIZE;
+  }
+
+  return result;
+};
+
 export const updateSegment = async (segmentId: string, data: SegmentUpdateInput) => {
   const segment = await prisma.segment.findUnique({
     where: { id: segmentId },

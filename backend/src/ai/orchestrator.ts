@@ -32,8 +32,118 @@ const chunkSegments = (segments: OrchestratorSegment[], size: number): BatchJob[
   return jobs;
 };
 
+/** Session state per document: tracks already-expanded terms (target-language abbreviation codes). */
+export type SessionState = { expandedTerms: Set<string> };
+
+/** Cyrillic range for detection. */
+const CYRILLIC_REGEX = /[\u0400-\u04FF]/;
+
 export class AIOrchestrator {
-  
+  /** Stateful orchestration: per-document sessionState tracks expandedTerms (Set); updated after each batch. */
+  private sessionState = new Map<string, SessionState>();
+
+  /**
+   * Extract target-language abbreviation from a DNA value. Prefers shortForm when present; else parses longForm/value.
+   */
+  private extractAbbreviationFromDnaValue(v: unknown): string | null {
+    if (v == null) return null;
+    if (typeof v === 'object' && v !== null && 'shortForm' in v) {
+      const s = (v as { shortForm?: unknown }).shortForm;
+      if (typeof s === 'string' && s.trim()) return s.trim();
+    }
+    const str = this.getDnaValueString(v);
+    if (!str) return null;
+    const inParens = str.match(/\(([A-Z][A-Z0-9]{1,})\)/);
+    if (inParens) return inParens[1];
+    if (/^[A-Z][A-Z0-9]{1,}$/.test(str.trim())) return str.trim();
+    return null;
+  }
+
+  /** Get a single string from DNA value: longForm, value, or string. */
+  private getDnaValueString(v: unknown): string | null {
+    if (v == null) return null;
+    if (typeof v === 'string') return v;
+    if (typeof v !== 'object') return null;
+    const o = v as Record<string, unknown>;
+    if (typeof o.longForm === 'string') return o.longForm;
+    if (typeof o.value === 'string') return o.value;
+    return null;
+  }
+
+  /**
+   * Context Assembly: filter abbreviationLogic for the segment/batch.
+   * If a term was already expanded earlier (abbreviation in expandedTerms) → send only shortForm/ABBR.
+   * If first mention → send longForm or full value.
+   */
+  private filterAbbreviationLogicForExpandedTerms(
+    abbreviationLogic: Record<string, unknown> | null | undefined,
+    expandedTerms: Set<string>,
+  ): Record<string, unknown> | null {
+    if (!abbreviationLogic || typeof abbreviationLogic !== 'object') return null;
+    const filtered: Record<string, unknown> = {};
+    for (const [key, v] of Object.entries(abbreviationLogic)) {
+      const abbr = this.extractAbbreviationFromDnaValue(v);
+      if (abbr && expandedTerms.has(abbr)) {
+        filtered[key] = abbr;
+      } else {
+        const fullForm = this.getDnaValueString(v);
+        filtered[key] = fullForm ?? v;
+      }
+    }
+    return filtered;
+  }
+
+  /**
+   * Simplify DNA values: ensure only English (Latin) values are passed to the translator.
+   * Handles string, { value }, and { longForm, shortForm }; strips Cyrillic from each.
+   */
+  private ensureAbbreviationLogicEnglishOnly(abbreviationLogic: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
+    if (!abbreviationLogic || typeof abbreviationLogic !== 'object') return null;
+    const stripCyrillic = (s: string) => s.replace(/[\u0400-\u04FF]+/g, '').trim();
+    const out: Record<string, unknown> = {};
+    for (const [key, v] of Object.entries(abbreviationLogic)) {
+      if (typeof v === 'string') {
+        const cleaned = stripCyrillic(v);
+        out[key] = cleaned || this.extractAbbreviationFromDnaValue(v) || key;
+      } else if (v && typeof v === 'object') {
+        const o = v as Record<string, unknown>;
+        if ('longForm' in o || 'shortForm' in o) {
+          const long = typeof o.longForm === 'string' ? (stripCyrillic(o.longForm) || o.longForm) : o.longForm;
+          const short = typeof o.shortForm === 'string' ? (stripCyrillic(o.shortForm) || o.shortForm) : this.extractAbbreviationFromDnaValue(v);
+          out[key] = { longForm: (long || short), shortForm: short };
+        } else if ('value' in o) {
+          const str = String(o.value ?? '');
+          out[key] = str && CYRILLIC_REGEX.test(str) ? (this.extractAbbreviationFromDnaValue(v) ?? (stripCyrillic(str) || key)) : v;
+        } else {
+          out[key] = v;
+        }
+      } else {
+        out[key] = v;
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Get or create session expandedTerms for this document; merge in caller-provided introducedAbbreviations.
+   */
+  private getOrUpdateSessionExpandedTerms(documentId: string | undefined, introducedAbbreviations: string[] | undefined): Set<string> {
+    if (!documentId) return new Set(introducedAbbreviations ?? []);
+    let state = this.sessionState.get(documentId);
+    if (!state) {
+      state = { expandedTerms: new Set(introducedAbbreviations ?? []) };
+      this.sessionState.set(documentId, state);
+    } else if (introducedAbbreviations?.length) {
+      introducedAbbreviations.forEach((t) => state!.expandedTerms.add(t));
+    }
+    return state.expandedTerms;
+  }
+
+  /** Clear session state for a document (e.g. when starting a new translation run). */
+  clearSessionState(documentId: string): void {
+    this.sessionState.delete(documentId);
+  }
+
   // ==========================================
   // 1. PROMPT BUILDING HELPERS
   // ==========================================
@@ -370,8 +480,8 @@ export class AIOrchestrator {
   }
 
   /**
-   * Build Style Governor block: first-use expansion (Full Term (ABBR)), subsequent use abbreviation only,
-   * and exception for policy "always_full".
+   * Build Style Governor block: first-use expansion (Full Term (ABBR)), subsequent use ONLY acronym.
+   * options.introducedAbbreviations = Current Session Expanded Terms (Set); maintained by caller, updated after each batch, passed every call.
    */
   private buildStyleGovernorBlock(options: TranslateSegmentsOptions): string {
     const dna = options.documentDna;
@@ -393,14 +503,19 @@ export class AIOrchestrator {
 
     return [
       '=== ABBREVIATION STYLE (Style Governor) ===',
-      'Apply these rules for terms from Document DNA abbreviationLogic:',
+      'Current Session Expanded Terms: [' + introducedList + '].',
+      'If a term is in this list, you are FORBIDDEN from using the full name or definitions. Use ONLY the acronym.',
       '',
-      '1. FIRST USE in document: When a term from abbreviationLogic appears for the first time in the document, output: "Full English Term (Abbreviation)" — e.g. "Battery Energy Storage System (BESS)" or "Automatic Generation Control (AGC)".',
-      '2. SUBSEQUENT USE: For terms that have already been introduced in a previous segment, use ONLY the abbreviation (e.g. "BESS", "AGC"). The following have already been introduced — use abbreviation only for these: ' + introducedList + '.',
-      '3. EXCEPTION — always_full: The following terms must NEVER be abbreviated; always use the full form: ' + alwaysFullList + '.',
-      '4. Within this segment/batch: Prefer first-use expansion for any term not in the already-introduced list; use only abbreviation for terms in that list.',
+      'First Mention rule:',
+      '- If a term from DNA is NOT yet in Current Session Expanded Terms: write "Full English Name (ABBR)" once (e.g. "Power Reserve Pool (PRP)") and add the abbreviation code to expanded_terms in your JSON so it is tracked for the rest of the document.',
+      '- If a term IS in Current Session Expanded Terms: use ONLY the abbreviation (e.g. PRP, UPS, EES) — no full form, no definitions.',
+      '- Within the same segment: full form only on first occurrence; any further mention in the same segment → only ABBR.',
       '',
-      'Example: First occurrence → "Electrical Energy Storage Systems (BESS) are connected to the Automatic Generation Control (AGC)." Later → "BESS connected to AGC."',
+      'EXCEPTION — always_full (never abbreviate): ' + alwaysFullList + '.',
+      '',
+      'Ideal examples:',
+      '§10 (first mention): "Power Reserve Pool (PRP) of the Unified Power System (UPS) of Kazakhstan - [definition text]..."',
+      '§43 (later): "...management in the UPS of Kazakhstan is organized..." (only acronym, no repetition of full name).',
     ].join('\n');
   }
 
@@ -542,9 +657,30 @@ export class AIOrchestrator {
     const projectKnowledgeBase = this.formatDocumentDnaForPrompt(options.documentDna);
     const dnaIntroRuEn = isRuToEn
       ? `Document DNA contains source-to-target terminology mappings. Use the TARGET LANGUAGE values from the DNA (e.g. abbreviationLogic, namingConventions) to replace source-language abbreviations and symbols in your translation. Do not leave Cyrillic abbreviations or phase letters (А, В, С) in the final ${targetLang} text; use the Latin/English equivalents given in the DNA.
-When Document DNA provides a mapping for an abbreviation or term (abbreviationLogic, namingConventions, entityGroups), SUBSTITUTE it entirely in the target text. Use only the target-language value from the DNA. Do not output both the English term and the source abbreviation (e.g. never "Surge Arrester (SA) ОПН-110"; use "110 kV SA" or "110 kV Surge Arrester (SA)" only). Clean substitution: one term in the target language, no duplication.`
-      : `Document DNA contains source-to-target terminology mappings. Use the TARGET LANGUAGE values from the DNA (abbreviationLogic, namingConventions, entityGroups) to replace source-language terms in your translation. When DNA provides a mapping, SUBSTITUTE it entirely in the target text using only the target-language value. Clean substitution: one term in the target language, no duplication.`;
+When Document DNA provides a mapping for an abbreviation or term (abbreviationLogic, namingConventions, entityGroups), SUBSTITUTE it entirely in the target text. Use only the target-language value from the DNA. Do not output both the English term and the source abbreviation (e.g. never "Surge Arrester (SA) ОПН-110"; use "110 kV SA" or "110 kV Surge Arrester (SA)" only). Clean substitution: one term in the target language, no duplication.
+NEVER use the keys of entityGroups (e.g. powerPlantTypes, equipmentCategories) as translation strings. They are for classification and context ONLY. Translate the actual words from the source text; use the group values for consistency where applicable. Abbreviation priority: If a term is in abbreviationLogic, its shortForm/longForm has HIGHEST priority — use it, never transliterate or use a different string.`
+      : `Document DNA contains source-to-target terminology mappings. Use the TARGET LANGUAGE values from the DNA (abbreviationLogic, namingConventions, entityGroups) to replace source-language terms in your translation. When DNA provides a mapping, SUBSTITUTE it entirely in the target text using only the target-language value. Clean substitution: one term in the target language, no duplication.
+NEVER use the keys of entityGroups as translation strings. They are for classification and context ONLY. Translate the actual words from the source text using the group values for consistency. If a term is in abbreviationLogic, its shortForm/longForm has HIGHEST priority over any transliteration.`;
     const dnaIntroRest = `If the DNA defines marking patterns or codes (e.g. equipment tags), preserve the exact structure and alphanumeric pattern of the code, but translate any descriptive text or labels around it into the target language.`;
+    const firstMentionOnlyRule = options.documentDna ? `\nFirst Mention Only: If a technical term or abbreviation from DNA has already been introduced in its full form earlier in the document, use ONLY the abbreviation in subsequent mentions.` : '';
+    const strictLatinBlock = targetLangCode.toLowerCase().startsWith('en')
+      ? `
+=== STRICT 100% LATIN (CRITICAL) ===
+Any Cyrillic in the output (e.g. SЭР, ВД, ЕЭС, ПУЛ РЭМ) is a CRITICAL error. Output MUST be 100% Latin/English.
+- If a term is in DNA: use ONLY its English value (full form or acronym per the First Mention rule). Never output the Russian key or mixed script.
+- If a term is NOT in DNA: translate by meaning into English; never leave Russian letters in the final text.`
+      : '';
+    const definitionQuarantineBlock = options.documentDna
+      ? `
+Definition Quarantine: In the translation text you are FORBIDDEN to insert descriptive definitions (e.g. "a reserve to ensure uninterrupted power supply..."). DNA definitions are for context only when generating DNA, not for copy-paste into sentences. In the translation output use ONLY the term or the abbreviation — never the definition.`
+      : '';
+    const hereinafterFixBlock = isRuToEn && options.documentDna
+      ? `
+Anti-Redundancy (Hereinafter Fix): When the source has "Full Name (далее – ABBR)" and the term is in DNA, output ONLY "Full English Name (ABBR)" (e.g. "Power Reserve Pool (PRP)"). You are FORBIDDEN to write "ABBR (hereinafter – ABBR)" or "PRP (hereinafter – PRP)" — that is redundant. Use "hereinafter" only when the term is NOT in DNA and you need to introduce an ad-hoc abbreviation; when DNA has the abbreviation, use only "Full English Name (ABBR)" with no hereinafter.`
+      : '';
+    const noDuplicateFullFormRule = options.documentDna
+      ? `\nNever output the same full form on both sides of a dash (e.g. "National Dispatch Center – National Dispatch Center"). Use "Full Name (ABBR)" once, then only ABBR.`
+      : '';
 
     // Format style rules using filtered rules (prevents Runglish formatting issues)
     const formattedStyleRules = this.formatStyleRulesForHierarchy(filteredStyleRules);
@@ -562,8 +698,9 @@ When Document DNA provides a mapping for an abbreviation or term (abbreviationLo
       docContext ? `\n=== GLOBAL DOCUMENT CONTEXT (CRITICAL) ===\n${docContext}\n` : '',
       projectKnowledgeBase ? `\n=== PROJECT KNOWLEDGE BASE ===
 ${dnaIntroRuEn}
-${dnaIntroRest}
+${dnaIntroRest}${firstMentionOnlyRule}${definitionQuarantineBlock}${hereinafterFixBlock}${noDuplicateFullFormRule}
 ${projectKnowledgeBase}\n` : '',
+      strictLatinBlock,
       `CRITICAL TRANSLATION REQUIREMENT:`,
       `- Source language: ${sourceLang} (${sourceLangCode})`,
       `- Target language: ${targetLang} (${targetLangCode})`,
@@ -616,11 +753,11 @@ ${projectKnowledgeBase}\n` : '',
         '',
         'NOTE: Strict mode - omit analysis field to save output tokens.',
       ] : [
-        `[{"segment_id":"<id>","analysis":"<2-3 words about key translation choice>","target_text":"<translation>"}]`,
+        `[{"segment_id":"<id>","analysis":"<2-3 words>","target_text":"<translation>","expanded_terms":["<ABBR>",...]}]`,
         '',
         'IMPORTANT: The "analysis" field should briefly capture the key translation decision (2-3 words).',
+        'expanded_terms: optional array of abbreviation codes (e.g. "EES", "BEM") that you expanded for the first time in this segment using "Full Name (ABBR)". Include each such code once so we can track it for subsequent segments. Omit or use [] if none.',
         'Examples: "legal term", "past tense", "technical spec", "idiomatic expression", "formal register", "glossary match".',
-        'This helps you focus on the critical choice without spending thousands of tokens on reasoning.',
       ]),
       '',
       // Previous context (if provided)
@@ -854,7 +991,7 @@ ${projectKnowledgeBase}\n` : '',
   // 2. STANDARD TRANSLATION METHODS
   // ==========================================
 
-  private parseProviderResponse(text: string, fallbackSegments: OrchestratorSegment[]): Array<{ segmentId: string; targetText: string; analysis?: string }> {
+  private parseProviderResponse(text: string, fallbackSegments: OrchestratorSegment[]): Array<{ segmentId: string; targetText: string; analysis?: string; expandedTerms?: string[] }> {
     // Basic cleanup
     let cleanedText = text.trim();
     if (cleanedText.startsWith('```')) {
@@ -893,19 +1030,28 @@ ${projectKnowledgeBase}\n` : '',
       throw new Error('Provider returned empty translation array');
     }
 
-    const map = new Map<string, { targetText: string; analysis?: string }>();
+    const map = new Map<string, { targetText: string; analysis?: string; expandedTerms?: string[] }>();
     parsed.forEach((entry: any) => {
       // Support both old format (target_mt) and new format (target_text) for backward compatibility
       const targetField = entry.target_text || entry.target_mt;
       if (entry.segment_id && typeof targetField === 'string') {
         let targetText = targetField.trim();
         const analysis = entry.analysis && typeof entry.analysis === 'string' ? entry.analysis.trim() : undefined;
-        
+        let expandedTerms: string[] | undefined;
+        if (Array.isArray(entry.expanded_terms)) {
+          expandedTerms = entry.expanded_terms.filter((t: unknown) => typeof t === 'string' && t.trim().length > 0).map((t: string) => t.trim());
+        }
         if (analysis) {
           logger.debug({
             segmentId: entry.segment_id,
             analysis,
           }, 'Translation analysis from AI');
+        }
+        if (expandedTerms && expandedTerms.length > 0) {
+          logger.debug({
+            segmentId: entry.segment_id,
+            expandedTerms,
+          }, 'Abbreviation Tracker: terms expanded in this segment');
         }
         
         // Remove mock/synthetic translation markers (including "to <lang>" suffix)
@@ -929,7 +1075,7 @@ ${projectKnowledgeBase}\n` : '',
           }, 'Tag Validation Failed');
         }
         
-        map.set(entry.segment_id, { targetText, analysis });
+        map.set(entry.segment_id, { targetText, analysis, expandedTerms });
       }
     });
 
@@ -972,6 +1118,7 @@ ${projectKnowledgeBase}\n` : '',
         segmentId: segment.segmentId,
         targetText,
         analysis: entry?.analysis,
+        expandedTerms: entry?.expandedTerms,
       };
     });
   }
@@ -1006,6 +1153,10 @@ ${projectKnowledgeBase}\n` : '',
     const addressRule = await getAddressFormattingRuleAsync(sourceLangCode, targetLangCode);
     const optionsWithAddressRule = { ...options, addressRule: addressRule ?? null };
 
+    // Segment Context Filter: session state holds expandedTerms; updated after each batch
+    const documentId = options.documentId;
+    let expandedTerms = this.getOrUpdateSessionExpandedTerms(documentId, options.introducedAbbreviations);
+
     // Plan token-based batches to prevent token limit exceeded errors
     // Use provider-specific limits for optimal context window usage
     const batchRanges = this.planBatches(options.segments, undefined, provider.name, model);
@@ -1014,6 +1165,16 @@ ${projectKnowledgeBase}\n` : '',
     for (const range of batchRanges) {
       const batchSegments = options.segments.slice(range.start, range.end);
       const chunkId = randomUUID();
+
+      // Context Assembly: already-expanded → target-short only; first mention → Full Name (ABBR). Simplify: values English-only.
+      const rawAbbrev = options.documentDna?.abbreviationLogic ?? null;
+      const filteredAbbreviationLogic = this.filterAbbreviationLogicForExpandedTerms(rawAbbrev, expandedTerms);
+      const englishOnlyAbbrev = this.ensureAbbreviationLogicEnglishOnly(filteredAbbreviationLogic ?? rawAbbrev);
+      const filteredDna: DocumentDnaPayload | null =
+        options.documentDna && rawAbbrev && Object.keys(rawAbbrev).length > 0 && englishOnlyAbbrev
+          ? { ...options.documentDna, abbreviationLogic: englishOnlyAbbrev }
+          : options.documentDna ?? null;
+      const optionsWithFilteredDna = { ...optionsWithAddressRule, documentDna: filteredDna };
       
       // Get neighboring segments for context
       // prevSegment: segment before this batch (range.start - 1)
@@ -1096,7 +1257,7 @@ ${projectKnowledgeBase}\n` : '',
         const systemPersona = `You are an expert linguist. TRANSLATION DIRECTION: ${sourceLangCode} → ${targetLangCode}. You translate FROM ${sourceLangCode} (${sourceLang}, source/input) TO ${targetLangCode} (${targetLang}, target/output). CRITICAL: Your output MUST be in ${targetLangCode} only. Never return text in ${sourceLangCode}. If you see text in ${sourceLangCode}, translate it to ${targetLangCode}. If you see text in ${targetLangCode}, keep it as-is. Your translations must be accurate, natural, and idiomatic. Avoid literal calques and word-for-word translations. Prioritize meaning and fluency while maintaining technical precision.`;
 
         try {
-          const prompt = this.buildBatchPrompt(batchSegments, optionsWithAddressRule, prevContextString, nextContextString, options.strictMode || false);
+          const prompt = this.buildBatchPrompt(batchSegments, optionsWithFilteredDna, prevContextString, nextContextString, options.strictMode || false);
           
           // Log prompt for YandexGPT debugging
           if (provider.name === 'yandex') {
@@ -1129,7 +1290,8 @@ ${projectKnowledgeBase}\n` : '',
           }
           
           const parsed = this.parseProviderResponse(response.outputText, batchSegments);
-          parsed.forEach((item) =>
+          parsed.forEach((item) => {
+            if (item.expandedTerms?.length) item.expandedTerms.forEach((t) => expandedTerms.add(t));
             results.push({
               segmentId: item.segmentId,
               targetText: item.targetText,
@@ -1141,8 +1303,10 @@ ${projectKnowledgeBase}\n` : '',
               fallback: false,
               fullPrompt: prompt,
               analysis: item.analysis,
-            }),
-          );
+              expandedTerms: item.expandedTerms,
+            });
+          });
+          if (documentId) this.sessionState.set(documentId, { expandedTerms });
           logger.info({ provider: provider.name, chunkId }, 'AI translation chunk completed');
           success = true;
         } catch (error) {
@@ -1169,7 +1333,7 @@ ${projectKnowledgeBase}\n` : '',
             }, 'Retrying translation with strict mode to save output tokens');
             
             // Retry with strict mode
-            const strictOptions = { ...optionsWithAddressRule, strictMode: true };
+            const strictOptions = { ...optionsWithFilteredDna, strictMode: true };
             const prompt = this.buildBatchPrompt(batchSegments, strictOptions, prevContextString, nextContextString, true);
             
             try {
@@ -1183,7 +1347,8 @@ ${projectKnowledgeBase}\n` : '',
               });
               
               const parsed = this.parseProviderResponse(response.outputText, batchSegments);
-              parsed.forEach((item) =>
+              parsed.forEach((item) => {
+                if (item.expandedTerms?.length) item.expandedTerms.forEach((t) => expandedTerms.add(t));
                 results.push({
                   segmentId: item.segmentId,
                   targetText: item.targetText,
@@ -1195,8 +1360,10 @@ ${projectKnowledgeBase}\n` : '',
                   fallback: false,
                   fullPrompt: prompt,
                   analysis: item.analysis,
-                }),
-              );
+                  expandedTerms: item.expandedTerms,
+                });
+              });
+              if (documentId) this.sessionState.set(documentId, { expandedTerms });
               logger.info({ provider: provider.name, chunkId, strictMode: true }, 'AI translation chunk completed (strict mode retry)');
               success = true;
               continue; // Skip the normal retry logic below

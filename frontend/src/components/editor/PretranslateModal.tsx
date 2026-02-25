@@ -54,6 +54,8 @@ export default function PretranslateModal({
   const cancelledToastShownRef = useRef(false);
   const [showLogs, setShowLogs] = useState(false);
   const logContainerRef = useRef<HTMLDivElement>(null);
+  const [showSuccessDialog, setShowSuccessDialog] = useState(false);
+  const [successSummary, setSuccessSummary] = useState<{ tmApplied: number; aiApplied: number } | null>(null);
 
   // Reset progress when modal opens/closes
   useEffect(() => {
@@ -61,6 +63,8 @@ export default function PretranslateModal({
       // Reset all state when modal closes
       setProgress(null);
       setIsProcessing(false);
+      setShowSuccessDialog(false);
+      setSuccessSummary(null);
       isCancelledRef.current = false;
       cancelledToastShownRef.current = false;
       if (progressIntervalRef.current) {
@@ -142,22 +146,14 @@ export default function PretranslateModal({
             }
 
             if (progressData.status === 'completed') {
-              toast.success(
-                `Pretranslation complete: ${progressData.tmApplied} TM matches applied, ${progressData.aiApplied} AI translations applied`,
-              );
-              // Wait longer to ensure all database writes are complete before refreshing UI
+              // Wait for DB writes, then show success dialog (user confirms with OK)
               setTimeout(() => {
-                console.log('[PretranslateModal] Calling onComplete after completion', {
+                setSuccessSummary({
                   tmApplied: progressData.tmApplied,
                   aiApplied: progressData.aiApplied,
                 });
-                onComplete();
-                // Close modal after a short delay to allow UI to update
-                setTimeout(() => {
-                  onClose();
-                  setProgress(null);
-                }, 500);
-              }, 3000); // Increased from 2000 to 3000ms to ensure DB writes complete
+                setShowSuccessDialog(true);
+              }, 800);
             } else if (progressData.status === 'cancelled') {
               // Only show toast once
               if (!cancelledToastShownRef.current) {
@@ -311,14 +307,44 @@ export default function PretranslateModal({
     ? Math.round((totalCompleted / progress.totalSegments) * 100)
     : 0;
 
+  const handleSuccessOk = () => {
+    setShowSuccessDialog(false);
+    setSuccessSummary(null);
+    setProgress(null);
+    onComplete();
+    onClose();
+  };
+
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-      <div className="bg-white rounded-lg shadow-xl p-6 max-w-lg w-full mx-4">
-        <h2 className="text-2xl font-bold text-gray-900 mb-4">Pretranslate Document</h2>
-        <p className="text-sm text-gray-600 mb-6">
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-2">
+      <div className="bg-white rounded-lg shadow-xl p-6 max-w-lg w-full mx-4 max-h-[90vh] flex flex-col">
+        {showSuccessDialog && successSummary ? (
+          <>
+            <h2 className="text-xl font-bold text-gray-900 mb-4">Pretranslation complete</h2>
+            <p className="text-sm text-gray-600 mb-6">
+              {successSummary.tmApplied} TM matches and {successSummary.aiApplied} AI translations were applied. Your document has been updated.
+            </p>
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={handleSuccessOk}
+                className="btn btn-primary"
+              >
+                OK
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+        <div className="min-h-0 overflow-y-auto flex-1">
+        <h2 className="text-xl font-bold text-gray-900 mb-3">Pretranslate Document</h2>
+        <p className="text-sm text-gray-600 mb-2">
           This will apply 100% Translation Memory matches to empty segments. By default, AI translations will also be applied to empty segments that have no TM matches. You can customize the options below or simply click "Start Pretranslation" to use default settings.
+        </p>
+        <p className="text-xs text-amber-700 mb-4" title="DNA is validated when translation starts; invalid DNA will block AI translation.">
+          Validate Document DNA before starting (Document → DNA tab). Invalid or empty DNA may cause translation errors or block AI translation.
         </p>
 
         {/* AI Configuration */}
@@ -418,15 +444,15 @@ export default function PretranslateModal({
         )}
 
         {!isProcessing && (
-          <div className="space-y-4 mb-6">
-            <div className="mb-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
-              <p className="text-sm text-blue-900">
-                <strong>Quick Start:</strong> You can click "Start Pretranslation" right now with default settings (TM matches + AI for empty segments). The options below are optional and can be customized if needed.
+          <div className="space-y-3 mb-4">
+            <div className="mb-2 p-2 bg-blue-50 border border-blue-200 rounded-lg">
+              <p className="text-xs text-blue-900">
+                <strong>Quick Start:</strong> Click "Start Pretranslation" for default settings (TM + AI for empty segments). Options below are optional.
               </p>
             </div>
             
-            <div className="border-b border-gray-200 pb-3">
-              <h3 className="text-sm font-semibold text-gray-900 mb-3">Translation Memory Options</h3>
+            <div className="border-b border-gray-200 pb-2">
+              <h3 className="text-sm font-semibold text-gray-900 mb-2">Translation Memory Options</h3>
               
               <div className="flex items-start">
                 <input
@@ -446,8 +472,8 @@ export default function PretranslateModal({
               </div>
             </div>
 
-            <div className="border-b border-gray-200 pb-3">
-              <h3 className="text-sm font-semibold text-gray-900 mb-3">Segment Selection</h3>
+            <div className="border-b border-gray-200 pb-2">
+              <h3 className="text-sm font-semibold text-gray-900 mb-2">Segment Selection</h3>
               
               <div className="flex items-start mb-3">
                 <input
@@ -484,8 +510,8 @@ export default function PretranslateModal({
               </div>
             </div>
 
-            <div className="border-b border-gray-200 pb-3">
-              <h3 className="text-sm font-semibold text-gray-900 mb-3">AI Translation Options</h3>
+            <div className="border-b border-gray-200 pb-2">
+              <h3 className="text-sm font-semibold text-gray-900 mb-2">AI Translation Options</h3>
               
               <div className="flex items-start mb-3">
                 <input
@@ -549,7 +575,7 @@ export default function PretranslateModal({
               </div>
             </div>
 
-            <div className="bg-blue-50 border border-blue-200 rounded p-3">
+            <div className="bg-blue-50 border border-blue-200 rounded p-2">
               <p className="text-xs text-blue-800">
                 <strong>Note:</strong> Empty segments are always processed. Use the options above to also include segments that already have translations.
               </p>
@@ -706,7 +732,9 @@ export default function PretranslateModal({
           </div>
         )}
 
-        <div className="flex justify-end space-x-3">
+        </div>
+
+        <div className="flex justify-end space-x-3 flex-shrink-0 pt-4">
           {isProcessing ? (
             <button
               onClick={(e) => {
@@ -738,6 +766,8 @@ export default function PretranslateModal({
             </>
           )}
         </div>
+          </>
+        )}
       </div>
     </div>
   );
