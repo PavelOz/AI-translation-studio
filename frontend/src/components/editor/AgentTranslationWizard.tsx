@@ -4,7 +4,7 @@ import { aiApi } from '../../api/ai.api';
 import { stripFormattingMarkers } from '../../utils/formatting';
 import toast from 'react-hot-toast';
 
-type AIProvider = 'gemini' | 'openai' | 'yandex' | 'deepseek';
+type AIProvider = 'gemini' | 'openai' | 'yandex' | 'deepseek' | 'claude';
 
 interface AgentTranslationWizardProps {
   sourceText: string;
@@ -47,7 +47,7 @@ export default function AgentTranslationWizard({
     if (typeof window !== 'undefined') {
       try {
         const saved = localStorage.getItem('ai-translation-provider');
-        if (saved && ['gemini', 'openai', 'yandex', 'deepseek'].includes(saved)) {
+        if (saved && ['gemini', 'openai', 'yandex', 'deepseek', 'claude'].includes(saved)) {
           return saved as AIProvider;
         }
       } catch (error) {
@@ -432,7 +432,7 @@ export default function AgentTranslationWizard({
 import { aiApi } from '../../api/ai.api';
 import toast from 'react-hot-toast';
 
-type AIProvider = 'gemini' | 'openai' | 'yandex' | 'deepseek';
+type AIProvider = 'gemini' | 'openai' | 'yandex' | 'deepseek' | 'claude';
 
 interface AgentTranslationWizardProps {
   sourceText: string;
@@ -475,7 +475,7 @@ export default function AgentTranslationWizard({
     if (typeof window !== 'undefined') {
       try {
         const saved = localStorage.getItem('ai-translation-provider');
-        if (saved && ['gemini', 'openai', 'yandex', 'deepseek'].includes(saved)) {
+        if (saved && ['gemini', 'openai', 'yandex', 'deepseek', 'claude'].includes(saved)) {
           return saved as AIProvider;
         }
       } catch (error) {

@@ -1,5 +1,5 @@
 import { BaseProvider } from './baseProvider';
-import type { ProviderPromptRequest, ProviderPromptResponse } from './types';
+import type { ProviderPromptRequest, ProviderPromptResponse, ModelCapabilities } from './types';
 import { logger } from '../../utils/logger';
 import OpenAI from 'openai';
 
@@ -127,6 +127,29 @@ export class DeepSeekProvider extends BaseProvider {
       
       return this.mockResponse(request);
     }
+  }
+
+  /**
+   * Get model capabilities based on model name
+   */
+  getCapabilities(model?: string): ModelCapabilities {
+    const modelName = (model || this.defaultModel).toLowerCase();
+    
+    // DeepSeek Reasoner - большой контекст
+    if (modelName.includes('reasoner')) {
+      return {
+        maxBatchSize: 35,
+        contextLimit: 64_000,
+        supportsBatchProcessing: true,
+      };
+    }
+    
+    // DeepSeek Chat
+    return {
+      maxBatchSize: 30,
+      contextLimit: 32_000,
+      supportsBatchProcessing: true,
+    };
   }
 }
 

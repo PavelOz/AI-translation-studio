@@ -5,13 +5,14 @@ import { glossaryApi, type GlossaryEntry } from '../../api/glossary.api';
 import { stripFormattingMarkers } from '../../utils/formatting';
 import toast from 'react-hot-toast';
 
-type AIProvider = 'gemini' | 'openai' | 'yandex' | 'deepseek';
+type AIProvider = 'gemini' | 'openai' | 'yandex' | 'deepseek' | 'claude';
 
 // Model presets for quick selection
 const MODEL_PRESETS = [
   { id: 'deepseek-reasoner', name: '🧠 DeepSeek R1 (Thinking)', provider: 'deepseek' as AIProvider, model: 'deepseek-reasoner', defaultTemp: 0.0 },
   { id: 'gemini-flash', name: '⚡ Gemini 2.0 Flash (Fast)', provider: 'gemini' as AIProvider, model: 'gemini-2.0-flash-exp', defaultTemp: 0.3 },
   { id: 'gpt-4o', name: '🤖 GPT-4o (Standard)', provider: 'openai' as AIProvider, model: 'gpt-4o', defaultTemp: 0.3 },
+  { id: 'claude-sonnet', name: '🎯 Claude Sonnet 4.5', provider: 'claude' as AIProvider, model: 'claude-sonnet-4-20250514', defaultTemp: 0.3 },
 ];
 
 interface AgentStepTranslationProps {

@@ -86,12 +86,28 @@ export type AbbreviationLogicValue = string | {
   aliases?: string[];
 };
 
+/** Validation Hints для специфичных правил проверки */
+export type ValidationHints = {
+  rules?: Array<{
+    term: string;
+    context: string;
+    rule: string;
+    example?: string;
+  }>;
+  warnings?: Array<{
+    term: string;
+    message: string;
+  }>;
+  notes?: string[];
+} | null;
+
 /** Document DNA payload: technical schema, naming, abbreviations, entity groups (1:1 per document) */
 export type DocumentDnaPayload = {
   technicalSchema?: Record<string, unknown> | null;
   namingConventions?: Record<string, unknown> | null;
   abbreviationLogic?: Record<string, unknown> | null;
   entityGroups?: Record<string, unknown> | null;
+  validationHints?: ValidationHints;
 };
 
 // Valid provider names for translation results

@@ -14,6 +14,9 @@ import GlossaryPage from './pages/GlossaryPage';
 import ClusteringPage from './pages/ClusteringPage';
 import ProfilesPage from './pages/ProfilesPage';
 import StageMonitoringDashboard from './components/StageMonitoringDashboard';
+import QualityControlPage from './pages/QualityControlPage';
+import AdminQualityControlPage from './pages/AdminQualityControlPage';
+import JanitorReviewScreen from './components/JanitorReviewScreen';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore();
@@ -77,6 +80,30 @@ function App() {
         element={
           <PrivateRoute>
             <StageMonitoringDashboard />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/documents/:documentId/quality-control"
+        element={
+          <PrivateRoute>
+            <QualityControlPage />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/documents/:documentId/janitor"
+        element={
+          <PrivateRoute>
+            <JanitorReviewScreen />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/admin/quality-control"
+        element={
+          <PrivateRoute>
+            <AdminQualityControlPage />
           </PrivateRoute>
         }
       />

@@ -40,8 +40,8 @@ export const getProvider = (name?: string, apiKey?: string, yandexFolderId?: str
   return defaultProvider;
 };
 
-export const listProviders = () =>
-  Object.keys(providers).map((key) => ({
+export const listProviders = () => {
+  const providerList = Object.keys(providers).map((key) => ({
     name: key,
     defaultModel: providers[key].defaultModel,
     hasApiKey: Boolean(
@@ -51,6 +51,17 @@ export const listProviders = () =>
         (key === 'deepseek' && env.deepseekApiKey),
     ),
   }));
+  
+  // Add Claude even though it's not fully implemented yet
+  // This allows the UI to work and save Claude settings
+  providerList.push({
+    name: 'claude',
+    defaultModel: 'claude-sonnet-4-20250514',
+    hasApiKey: Boolean(env.claudeApiKey),
+  });
+  
+  return providerList;
+};
 
 
 

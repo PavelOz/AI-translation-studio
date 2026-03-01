@@ -1,0 +1,160 @@
+import Layout from '../components/Layout';
+import { useQuery, useMutation, useQueryClient } from 'react-query';
+import { documentsApi, type ValidatorJanitorReport } from '../api/documents.api';
+import { analysisApi } from '../api/analysis.api';
+import toast from 'react-hot-toast';
+import { useState, useEffect } from 'react';
+import BatchMonitoring from '../components/quality-control/BatchMonitoring';
+import JanitorReportEditor from '../components/quality-control/JanitorReportEditor';
+
+export default function AdminQualityControlPage() {
+  const queryClient = useQueryClient();
+  const [selectedDocumentId, setSelectedDocumentId] = useState<string>('');
+  const [reportJson, setReportJson] = useState<string>('');
+
+  // Get all active enrichment progress
+  const { data: allProgress, refetch: refetchProgress } = useQuery({
+    queryKey: ['enrichment-progress-all'],
+    queryFn: async () => {
+      const response = await fetch('/api/documents/dna/enrich/progress');
+      if (!response.ok) return [];
+      const data = await response.json();
+      // Ensure all progress items have required fields
+      if (Array.isArray(data)) {
+        return data.map((item: any) => ({
+          ...item,
+          added: item.added ?? 0,
+          skipped: item.skipped ?? 0,
+          conflicts: item.conflicts ?? 0,
+          errors: item.errors ?? [],
+        }));
+      }
+      return [];
+    },
+    refetchInterval: 2000, // Poll every 2 seconds
+  });
+
+  // Get validator-janitor report for selected document
+  const { data: report, isLoading: reportLoading } = useQuery({
+    queryKey: ['validator-janitor', selectedDocumentId],
+    queryFn: () => documentsApi.runValidatorJanitor(selectedDocumentId, { dryRun: true }),
+    enabled: !!selectedDocumentId,
+    staleTime: 60_000,
+    onSuccess: (data) => {
+      setReportJson(JSON.stringify(data, null, 2));
+    },
+  });
+
+  const saveReportMutation = useMutation({
+    mutationFn: async (updatedReport: ValidatorJanitorReport) => {
+      // Here you would save the report, but validator-janitor doesn't have a save endpoint
+      // So we'll just show a toast
+      return updatedReport;
+    },
+    onSuccess: () => {
+      toast.success('Report updated (not saved to backend - this is a preview)');
+    },
+    onError: (err: any) => {
+      toast.error(err?.message || 'Failed to update report');
+    },
+  });
+
+  const handleReportChange = (json: string) => {
+    setReportJson(json);
+    try {
+      const parsed = JSON.parse(json);
+      // Validate it's a ValidatorJanitorReport
+      if (parsed && typeof parsed === 'object') {
+        // Could save here if needed
+      }
+    } catch (e) {
+      // Invalid JSON, but allow editing
+    }
+  };
+
+  const handleSaveReport = () => {
+    try {
+      const parsed = JSON.parse(reportJson) as ValidatorJanitorReport;
+      saveReportMutation.mutate(parsed);
+    } catch (e) {
+      toast.error('Invalid JSON format');
+    }
+  };
+
+  return (
+    <Layout>
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Admin Quality Control Station</h1>
+          <p className="text-sm text-gray-500 mt-1">
+            Monitor DNA enrichment batches and edit validator-janitor reports
+          </p>
+        </div>
+
+        {/* Batch Monitoring Section */}
+        <div className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-lg font-semibold text-gray-900">Enrichment Batch Monitoring</h2>
+            <button
+              onClick={() => refetchProgress()}
+              className="px-3 py-1.5 text-sm bg-gray-100 text-gray-700 rounded-md hover:bg-gray-200"
+            >
+              Refresh
+            </button>
+          </div>
+          
+          {allProgress && allProgress.length > 0 ? (
+            <div className="space-y-4">
+              {allProgress.map((progress: any) => (
+                <BatchMonitoring key={progress.documentId} documentId={progress.documentId} />
+              ))}
+            </div>
+          ) : (
+            <p className="text-sm text-gray-500">No active enrichment processes</p>
+          )}
+        </div>
+
+        {/* Validator-Janitor Report Editor */}
+        <div className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="mb-4">
+            <h2 className="text-lg font-semibold text-gray-900 mb-2">Validator-Janitor Report Editor</h2>
+            <div className="flex gap-2 items-center">
+              <input
+                type="text"
+                placeholder="Enter Document ID"
+                value={selectedDocumentId}
+                onChange={(e) => setSelectedDocumentId(e.target.value)}
+                className="px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+              />
+              <button
+                onClick={() => {
+                  if (selectedDocumentId) {
+                    queryClient.invalidateQueries({ queryKey: ['validator-janitor', selectedDocumentId] });
+                  }
+                }}
+                disabled={!selectedDocumentId || reportLoading}
+                className="px-4 py-2 bg-primary-600 text-white text-sm font-medium rounded-md hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {reportLoading ? 'Loading...' : 'Load Report'}
+              </button>
+            </div>
+          </div>
+
+          {report && (
+            <JanitorReportEditor
+              report={report}
+              json={reportJson}
+              onJsonChange={handleReportChange}
+              onSave={handleSaveReport}
+              isSaving={saveReportMutation.isPending}
+            />
+          )}
+
+          {!report && selectedDocumentId && !reportLoading && (
+            <p className="text-sm text-gray-500">Enter a document ID and click "Load Report"</p>
+          )}
+        </div>
+      </div>
+    </Layout>
+  );
+}

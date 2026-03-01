@@ -111,7 +111,14 @@ export default function PretranslateModal({
 
   // Poll for progress updates
   useEffect(() => {
-    if (isProcessing) {
+    // Stop polling if modal is closed
+    if (!isOpen && progressIntervalRef.current) {
+      clearInterval(progressIntervalRef.current);
+      progressIntervalRef.current = null;
+      return;
+    }
+    
+    if (isProcessing && isOpen) {
       const pollProgress = async () => {
         // Stop polling if already cancelled and toast shown
         // But only if we've confirmed the cancelled status from backend
@@ -146,14 +153,23 @@ export default function PretranslateModal({
             }
 
             if (progressData.status === 'completed') {
-              // Wait for DB writes, then show success dialog (user confirms with OK)
-              setTimeout(() => {
-                setSuccessSummary({
-                  tmApplied: progressData.tmApplied,
-                  aiApplied: progressData.aiApplied,
-                });
-                setShowSuccessDialog(true);
-              }, 800);
+              // If no segments were processed, show info message instead of success dialog
+              if (progressData.totalSegments === 0 || (progressData.tmApplied === 0 && progressData.aiApplied === 0)) {
+                toast('All segments are already translated. No processing was needed.', { icon: 'ℹ️', duration: 4000 });
+                setTimeout(() => {
+                  onComplete();
+                  onClose();
+                }, 500);
+              } else {
+                // Wait for DB writes, then show success dialog (user confirms with OK)
+                setTimeout(() => {
+                  setSuccessSummary({
+                    tmApplied: progressData.tmApplied,
+                    aiApplied: progressData.aiApplied,
+                  });
+                  setShowSuccessDialog(true);
+                }, 800);
+              }
             } else if (progressData.status === 'cancelled') {
               // Only show toast once
               if (!cancelledToastShownRef.current) {
@@ -200,8 +216,27 @@ export default function PretranslateModal({
             }
           }
         } catch (error: any) {
-          // If progress not found (404), it might be starting - don't treat as error
+          // If progress not found (404), check if we were already processing
           if (error.response?.status === 404) {
+            // If we were processing and now get 404, progress was cleared (completed/cancelled)
+            // This can happen if backend cleared progress after completion
+            if (isProcessing && progress?.status) {
+              // Progress was cleared - stop polling
+              setIsProcessing(false);
+              if (progressIntervalRef.current) {
+                clearInterval(progressIntervalRef.current);
+                progressIntervalRef.current = null;
+              }
+              // Assume completion if we had progress before
+              if (progress.status === 'running') {
+                // Progress was cleared but we don't know final status
+                // This shouldn't happen normally, but handle gracefully
+                console.warn('Progress cleared while running - assuming completion');
+                onComplete();
+                onClose();
+              }
+              return;
+            }
             // Progress not created yet - this is normal when starting
             // Don't update state, just wait for next poll
             return;
@@ -221,7 +256,7 @@ export default function PretranslateModal({
         }
       };
     }
-  }, [isProcessing, documentId, onComplete, onClose, progress?.status]);
+  }, [isProcessing, isOpen, documentId, onComplete, onClose, progress?.status]);
 
   // Cleanup on unmount
   useEffect(() => {

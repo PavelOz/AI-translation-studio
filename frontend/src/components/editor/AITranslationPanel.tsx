@@ -30,7 +30,7 @@ const TM_PROFILES = {
   },
 };
 
-type AIProvider = 'gemini' | 'openai' | 'yandex' | 'deepseek';
+type AIProvider = 'gemini' | 'openai' | 'yandex' | 'deepseek' | 'claude';
 
 interface AITranslationPanelProps {
   sourceText: string;
@@ -68,7 +68,7 @@ export default function AITranslationPanel({
     if (typeof window !== 'undefined') {
       try {
         const saved = localStorage.getItem('ai-translation-provider');
-        if (saved && ['gemini', 'openai', 'yandex', 'deepseek'].includes(saved)) {
+        if (saved && ['gemini', 'openai', 'yandex', 'deepseek', 'claude'].includes(saved)) {
           return saved as AIProvider;
         }
       } catch (error) {
@@ -80,7 +80,7 @@ export default function AITranslationPanel({
 
   // Update selected provider when project settings load
   useEffect(() => {
-    if (aiSettings?.provider && ['gemini', 'openai', 'yandex', 'deepseek'].includes(aiSettings.provider)) {
+    if (aiSettings?.provider && ['gemini', 'openai', 'yandex', 'deepseek', 'claude'].includes(aiSettings.provider)) {
       setSelectedProvider(aiSettings.provider as AIProvider);
     }
     
@@ -805,6 +805,8 @@ export default function AITranslationPanel({
         return 'Yandex GPT';
       case 'deepseek':
         return 'DeepSeek';
+      case 'claude':
+        return 'Anthropic Claude';
       default:
         return provider;
     }

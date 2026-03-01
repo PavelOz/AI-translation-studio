@@ -12,15 +12,21 @@ import { ApiError } from '../utils/apiError';
 import { logger } from '../utils/logger';
 import { getDocumentSegments, findSegmentIdsContainingTerms } from '../services/segment.service';
 import { runDocumentMachineTranslation, pretranslateDocument, patchTranslate } from '../services/ai.service';
+import { runValidatorJanitor } from '../services/validatorJanitor';
+import { UniversalJanitor } from '../services/universalJanitor';
 import { getDocumentMetricsSummary, runDocumentQualityCheck } from '../services/quality.service';
 import { getProgress, cancelProgress, clearProgress } from '../services/pretranslateProgress';
 import { runFullAnalysis, getAnalysisResults, cancelAnalysis, resetAnalysisStatus, getStageMonitoringData, listDocumentGlossary, updateDocumentGlossaryEntry, translateSingleTerm, getDocumentDna, updateDocumentDna, generateDocumentDna, refineDocumentDna } from '../services/analysis.service';
-import { validateDocumentDnaPayload } from '../services/dnaValidation';
+import { validateDocumentDnaPayload, validateDnaForCycles } from '../services/dnaValidation';
+import { validateDnaContract, formatValidationReport } from '../services/validate-dna';
+import { getTranslationDirection } from '../services/dnaPrompts';
 import { normalizeAbbreviationLogic } from '../services/abbreviationLogicNormalize';
 import { computeDnaDelta } from '../services/dnaDiff';
 import { normalizeDocumentDnaPayload, sanitizeDocumentDnaPayloadForPut } from '../services/dnaSchema';
-import { validateDnaForCycles } from '../services/dnaValidation';
 import { getProfile } from '../services/profile.service';
+import { prisma } from '../db/prisma';
+import { enrichDocumentDnaFromCSV } from '../services/dnaEnrichment.service';
+import { getProgress as getEnrichmentProgress, getAllActiveProgress } from '../services/enrichmentProgress';
 
 // Configure multer to preserve UTF-8 encoding for filenames (including Cyrillic)
 // Multer handles UTF-8 filenames correctly when sent from modern browsers
@@ -252,12 +258,29 @@ documentRoutes.post(
   }),
 );
 
+const validatorJanitorSchema = z.object({
+  dryRun: z.boolean().optional(),
+});
+
+documentRoutes.post(
+  '/:documentId/validator-janitor',
+  asyncHandler(async (req, res, next): Promise<void> => {
+    const documentId = req.params.documentId;
+    const body = validatorJanitorSchema.safeParse(req.body ?? {});
+    const dryRun = body.success && body.data.dryRun === false ? false : true;
+    const report = await runValidatorJanitor(documentId, { dryRun });
+    res.json(report);
+    return;
+  }),
+);
+
 documentRoutes.get(
   '/:documentId/pretranslate/progress',
-  asyncHandler(async (req, res) => {
+  asyncHandler(async (req, res, _next) => {
     const progress = getProgress(req.params.documentId);
     if (!progress) {
-      return res.status(404).json({ error: 'No progress found for this document' });
+      res.status(404).json({ error: 'No progress found for this document' });
+      return;
     }
     res.json(progress);
   }),
@@ -481,13 +504,37 @@ documentRoutes.get(
     const abbreviationCount = dna?.abbreviationLogic && typeof dna.abbreviationLogic === 'object'
       ? Object.keys(dna.abbreviationLogic).length
       : 0;
-    res.json({ valid: result.valid, errors: result.errors, abbreviationCount });
+    
+    // Получаем направление перевода для расширенной валидации
+    const document = await prisma.document.findUnique({
+      where: { id: req.params.documentId },
+      select: { sourceLocale: true, targetLocale: true },
+    });
+    
+    let contractValidation = null;
+    if (document) {
+      const direction = getTranslationDirection(document.sourceLocale, document.targetLocale);
+      contractValidation = validateDnaContract(dna ?? null, direction);
+    }
+    
+    res.json({ 
+      valid: result.valid, 
+      errors: result.errors, 
+      abbreviationCount,
+      contractValidation: contractValidation ? {
+        status: contractValidation.status,
+        issues: contractValidation.issues,
+        suggestions: contractValidation.suggestions,
+        report: formatValidationReport(contractValidation),
+      } : null,
+    });
   }),
 );
 
 documentRoutes.put(
   '/:documentId/dna',
   asyncHandler(async (req, res) => {
+    const documentId = req.params.documentId;
     const parsed = documentDnaSchema.safeParse(req.body);
     if (!parsed.success) {
       const issues = parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`);
@@ -507,7 +554,40 @@ documentRoutes.put(
       res.status(400).json({ error: 'Document DNA recursion risk', details: cycleCheck.errors });
       return;
     }
-    const documentId = req.params.documentId;
+    
+    // Расширенная валидация DNA-Contract-Validator
+    try {
+      const document = await prisma.document.findUnique({
+        where: { id: documentId },
+        select: { sourceLocale: true, targetLocale: true },
+      });
+      
+      if (document) {
+        const direction = getTranslationDirection(document.sourceLocale, document.targetLocale);
+        const contractValidation = validateDnaContract(normalized, direction);
+        
+        // Блокируем перевод при наличии ошибок
+        if (contractValidation.status === 'ERROR') {
+          const errorMessages = contractValidation.issues
+            .filter(i => i.type === 'error')
+            .map(i => i.message);
+          res.status(400).json({ 
+            error: 'Document DNA validation failed', 
+            details: errorMessages,
+            report: formatValidationReport(contractValidation),
+          });
+          return;
+        }
+        
+        // Предупреждения логируем, но не блокируем
+        if (contractValidation.status === 'WARNING') {
+          logger.warn({ documentId, validation: contractValidation }, 'Document DNA validation warnings');
+        }
+      }
+    } catch (validationErr: any) {
+      // Если валидация падает, логируем, но не блокируем сохранение
+      logger.error({ documentId, error: validationErr?.message, stack: validationErr?.stack }, 'DNA contract validation error');
+    }
     const previousDna = await getDocumentDna(documentId);
     const updated = await updateDocumentDna(documentId, normalized);
     const delta = computeDnaDelta(previousDna, normalized);
@@ -528,8 +608,34 @@ documentRoutes.put(
 documentRoutes.post(
   '/:documentId/dna/regenerate',
   asyncHandler(async (req, res) => {
-    const dna = await generateDocumentDna(req.params.documentId);
-    res.json(dna);
+    try {
+      const dna = await generateDocumentDna(req.params.documentId);
+      res.json(dna);
+    } catch (error: any) {
+      // Log detailed error information
+      logger.error(
+        { 
+          documentId: req.params.documentId, 
+          error: error.message, 
+          stack: error.stack,
+          statusCode: error.statusCode,
+          isApiError: error instanceof ApiError,
+        },
+        'Failed to regenerate Document DNA',
+      );
+      
+      // If it's already an ApiError, it will have proper status code and message
+      // Otherwise, wrap it in a generic error
+      if (error instanceof ApiError) {
+        throw error;
+      }
+      
+      // For unexpected errors, provide a user-friendly message
+      throw ApiError.internalServerError(
+        `Failed to regenerate Document DNA: ${error.message || 'Unknown error'}. ` +
+        `Please check the server logs for more details or try again later.`,
+      );
+    }
   }),
 );
 
@@ -560,6 +666,90 @@ documentRoutes.post(
   }),
 );
 
+// DNA Enrichment from CSV
+documentRoutes.post(
+  '/:documentId/dna/enrich',
+  upload.single('csvFile'),
+  asyncHandler(async (req, res) => {
+    if (!req.file) {
+      res.status(400).json({ error: 'CSV file is required' });
+      return;
+    }
+
+    const useLLM = req.body.useLLM !== 'false';
+    const llmProvider = (req.body.llmProvider || 'gemini') as 'gemini' | 'openai' | 'yandex' | 'deepseek';
+
+    // Start enrichment asynchronously (don't wait for completion)
+    enrichDocumentDnaFromCSV(
+      req.params.documentId,
+      req.file.buffer,
+      {
+        useLLM,
+        llmProvider,
+      },
+    ).catch((error) => {
+      logger.error({ error, documentId: req.params.documentId }, 'Enrichment failed');
+    });
+
+    // Return immediately with progress tracking info
+    res.json({
+      success: true,
+      message: 'Enrichment started. Use GET /documents/:documentId/dna/enrich/progress to track progress.',
+    });
+  }),
+);
+
+// Get enrichment progress
+documentRoutes.get(
+  '/:documentId/dna/enrich/progress',
+  asyncHandler(async (req, res) => {
+    try {
+      const progress = getEnrichmentProgress(req.params.documentId);
+      if (!progress) {
+        res.status(404).json({ error: 'No enrichment progress found for this document' });
+        return;
+      }
+      // Ensure all required fields exist with defaults
+      const safeProgress = {
+        ...progress,
+        added: typeof progress.added === 'number' ? progress.added : 0,
+        skipped: typeof progress.skipped === 'number' ? progress.skipped : 0,
+        conflicts: typeof progress.conflicts === 'number' ? progress.conflicts : 0,
+        errors: Array.isArray(progress.errors) ? progress.errors : [],
+        current: typeof progress.current === 'number' ? progress.current : 0,
+        total: typeof progress.total === 'number' ? progress.total : 0,
+        batchNumber: typeof progress.batchNumber === 'number' ? progress.batchNumber : 0,
+        totalBatches: typeof progress.totalBatches === 'number' ? progress.totalBatches : 0,
+      };
+      res.json(safeProgress);
+    } catch (error) {
+      logger.error({ error, documentId: req.params.documentId }, 'Failed to get enrichment progress');
+      res.status(500).json({ error: 'Failed to get enrichment progress' });
+    }
+  }),
+);
+
+// Get all active enrichment progress
+documentRoutes.get(
+  '/dna/enrich/progress',
+  asyncHandler(async (req, res) => {
+    const allProgress = getAllActiveProgress();
+    // Ensure all progress items have required fields
+    const safeProgress = allProgress.map((p) => ({
+      ...p,
+      added: p.added ?? 0,
+      skipped: p.skipped ?? 0,
+      conflicts: p.conflicts ?? 0,
+      errors: p.errors ?? [],
+      current: p.current ?? 0,
+      total: p.total ?? 0,
+      batchNumber: p.batchNumber ?? 0,
+      totalBatches: p.totalBatches ?? 0,
+    }));
+    res.json(safeProgress);
+  }),
+);
+
 // Single term translation endpoint
 const translateTermSchema = z.object({
   term: z.string().min(1),
@@ -582,3 +772,56 @@ documentRoutes.post(
   }),
 );
 
+// ============================================
+// UniversalJanitor Routes
+// ============================================
+
+const auditOptionsSchema = z.object({
+  autoFix: z.boolean().optional(),
+  strictMode: z.boolean().optional(),
+  dryRun: z.boolean().optional(),
+});
+
+// Run audit
+documentRoutes.post(
+  '/:documentId/janitor/audit',
+  asyncHandler(async (req, res) => {
+    const documentId = req.params.documentId;
+    const body = auditOptionsSchema.safeParse(req.body ?? {});
+    
+    if (!body.success) {
+      res.status(400).json({ error: 'Invalid audit options', details: body.error.issues });
+      return;
+    }
+
+    const janitor = new UniversalJanitor();
+    const report = await janitor.auditSegments(documentId, {
+      autoFix: body.data.autoFix ?? true,
+      strictMode: body.data.strictMode ?? true,
+      dryRun: body.data.dryRun ?? false,
+    });
+
+    res.json(report);
+  }),
+);
+
+// Get audit report (if already run)
+documentRoutes.get(
+  '/:documentId/janitor/report',
+  asyncHandler(async (req, res) => {
+    const documentId = req.params.documentId;
+    
+    // Try to get the latest report from DocumentAnalysis executionLogs
+    // For now, we'll run a fresh audit if no report is cached
+    // TODO: Implement proper caching/storage of reports
+    
+    const janitor = new UniversalJanitor();
+    const report = await janitor.auditSegments(documentId, {
+      autoFix: false,
+      strictMode: false,
+      dryRun: true, // Don't save, just return report
+    });
+
+    res.json(report);
+  }),
+);

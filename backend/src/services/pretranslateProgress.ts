@@ -78,6 +78,11 @@ export const completeProgress = (documentId: string): void => {
   const progress = progressStore.get(documentId);
   if (progress) {
     progress.status = 'completed';
+    // Auto-clear progress after 5 minutes to prevent memory leaks
+    // Frontend should stop polling once status is 'completed'
+    setTimeout(() => {
+      clearProgress(documentId);
+    }, 5 * 60 * 1000); // 5 minutes
   }
 };
 
@@ -86,6 +91,10 @@ export const cancelProgress = (documentId: string): void => {
   const progress = progressStore.get(documentId);
   if (progress) {
     progress.status = 'cancelled';
+    // Auto-clear progress after 5 minutes to prevent memory leaks
+    setTimeout(() => {
+      clearProgress(documentId);
+    }, 5 * 60 * 1000); // 5 minutes
   }
 };
 
@@ -102,6 +111,10 @@ export const setError = (documentId: string, error: string): void => {
   if (progress) {
     progress.status = 'error';
     progress.error = error;
+    // Auto-clear progress after 5 minutes to prevent memory leaks
+    setTimeout(() => {
+      clearProgress(documentId);
+    }, 5 * 60 * 1000); // 5 minutes
   }
 };
 

@@ -2,6 +2,8 @@
 
 Пошаговый план правок по файлам. Без внесения изменений в код — только план.
 
+**Эталонный JSON (KEGOC/АБР):** см. `docs/kegoc-ideal-dna-reference.json` — структура с чистыми shortForm (без ключа в значении), namingConventions (definitionsFormatting, abbreviationRedundancy) и entityGroups.institutionalMemory.
+
 ---
 
 ## Цели

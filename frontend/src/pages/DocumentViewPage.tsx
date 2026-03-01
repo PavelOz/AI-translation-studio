@@ -106,6 +106,18 @@ export default function DocumentViewPage() {
           </div>
           <div className="flex items-center gap-2">
             <Link
+              to={`/documents/${documentId}/quality-control`}
+              className="btn border border-gray-300 bg-white text-gray-700 hover:bg-gray-50"
+            >
+              Quality Control
+            </Link>
+            <Link
+              to={`/documents/${documentId}/janitor`}
+              className="btn border border-purple-300 bg-purple-50 text-purple-700 hover:bg-purple-100"
+            >
+              Janitor Review
+            </Link>
+            <Link
               to={`/documents/${documentId}/editor`}
               className="btn btn-primary"
             >

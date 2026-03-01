@@ -81,6 +81,11 @@ export const aiApi = {
     return response.data;
   },
 
+  getAvailableModels: async (provider: 'gemini' | 'openai' | 'yandex' | 'deepseek'): Promise<string[]> => {
+    const response = await apiClient.get<{ provider: string; models: string[] }>(`/ai/providers/${provider}/models`);
+    return response.data.models;
+  },
+
   getAISettings: async (projectId: string): Promise<ProjectAISettings | null> => {
     const response = await apiClient.get<ProjectAISettings>(`/ai/projects/${projectId}/ai-settings`);
     return response.data;

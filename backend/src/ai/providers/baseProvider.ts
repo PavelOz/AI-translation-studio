@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import { logger } from '../../utils/logger';
-import type { AIProvider, ProviderPromptRequest, ProviderPromptResponse } from './types';
+import type { AIProvider, ProviderPromptRequest, ProviderPromptResponse, ModelCapabilities } from './types';
 
 export abstract class BaseProvider implements AIProvider {
   abstract readonly name: string;
@@ -9,6 +9,112 @@ export abstract class BaseProvider implements AIProvider {
   protected constructor(protected readonly apiKey?: string) {}
 
   abstract callModel(request: ProviderPromptRequest): Promise<ProviderPromptResponse>;
+  
+  /**
+   * Получить возможности модели (должен быть переопределен в наследниках)
+   */
+  abstract getCapabilities(model?: string): ModelCapabilities;
+
+  /**
+   * Retry configuration
+   */
+  protected getRetryConfig(): {
+    maxRetries: number;
+    baseDelay: number;
+    maxDelay: number;
+    retryableErrors: string[];
+  } {
+    return {
+      maxRetries: 3,
+      baseDelay: 1000, // 1 second
+      maxDelay: 16000, // 16 seconds
+      retryableErrors: [
+        'rate limit',
+        'rate_limit',
+        'too many requests',
+        '429',
+        'quota exceeded',
+        'service unavailable',
+        '503',
+        'timeout',
+        'network',
+      ],
+    };
+  }
+
+  /**
+   * Check if error is retryable
+   */
+  protected isRetryableError(error: unknown): boolean {
+    if (!(error instanceof Error)) return false;
+    const errorMessage = error.message.toLowerCase();
+    const retryableErrors = this.getRetryConfig().retryableErrors;
+    return retryableErrors.some(pattern => errorMessage.includes(pattern));
+  }
+
+  /**
+   * Calculate exponential backoff delay
+   */
+  protected calculateBackoffDelay(attempt: number): number {
+    const { baseDelay, maxDelay } = this.getRetryConfig();
+    const delay = baseDelay * Math.pow(2, attempt);
+    return Math.min(delay, maxDelay);
+  }
+
+  /**
+   * Call model with automatic retry and exponential backoff
+   */
+  async callModelWithRetry(
+    request: ProviderPromptRequest,
+    options?: {
+      maxRetries?: number;
+      onRetry?: (attempt: number, delay: number, error: Error) => void;
+    },
+  ): Promise<ProviderPromptResponse> {
+    const config = this.getRetryConfig();
+    const maxRetries = options?.maxRetries ?? config.maxRetries;
+    let lastError: Error | null = null;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        return await this.callModel(request);
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        
+        // Check if error is retryable
+        if (!this.isRetryableError(lastError)) {
+          throw lastError; // Non-retryable error, throw immediately
+        }
+
+        // If this is the last attempt, throw
+        if (attempt === maxRetries - 1) {
+          throw lastError;
+        }
+
+        // Calculate delay and wait
+        const delay = this.calculateBackoffDelay(attempt);
+        if (options?.onRetry) {
+          options.onRetry(attempt + 1, delay, lastError);
+        }
+        
+        logger.warn(
+          {
+            provider: this.name,
+            attempt: attempt + 1,
+            maxRetries,
+            delay,
+            error: lastError.message,
+          },
+          'Retrying LLM call after error',
+        );
+
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+
+    // Should never reach here, but TypeScript needs it
+    throw lastError || new Error('All retries exhausted');
+  }
 
   protected ensureModel(requested?: string) {
     return requested ?? this.defaultModel;
