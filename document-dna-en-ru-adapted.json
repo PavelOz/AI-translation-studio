@@ -110,8 +110,8 @@
       "shortForm": "ОВОС"
     },
     "EPC": {
-      "longForm": "Инжиниринг, закупки и строительство",
-      "shortForm": "EPC"
+      "longForm": "Engineering, Procurement and Construction",
+      "shortForm": "EPC-Contract"
     },
     "ESF": {
       "longForm": "Экологические и социальные рамки",
@@ -146,8 +146,8 @@
       "shortForm": "АСЭС"
     },
     "ESHS": {
-      "longForm": "Экологические, социальные аспекты, охрана труда и техника безопасности",
-      "shortForm": "ESHS"
+      "longForm": "Environmental, Social, Health and Safety",
+      "shortForm": "ESHS-Standards"
     },
     "ESMP": {
       "longForm": "План управления охраной окружающей среды и социальной сферой",
@@ -158,8 +158,8 @@
       "shortForm": "СЭСУ"
     },
     "GIIP": {
-      "longForm": "Наилучшая международная отраслевая практика",
-      "shortForm": "GIIP"
+      "longForm": "Good International Industry Practice",
+      "shortForm": "GIIP-Standard"
     },
     "IESE": {
       "longForm": "Первичное экологическое и социальное обследование",
@@ -176,6 +176,62 @@
     "ADB SPS": {
       "longForm": "Заявление Азиатского банка развития по политике в области гарантий",
       "shortForm": "ЗАБР"
+    },
+    "АО": {
+      "longForm": "Joint Stock Company",
+      "shortForm": "JSC"
+    },
+    "ТОО": {
+      "longForm": "Limited Liability Partnership",
+      "shortForm": "LLP"
+    },
+    "МВт": {
+      "longForm": "Megawatt",
+      "shortForm": "MW"
+    },
+    "СН": {
+      "longForm": "Auxiliary Power",
+      "shortForm": "SN"
+    },
+    "Рмин": {
+      "longForm": "Minimum Power",
+      "shortForm": "Pmin"
+    },
+    "ГТЭС": {
+      "longForm": "Gas Turbine Power Plant",
+      "shortForm": "GTPP"
+    },
+    "УКГЭС": {
+      "longForm": "Ust-Kamenogorsk Hydroelectric Power Plant",
+      "shortForm": "UKGES"
+    },
+    "ГЭС": {
+      "longForm": "Hydroelectric Power Plant",
+      "shortForm": "HPP"
+    },
+    "АЭС": {
+      "longForm": "Nuclear Power Plant",
+      "shortForm": "NPP"
+    },
+    "ТЭС": {
+      "longForm": "Thermal Power Plant",
+      "shortForm": "TPP"
+    },
+    "ВЭС": {
+      "longForm": "Wind Power Plant",
+      "shortForm": "WPP"
+    },
+    "СЭС": {
+      "longForm": "Solar Power Plant",
+      "shortForm": "SPP"
+    },
+    "ОАО": {
+      "longForm": "Open Joint Stock Company",
+      "shortForm": "JSC"
+    },
+    "Скорость набора/сброса нагрузки": {
+      "longForm": "Ramp-up/down rate",
+      "shortForm": "Ramp rate"
     }
   },
   "entityGroups": {

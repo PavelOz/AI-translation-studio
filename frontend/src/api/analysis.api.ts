@@ -151,6 +151,86 @@ export const analysisApi = {
     const response = await apiClient.post<DocumentDnaPayload>(`/documents/${documentId}/refine-dna`, options ?? {});
     return response.data;
   },
+
+  /** Validate Document DNA (includes contract validation). */
+  validateDocumentDna: async (documentId: string): Promise<DnaContractValidationResult> => {
+    const response = await apiClient.get(`/documents/${documentId}/dna/validate`);
+    return response.data;
+  },
+
+  enrichDocumentDnaFromCSV: async (
+    documentId: string,
+    csvFile: File,
+    options?: { useLLM?: boolean; llmProvider?: 'gemini' | 'openai' | 'yandex' | 'deepseek' },
+  ): Promise<{
+    success: boolean;
+    abbreviationLogic: Record<string, { longForm: string; shortForm: string }>;
+    statistics: {
+      totalBefore: number;
+      totalAfter: number;
+      added: number;
+      skipped: number;
+      conflicts: number;
+    };
+  }> => {
+    const formData = new FormData();
+    formData.append('csvFile', csvFile);
+    if (options?.useLLM !== undefined) {
+      formData.append('useLLM', String(options.useLLM));
+    }
+    if (options?.llmProvider) {
+      formData.append('llmProvider', options.llmProvider);
+    }
+
+    const response = await apiClient.post(`/documents/${documentId}/dna/enrich`, formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+    return response.data;
+  },
+
+  /** Add a single abbreviation entry to DNA. */
+  addAbbreviationToDna: async (
+    documentId: string,
+    key: string,
+    longForm: string,
+    shortForm: string,
+  ): Promise<DocumentDnaPayload> => {
+    // Get current DNA
+    const currentDna = await analysisApi.getDocumentDna(documentId);
+    if (!currentDna) {
+      throw new Error('Document has no DNA. Please create DNA first.');
+    }
+
+    // Add new entry to abbreviationLogic
+    const currentLogic = (currentDna.abbreviationLogic || {}) as Record<string, { longForm: string; shortForm: string }>;
+    const updatedLogic = {
+      ...currentLogic,
+      [key]: { longForm, shortForm },
+    };
+
+    // Update DNA
+    const updated = await analysisApi.updateDocumentDna(documentId, {
+      ...currentDna,
+      abbreviationLogic: updatedLogic,
+    });
+
+    return updated;
+  },
+};
+
+export type EnrichmentProgress = {
+  status: 'idle' | 'processing' | 'completed' | 'error';
+  current: number;
+  total: number;
+  batchNumber?: number;
+  error?: string;
+  lastAdded?: {
+    ruName: string;
+    shortForm: string;
+    longForm: string;
+  };
 };
 
 export type DocumentDnaPayload = {
@@ -158,6 +238,22 @@ export type DocumentDnaPayload = {
   namingConventions?: Record<string, unknown> | null;
   abbreviationLogic?: Record<string, unknown> | null;
   entityGroups?: Record<string, unknown> | null;
+};
+
+export type DnaContractValidationResult = {
+  valid: boolean;
+  errors: string[];
+  abbreviationCount: number;
+  contractValidation?: {
+    status: 'OK' | 'WARNING' | 'ERROR';
+    issues: Array<{
+      type: 'error' | 'warning';
+      message: string;
+      suggestion?: string;
+    }>;
+    suggestions: string[];
+    report: string;
+  } | null;
 };
 
 /** Response from PUT /documents/:id/dna (includes affected segments for smart retranslation). */

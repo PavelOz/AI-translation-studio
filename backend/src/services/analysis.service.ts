@@ -5543,24 +5543,6 @@ export const generateDocumentDna = async (
   const direction = getTranslationDirection(sourceLocale, targetLocale);
   logger.info({ documentId, direction, sourceLocale, targetLocale }, 'Document DNA: building prompt for direction');
 
-  const systemPrompt = buildDnaGenerateSystemPrompt({
-    sourceLocale,
-    targetLocale,
-    sourceLangHint,
-    targetLangHint,
-    profile,
-    profileContext: profile?.name,
-  });
-  const userPrompt = buildDnaGenerateUserPrompt({
-    sourceLocale,
-    targetLocale,
-    sourceLangHint,
-    targetLangHint,
-    profile,
-    documentName: document.name,
-    textToAnalyze,
-  });
-
   const { getProvider } = await import('../ai/providers/registry');
   const { getProjectAISettings } = await import('./ai.service');
   const aiSettings = await getProjectAISettings(document.projectId);
@@ -5579,16 +5561,232 @@ export const generateDocumentDna = async (
   const provider = getProvider(options?.provider ?? aiSettings?.provider, apiKey, yandexFolderId);
   const model = options?.model ?? aiSettings?.model ?? provider.defaultModel;
 
-  const response = await provider.callModel({
-    prompt: userPrompt,
-    systemPrompt,
-    model,
-    temperature: 0.2,
-    maxTokens: 4096,
-    segments: [],
+  // Get model's max context tokens (approximate)
+  // OpenAI: gpt-4o-mini = 128k, gpt-4o = 128k, gpt-4-turbo = 128k
+  // Gemini: gemini-1.5-pro = 1M, gemini-2.0-flash = 1M
+  // Yandex: yandexgpt-lite = 8k
+  // DeepSeek: deepseek-chat = 32k
+  const getMaxContextTokens = (providerName: string, modelName: string): number => {
+    if (providerName === 'openai') {
+      if (modelName.includes('gpt-4o')) return 128_000;
+      if (modelName.includes('gpt-4-turbo')) return 128_000;
+      if (modelName.includes('gpt-4')) return 8_192;
+      if (modelName.includes('gpt-3.5')) return 16_384;
+      return 128_000; // Default for newer models
+    }
+    if (providerName === 'gemini') {
+      if (modelName.includes('1.5') || modelName.includes('2.0')) return 1_000_000;
+      return 32_768; // Older models
+    }
+    if (providerName === 'yandex') return 8_000;
+    if (providerName === 'deepseek') return 32_000;
+    return 128_000; // Safe default
+  };
+
+  const maxContextTokens = getMaxContextTokens(provider.name, model);
+  // Reserve tokens for system prompt, user prompt structure, and response (estimate ~10k)
+  const reservedTokens = 10_000;
+  const availableTokens = maxContextTokens - reservedTokens;
+  
+  // Estimate tokens: ~1 token per 3.5 characters (more accurate for English/Russian mixed text)
+  // OpenAI uses tiktoken which is roughly 1 token per 3.5-4 chars for English, but Russian can be denser
+  const estimateTokens = (text: string): number => Math.ceil(text.length / 3.5);
+  
+  // Build prompts to check size
+  const systemPrompt = buildDnaGenerateSystemPrompt({
+    sourceLocale,
+    targetLocale,
+    sourceLangHint,
+    targetLangHint,
+    profile,
+    profileContext: profile?.name,
+  });
+  
+  // If textToAnalyze is too large, reduce it further
+  let finalTextToAnalyze = textToAnalyze;
+  let reducedSampleCount = DOCUMENT_DNA_SAMPLE_COUNT;
+  let reducedChunkSize = DOCUMENT_DNA_CHUNK_SIZE;
+  
+  // Build a test user prompt to check size
+  let testUserPrompt = buildDnaGenerateUserPrompt({
+    sourceLocale,
+    targetLocale,
+    sourceLangHint,
+    targetLangHint,
+    profile,
+    documentName: document.name,
+    textToAnalyze: finalTextToAnalyze,
+  });
+  
+  let estimatedTokens = estimateTokens(systemPrompt) + estimateTokens(testUserPrompt);
+  
+  // If estimated tokens exceed available tokens, reduce textToAnalyze
+  if (estimatedTokens > availableTokens) {
+    logger.warn(
+      { documentId, estimatedTokens, availableTokens, maxContextTokens, model },
+      'Prompt too large for model context, reducing text sample',
+    );
+    
+    // Reduce sample count and chunk size progressively
+    while (estimatedTokens > availableTokens && (reducedSampleCount > 10 || reducedChunkSize > 500)) {
+      if (reducedSampleCount > 10) {
+        reducedSampleCount = Math.max(10, Math.floor(reducedSampleCount * 0.7));
+      } else if (reducedChunkSize > 500) {
+        reducedChunkSize = Math.max(500, Math.floor(reducedChunkSize * 0.8));
+      } else {
+        break;
+      }
+      
+      // Rebuild textToAnalyze with reduced parameters
+      if (fullText.length > reducedChunkSize) {
+        const n = reducedSampleCount;
+        const chunkSize = reducedChunkSize;
+        const L = fullText.length;
+        const stride = (L - chunkSize) / Math.max(1, n - 1);
+        const parts: string[] = [];
+        for (let i = 0; i < n; i++) {
+          const start = Math.min(Math.floor(i * stride), Math.max(0, L - chunkSize));
+          const end = Math.min(start + chunkSize, L);
+          parts.push(fullText.slice(start, end));
+          if (i < n - 1) {
+            const nextStart = Math.min(Math.floor((i + 1) * stride), Math.max(0, L - chunkSize));
+            const segEnd = charOffsetToSegmentIndex(end);
+            const segNext = charOffsetToSegmentIndex(nextStart);
+            const gapSegments = Math.max(0, segNext - segEnd - 1);
+            parts.push(`\n... [gap: ~${gapSegments} segments] ...\n`);
+          }
+        }
+        finalTextToAnalyze = parts.join('');
+      } else {
+        finalTextToAnalyze = fullText;
+      }
+      
+      testUserPrompt = buildDnaGenerateUserPrompt({
+        sourceLocale,
+        targetLocale,
+        sourceLangHint,
+        targetLangHint,
+        profile,
+        documentName: document.name,
+        textToAnalyze: finalTextToAnalyze,
+      });
+      
+      estimatedTokens = estimateTokens(systemPrompt) + estimateTokens(testUserPrompt);
+    }
+    
+    logger.info(
+      { documentId, finalLength: finalTextToAnalyze.length, estimatedTokens, availableTokens, reducedSampleCount, reducedChunkSize },
+      'Reduced text sample to fit model context',
+    );
+    
+    // If we had to reduce significantly, log a warning that will be visible to user
+    if (reducedSampleCount < DOCUMENT_DNA_SAMPLE_COUNT * 0.5 || reducedChunkSize < DOCUMENT_DNA_CHUNK_SIZE * 0.5) {
+      logger.warn(
+        { documentId, model, originalSampleCount: DOCUMENT_DNA_SAMPLE_COUNT, reducedSampleCount, originalChunkSize: DOCUMENT_DNA_CHUNK_SIZE, reducedChunkSize },
+        'Document DNA: Significantly reduced text sample due to model context limits. Results may be less comprehensive.',
+      );
+    }
+  }
+  
+  const userPrompt = buildDnaGenerateUserPrompt({
+    sourceLocale,
+    targetLocale,
+    sourceLangHint,
+    targetLangHint,
+    profile,
+    documentName: document.name,
+    textToAnalyze: finalTextToAnalyze,
   });
 
+  // Calculate dynamic maxTokens based on available context
+  // Reserve space for input tokens and leave room for response
+  const inputTokens = estimateTokens(systemPrompt) + estimateTokens(userPrompt);
+  // For models with small context, be more conservative with maxTokens
+  // Leave at least 20% buffer for safety
+  const safeAvailableTokens = Math.floor(availableTokens * 0.8);
+  const responseTokens = Math.min(
+    4096, // Max we want to generate
+    Math.max(1024, safeAvailableTokens - inputTokens) // Leave room for input
+  );
+  
+  // For models with very small context (< 20k), use even more conservative approach
+  const finalMaxTokens = maxContextTokens < 20000 
+    ? Math.min(responseTokens, Math.floor(safeAvailableTokens * 0.25)) // Use max 25% of safe context for response
+    : responseTokens;
+  
+  logger.info(
+    { documentId, model, inputTokens, availableTokens, safeAvailableTokens, finalMaxTokens, maxContextTokens },
+    'Document DNA: calculated maxTokens for response',
+  );
+  
+  // Double-check: if input tokens alone exceed available, we need to reduce more
+  if (inputTokens > safeAvailableTokens) {
+    logger.warn(
+      { documentId, model, inputTokens, safeAvailableTokens, maxContextTokens },
+      'Document DNA: Input tokens still exceed safe available tokens after reduction',
+    );
+    throw ApiError.badRequest(
+      `Document is too large for the selected model (${model}). Even after reducing the text sample, ` +
+      `the prompt requires approximately ${inputTokens} tokens, but the model only supports ${maxContextTokens} tokens. ` +
+      `Please use a model with a larger context window (e.g., Gemini 1.5 Pro or GPT-4o).`,
+    );
+  }
+
+  logger.info(
+    { documentId, provider: provider.name, model, hasApiKey: !!apiKey, finalMaxTokens },
+    'Document DNA: calling AI model',
+  );
+
+  let response;
+  try {
+    response = await provider.callModel({
+      prompt: userPrompt,
+      systemPrompt,
+      model,
+      temperature: 0.2,
+      maxTokens: finalMaxTokens,
+      segments: [],
+    });
+  } catch (error: any) {
+    const errorMessage = error.message || 'Unknown error';
+    logger.error(
+      { documentId, provider: provider.name, model, error: errorMessage, stack: error.stack, estimatedTokens, availableTokens },
+      'Document DNA: AI model call failed',
+    );
+    
+    // Provide more specific error messages for common issues
+    if (errorMessage.includes('context_length_exceeded') || errorMessage.includes('maximum context length')) {
+      throw ApiError.badRequest(
+        `Document is too large for the selected model (${model}). The document requires approximately ${estimatedTokens} tokens, but the model only supports ${maxContextTokens} tokens. ` +
+        `Please try using a model with a larger context window (e.g., Gemini 1.5 Pro) or reduce the document size. ` +
+        `The system attempted to reduce the text sample but it was still too large.`,
+      );
+    }
+    
+    if (errorMessage.includes('rate_limit') || errorMessage.includes('rate limit')) {
+      throw ApiError.tooManyRequests(
+        `Rate limit exceeded for ${provider.name}. Please wait a moment and try again.`,
+      );
+    }
+    
+    if (errorMessage.includes('invalid_api_key') || errorMessage.includes('authentication')) {
+      throw ApiError.unauthorized(
+        `Invalid API key for ${provider.name}. Please check your AI provider settings in project settings.`,
+      );
+    }
+    
+    throw ApiError.internalServerError(
+      `Failed to generate Document DNA using ${provider.name} (${model}): ${errorMessage}. ` +
+      `Please check your AI provider settings and API keys, or try a different model.`,
+    );
+  }
+
   const rawText = (response.outputText || '').trim();
+  if (!rawText) {
+    logger.error({ documentId, provider: provider.name, model }, 'Document DNA: AI returned empty response');
+    throw ApiError.internalServerError('AI model returned empty response. Please try again or check your AI provider settings.');
+  }
+
   const cleaned = cleanJsonOutput(rawText);
   let payload: DocumentDnaPayload = {};
   try {
@@ -5600,9 +5798,34 @@ export const generateDocumentDna = async (
         abbreviationLogic: parsed.abbreviationLogic ?? null,
         entityGroups: parsed.entityGroups ?? null,
       };
+    } else {
+      logger.warn({ documentId }, 'Document DNA: parsed result is not an object');
     }
   } catch (e) {
-    logger.warn({ documentId, error: (e as Error).message }, 'Document DNA JSON parse failed; storing empty');
+    logger.error(
+      { 
+        documentId, 
+        error: (e as Error).message,
+        cleanedPreview: cleaned.substring(0, 500),
+        cleanedLength: cleaned.length,
+      },
+      'Document DNA JSON parse failed',
+    );
+    throw ApiError.internalServerError(
+      `Failed to parse DNA JSON from AI response: ${(e as Error).message}. The AI model may have returned invalid JSON. Please try again.`,
+    );
+  }
+
+  // Validate that we have some data before saving
+  const hasData = payload.technicalSchema || payload.namingConventions || 
+                  payload.abbreviationLogic || payload.entityGroups;
+  
+  if (!hasData) {
+    logger.warn({ documentId, model }, 'Document DNA: Generated payload is empty, not saving');
+    throw ApiError.internalServerError(
+      'AI model returned empty DNA payload. The model may not have been able to analyze the document. ' +
+      'Please try again or use a different model with a larger context window.',
+    );
   }
 
   const toJson = (v: Record<string, unknown> | null | undefined): Prisma.InputJsonValue | undefined =>
@@ -5626,7 +5849,7 @@ export const generateDocumentDna = async (
     },
   });
 
-  logger.info({ documentId }, 'Document DNA generated and saved');
+  logger.info({ documentId, model, hasData: true }, 'Document DNA generated and saved');
   return payload;
 };
 

@@ -226,5 +226,46 @@ export const documentsApi = {
     });
     return response.data;
   },
+
+  /** Run Validator-Janitor: report + optional apply fixes. dryRun: true = report only. */
+  runValidatorJanitor: async (
+    documentId: string,
+    options?: { dryRun?: boolean },
+  ): Promise<ValidatorJanitorReport> => {
+    const response = await apiClient.post<ValidatorJanitorReport>(
+      `/documents/${documentId}/validator-janitor`,
+      options ?? { dryRun: true },
+    );
+    return response.data;
+  },
+};
+
+export type JanitorErrorType = 'FORBIDDEN_SCRIPT' | 'SUSPICIOUS_ABBREV';
+
+export type UnfixableEntry = {
+  segmentId: string;
+  segmentIndex?: number;
+  errorType: JanitorErrorType;
+  detail?: string;
+};
+
+export type JanitorCounts = {
+  legalKeywordRemoved: number;
+  bracketDupRemoved: number;
+  spaceDupRemoved: number;
+  identityProtectionFixed: number;
+  forbiddenScriptSegments: number;
+  suspiciousAbbrevCount: number;
+};
+
+export type ValidatorJanitorReport = {
+  documentId: string;
+  documentName?: string;
+  direction: string;
+  totalSegments: number;
+  counts: JanitorCounts;
+  unfixable: UnfixableEntry[];
+  spotCheckSegmentIds: string[];
+  preflightFailed?: string;
 };
 

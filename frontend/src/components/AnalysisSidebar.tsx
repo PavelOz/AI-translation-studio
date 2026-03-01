@@ -3,8 +3,10 @@ import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { Link } from 'react-router-dom';
 import { analysisApi, type AnalysisResults, type AnalysisStatus, type DocumentDnaPayload, type UpdateDocumentDnaResponse } from '../api/analysis.api';
 import { documentsApi } from '../api/documents.api';
+import { aiApi } from '../api/ai.api';
 import toast from 'react-hot-toast';
 import { DocumentDnaEditor } from './DocumentDnaEditor';
+import DnaValidationPanel from './DnaValidationPanel';
 
 interface AnalysisSidebarProps {
   documentId: string;
@@ -1071,22 +1073,83 @@ function DocumentDnaBlock({ documentId }: { documentId: string }) {
   } | null>(null);
   const patchPollRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Fetch document to get projectId
+  const { data: document } = useQuery(
+    ['document', documentId],
+    () => documentsApi.get(documentId),
+    { enabled: !!documentId, staleTime: 60000 }
+  );
+
+  // Fetch AI settings to get model name
+  const { data: aiSettings } = useQuery(
+    ['ai-settings', document?.projectId],
+    () => (document?.projectId ? aiApi.getAISettings(document.projectId) : null),
+    { enabled: !!document?.projectId, staleTime: 60000 }
+  );
+
   const { data: dna, isLoading: dnaLoading, refetch: refetchDna } = useQuery({
     queryKey: ['document-dna', documentId],
     queryFn: () => analysisApi.getDocumentDna(documentId),
     enabled: !!documentId,
     retry: false,
+    // Force refetch to get fresh data
+    staleTime: 0,
+    cacheTime: 0,
   });
+
+  // Update editJson when dna changes and we're in JSON editing mode
+  useEffect(() => {
+    if (editingMode === 'json' && dna) {
+      setEditJson(JSON.stringify(dna, null, 2));
+    }
+  }, [dna, editingMode]);
 
   const regenerateMutation = useMutation({
     mutationFn: () => analysisApi.regenerateDocumentDna(documentId),
-    onSuccess: () => {
+    onSuccess: async (newDna) => {
       toast.success('Document DNA regenerated');
+      // If in JSON editing mode, update editJson with new data immediately
+      if (editingMode === 'json' && newDna) {
+        setEditJson(JSON.stringify(newDna, null, 2));
+      }
+      // If in form editing mode, update dnaDraft
+      if (editingMode === 'form' && newDna) {
+        setDnaDraft(newDna);
+      }
+      // Invalidate queries first
       queryClient.invalidateQueries({ queryKey: ['document-dna', documentId] });
-      refetchDna();
+      queryClient.invalidateQueries({ queryKey: ['dna-validation', documentId] });
+      // Remove from cache to force fresh fetch
+      queryClient.removeQueries({ queryKey: ['document-dna', documentId] });
+      // Refetch to get the latest data from server
+      const result = await refetchDna();
+      // Use data from refetch (most up-to-date) or fallback to mutation response
+      const updatedDna = result.data || newDna;
+      // If in JSON editing mode, update editJson with new data
+      if (editingMode === 'json' && updatedDna) {
+        setEditJson(JSON.stringify(updatedDna, null, 2));
+      }
+      // If in form editing mode, update dnaDraft
+      if (editingMode === 'form' && updatedDna) {
+        setDnaDraft(updatedDna);
+      }
     },
     onError: (err: any) => {
-      toast.error(err?.response?.data?.message || err?.message || 'Failed to regenerate Document DNA');
+      const errorMessage = err?.response?.data?.message || err?.response?.data?.error || err?.message || 'Failed to regenerate Document DNA';
+      const status = err?.response?.status;
+      
+      // Show more detailed error messages based on status code
+      if (status === 400) {
+        toast.error(`Invalid request: ${errorMessage}`, { duration: 8000 });
+      } else if (status === 401 || status === 403) {
+        toast.error(`Authentication error: ${errorMessage}. Please check your AI provider settings.`, { duration: 8000 });
+      } else if (status === 429) {
+        toast.error(`Rate limit exceeded: ${errorMessage}. Please wait a moment and try again.`, { duration: 8000 });
+      } else if (status === 413 || errorMessage.includes('too large') || errorMessage.includes('context length')) {
+        toast.error(`Document too large: ${errorMessage}. Try using a model with a larger context window (e.g., Gemini 1.5 Pro).`, { duration: 10000 });
+      } else {
+        toast.error(errorMessage, { duration: 8000 });
+      }
     },
   });
 
@@ -1120,6 +1183,7 @@ function DocumentDnaBlock({ documentId }: { documentId: string }) {
         setLastSaveAffected(null);
       }
       queryClient.invalidateQueries({ queryKey: ['document-dna', documentId] });
+      queryClient.invalidateQueries({ queryKey: ['dna-validation', documentId] });
       refetchDna();
     },
     onError: (err: any) => {
@@ -1127,6 +1191,56 @@ function DocumentDnaBlock({ documentId }: { documentId: string }) {
       const msg = data?.error || data?.message || err?.message || 'Failed to save';
       const details = Array.isArray(data?.details) ? data.details.join('; ') : data?.details;
       toast.error(details ? `${msg}: ${details}` : msg);
+    },
+  });
+
+  const [enrichmentModalOpen, setEnrichmentModalOpen] = useState(false);
+  const [csvFile, setCsvFile] = useState<File | null>(null);
+  const [useLLM, setUseLLM] = useState(true);
+  const [llmProvider, setLlmProvider] = useState<'gemini' | 'openai' | 'yandex' | 'deepseek'>('gemini');
+  const [enrichmentProgress, setEnrichmentProgress] = useState<{ current: number; total: number } | null>(null);
+
+  const enrichMutation = useMutation({
+    mutationFn: () => {
+      if (!csvFile) throw new Error('CSV file is required');
+      return analysisApi.enrichDocumentDnaFromCSV(documentId, csvFile, { useLLM, llmProvider });
+    },
+    onSuccess: async (data) => {
+      const added = data?.statistics?.added ?? 0;
+      toast.success(`DNA enriched: ${added} entries added`);
+      setEnrichmentModalOpen(false);
+      setCsvFile(null);
+      setEnrichmentProgress(null);
+      // Invalidate and remove from cache to force fresh fetch
+      queryClient.invalidateQueries({ queryKey: ['document-dna', documentId] });
+      queryClient.invalidateQueries({ queryKey: ['dna-validation', documentId] });
+      queryClient.removeQueries({ queryKey: ['document-dna', documentId] });
+      // Wait for refetch to complete
+      const result = await refetchDna();
+      // Update editJson if in JSON editing mode
+      if (editingMode === 'json' && result.data) {
+        setEditJson(JSON.stringify(result.data, null, 2));
+      }
+      // Update dnaDraft if in form editing mode
+      if (editingMode === 'form' && result.data) {
+        setDnaDraft(result.data);
+      }
+    },
+    onError: (err: any) => {
+      const errorMessage = err?.response?.data?.message || err?.response?.data?.error || err?.message || 'Failed to enrich DNA';
+      const status = err?.response?.status;
+      
+      // Show more detailed error messages based on status code
+      if (status === 400) {
+        toast.error(`Invalid request: ${errorMessage}`, { duration: 8000 });
+      } else if (status === 401 || status === 403) {
+        toast.error(`Authentication error: ${errorMessage}. Please check your AI provider settings.`, { duration: 8000 });
+      } else if (status === 429) {
+        toast.error(`Rate limit exceeded: ${errorMessage}. Please wait a moment and try again.`, { duration: 8000 });
+      } else {
+        toast.error(errorMessage, { duration: 8000 });
+      }
+      setEnrichmentProgress(null);
     },
   });
 
@@ -1166,9 +1280,53 @@ function DocumentDnaBlock({ documentId }: { documentId: string }) {
 
   useEffect(() => {
     if (patchProgress?.status !== 'running') return;
+    
+    let isCancelled = false;
+    
     const poll = async () => {
+      if (isCancelled) return;
+      
       try {
         const p = await documentsApi.getPretranslateProgress(documentId);
+        
+        // Stop polling if status is completed, error, or cancelled
+        if (p.status === 'completed' || p.status === 'error' || p.status === 'cancelled') {
+          if (patchPollRef.current) {
+            clearInterval(patchPollRef.current);
+            patchPollRef.current = null;
+          }
+          
+          setPatchProgress({
+            status: p.status,
+            currentSegment: p.currentSegment,
+            totalSegments: p.totalSegments,
+            aiApplied: p.aiApplied,
+            error: p.error,
+          });
+          
+          if (p.status === 'completed') {
+            toast.success(`Retranslated ${p.aiApplied} segments`);
+            setLastSaveAffected(null);
+            // Clear progress after a short delay to allow UI to update
+            setTimeout(() => {
+              setPatchProgress(null);
+            }, 1000);
+            queryClient.invalidateQueries({ queryKey: ['document-segments', documentId] });
+          } else if (p.status === 'error' && p.error) {
+            toast.error(p.error);
+            setTimeout(() => {
+              setPatchProgress(null);
+            }, 1000);
+          } else if (p.status === 'cancelled') {
+            toast('Retranslation cancelled');
+            setTimeout(() => {
+              setPatchProgress(null);
+            }, 1000);
+          }
+          return;
+        }
+        
+        // Update progress if still running
         setPatchProgress({
           status: p.status,
           currentSegment: p.currentSegment,
@@ -1176,26 +1334,30 @@ function DocumentDnaBlock({ documentId }: { documentId: string }) {
           aiApplied: p.aiApplied,
           error: p.error,
         });
-        if (p.status === 'completed') {
-          toast.success(`Retranslated ${p.aiApplied} segments`);
-          setLastSaveAffected(null);
+      } catch (error: any) {
+        // If 404, progress was cleared - stop polling
+        if (error.response?.status === 404) {
+          if (patchPollRef.current) {
+            clearInterval(patchPollRef.current);
+            patchPollRef.current = null;
+          }
           setPatchProgress(null);
-          queryClient.invalidateQueries({ queryKey: ['document-segments', documentId] });
-        } else if (p.status === 'error' && p.error) {
-          toast.error(p.error);
-        } else if (p.status === 'cancelled') {
-          toast('Retranslation cancelled');
-          setPatchProgress(null);
+          return;
         }
-      } catch {
-        // keep polling
+        // For other errors, keep polling (might be temporary network issue)
       }
     };
+    
     const id = setInterval(poll, 1500);
     patchPollRef.current = id;
+    poll(); // Initial poll
+    
     return () => {
-      if (patchPollRef.current) clearInterval(patchPollRef.current);
-      patchPollRef.current = null;
+      isCancelled = true;
+      if (patchPollRef.current) {
+        clearInterval(patchPollRef.current);
+        patchPollRef.current = null;
+      }
     };
   }, [documentId, patchProgress?.status, queryClient]);
 
@@ -1341,15 +1503,28 @@ function DocumentDnaBlock({ documentId }: { documentId: string }) {
       {!editingMode && (
         <div className="flex gap-2 flex-wrap items-center">
           {hasData && (
-            <button
-              type="button"
-              onClick={() => refineMutation.mutate()}
-              disabled={refineMutation.isLoading}
-              className="btn btn-primary text-sm disabled:opacity-50"
-              title="Re-analyze existing DNA against full document text (AI revision)"
-            >
-              {refineMutation.isLoading ? 'Refining...' : 'Refine with AI'}
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => refineMutation.mutate()}
+                disabled={refineMutation.isLoading}
+                className="btn btn-primary text-sm disabled:opacity-50"
+                title="Re-analyze existing DNA against full document text (AI revision)"
+              >
+                {refineMutation.isLoading 
+                  ? `Refining${aiSettings?.model ? ` (${aiSettings.model})` : ''}...` 
+                  : 'Refine with AI'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setEnrichmentModalOpen(true)}
+                disabled={enrichMutation.isLoading}
+                className="btn btn-primary text-sm disabled:opacity-50"
+                title="Enrich abbreviationLogic from CSV file"
+              >
+                Enrich from CSV
+              </button>
+            </>
           )}
           <button type="button" onClick={handleStartEditForm} className="text-xs text-blue-600 hover:underline">
             Safe edit
@@ -1363,7 +1538,9 @@ function DocumentDnaBlock({ documentId }: { documentId: string }) {
             disabled={regenerateMutation.isLoading}
             className="text-xs text-gray-600 hover:underline disabled:opacity-50"
           >
-            {regenerateMutation.isLoading ? 'Regenerating...' : 'Regenerate'}
+            {regenerateMutation.isLoading 
+              ? `Regenerating${aiSettings?.model ? ` (${aiSettings.model})` : ''}...` 
+              : 'Regenerate'}
           </button>
         </div>
       )}
@@ -1389,6 +1566,102 @@ function DocumentDnaBlock({ documentId }: { documentId: string }) {
       )}
       {patchProgress?.status === 'error' && patchProgress.error && (
         <p className="mt-2 text-xs text-red-600">{patchProgress.error}</p>
+      )}
+      {!editingMode && hasData && <DnaValidationPanel documentId={documentId} />}
+
+      {/* Enrichment Modal */}
+      {enrichmentModalOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4 max-h-[90vh] overflow-y-auto">
+            <h3 className="text-lg font-semibold mb-4">Enrich DNA from CSV</h3>
+            
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  CSV File
+                </label>
+                <input
+                  type="file"
+                  accept=".csv"
+                  onChange={(e) => setCsvFile(e.target.files?.[0] || null)}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                />
+                <p className="text-xs text-gray-500 mt-1">
+                  Required columns: "Наименование энергопроизводящей организации", "Сокращенное наименование"
+                </p>
+              </div>
+
+              <div>
+                <label className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    checked={useLLM}
+                    onChange={(e) => setUseLLM(e.target.checked)}
+                    className="rounded"
+                  />
+                  <span className="text-sm text-gray-700">Use LLM for translation</span>
+                </label>
+              </div>
+
+              {useLLM && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    LLM Provider
+                  </label>
+                  <select
+                    value={llmProvider}
+                    onChange={(e) => setLlmProvider(e.target.value as typeof llmProvider)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                  >
+                    <option value="gemini">Gemini</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="yandex">Yandex</option>
+                    <option value="deepseek">DeepSeek</option>
+                  </select>
+                </div>
+              )}
+
+              {enrichmentProgress && (
+                <div className="bg-blue-50 border border-blue-200 rounded p-3">
+                  <p className="text-sm text-blue-800">
+                    Processing: {enrichmentProgress.current} / {enrichmentProgress.total}
+                  </p>
+                  <div className="mt-2 w-full bg-blue-200 rounded-full h-2">
+                    <div
+                      className="bg-blue-600 h-2 rounded-full transition-all"
+                      style={{ width: `${(enrichmentProgress.current / enrichmentProgress.total) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div className="flex gap-2 justify-end">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEnrichmentModalOpen(false);
+                    setCsvFile(null);
+                    setEnrichmentProgress(null);
+                  }}
+                  className="btn btn-secondary text-sm"
+                  disabled={enrichMutation.isLoading}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => enrichMutation.mutate()}
+                  disabled={!csvFile || enrichMutation.isLoading}
+                  className="btn btn-primary text-sm disabled:opacity-50"
+                >
+                  {enrichMutation.isLoading 
+                    ? `Enriching${useLLM && aiSettings?.model ? ` (${aiSettings.model})` : ''}...` 
+                    : 'Enrich'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

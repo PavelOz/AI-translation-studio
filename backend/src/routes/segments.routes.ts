@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { asyncHandler } from '../utils/asyncHandler';
 import { requireAuth } from '../utils/authMiddleware';
+import { logger } from '../utils/logger';
 import { getDocumentSegments, updateSegment, getSegment, bulkUpdateSegments, searchSegments } from '../services/segment.service';
 import { runSegmentMachineTranslation, runSegmentMachineTranslationWithCritic, getSegmentDebugInfo } from '../services/ai.service';
 import { getSegmentMetrics, runSegmentQualityCheck } from '../services/quality.service';
@@ -65,6 +66,8 @@ const mtSchema = z.object({
     limit: z.number().int().min(1).max(20).optional(),
   }).nullable().optional(), // Allow null and undefined
 });
+
+import { UniversalJanitor } from '../services/universalJanitor';
 
 export const segmentRoutes = Router();
 
@@ -364,5 +367,98 @@ segmentRoutes.post(
       );
       res.json(result);
     }
+  }),
+);
+
+// ============================================
+// UniversalJanitor Segment Actions
+// ============================================
+
+// Approve segment (apply fixed text from Janitor)
+const approveSegmentSchema = z.object({
+  fixedText: z.string().optional(),
+});
+
+segmentRoutes.post(
+  '/:segmentId/janitor/approve',
+  asyncHandler(async (req, res) => {
+    const segmentId = req.params.segmentId;
+    const body = approveSegmentSchema.safeParse(req.body ?? {});
+    
+    if (!body.success) {
+      res.status(400).json({ error: 'Invalid request', details: body.error.issues });
+      return;
+    }
+
+    // Get segment to find fixed text
+    const segment = await prisma.segment.findUnique({
+      where: { id: segmentId },
+      select: { id: true, targetMt: true, mtAnalysis: true },
+    });
+
+    if (!segment) {
+      res.status(404).json({ error: 'Segment not found' });
+      return;
+    }
+
+    // Use provided fixedText or try to get from mtAnalysis (where janitorComment is stored)
+    const fixedText = body.data.fixedText || segment.targetMt;
+
+    if (fixedText) {
+      await prisma.segment.update({
+        where: { id: segmentId },
+        data: {
+          targetFinal: fixedText,
+          targetMt: fixedText,
+          status: 'EDITED',
+        },
+      });
+    }
+
+    res.json({ success: true, message: 'Segment approved' });
+  }),
+);
+
+// Bulk approve segments
+const bulkApproveSchema = z.object({
+  segmentIds: z.array(z.string().uuid()),
+});
+
+segmentRoutes.post(
+  '/janitor/bulk-approve',
+  asyncHandler(async (req, res) => {
+    const body = bulkApproveSchema.safeParse(req.body);
+    
+    if (!body.success) {
+      res.status(400).json({ error: 'Invalid request', details: body.error.issues });
+      return;
+    }
+
+    const { segmentIds } = body.data;
+    let approved = 0;
+
+    for (const segmentId of segmentIds) {
+      try {
+        const segment = await prisma.segment.findUnique({
+          where: { id: segmentId },
+          select: { id: true, targetMt: true },
+        });
+
+        if (segment && segment.targetMt) {
+          await prisma.segment.update({
+            where: { id: segmentId },
+            data: {
+              targetFinal: segment.targetMt,
+              status: 'EDITED',
+            },
+          });
+          approved++;
+        }
+      } catch (error) {
+        logger.warn({ segmentId, error }, 'Failed to approve segment');
+      }
+    }
+
+    res.json({ approved });
   }),
 );

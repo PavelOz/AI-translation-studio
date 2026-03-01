@@ -1,5 +1,5 @@
 import { BaseProvider } from './baseProvider';
-import type { ProviderPromptRequest, ProviderPromptResponse } from './types';
+import type { ProviderPromptRequest, ProviderPromptResponse, ModelCapabilities } from './types';
 import { logger } from '../../utils/logger';
 
 // Use v1 API by default - supports all newer models including gemini-1.5-flash and gemini-1.5-pro

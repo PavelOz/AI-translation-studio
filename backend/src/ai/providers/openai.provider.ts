@@ -1,5 +1,5 @@
 import { BaseProvider } from './baseProvider';
-import type { ProviderPromptRequest, ProviderPromptResponse } from './types';
+import type { ProviderPromptRequest, ProviderPromptResponse, ModelCapabilities } from './types';
 import { logger } from '../../utils/logger';
 
 const OPENAI_ENDPOINT = 'https://api.openai.com/v1/chat/completions';
@@ -110,6 +110,47 @@ export class OpenAIProvider extends BaseProvider {
       
       return this.mockResponse(request);
     }
+  }
+
+  /**
+   * Get model capabilities based on model name
+   */
+  getCapabilities(model?: string): ModelCapabilities {
+    const modelName = (model || this.defaultModel).toLowerCase();
+    
+    // GPT-4o - большой контекст, большие батчи
+    if (modelName.includes('gpt-4o')) {
+      return {
+        maxBatchSize: 40,
+        contextLimit: 128_000,
+        supportsBatchProcessing: true,
+      };
+    }
+    
+    // GPT-4 Turbo
+    if (modelName.includes('gpt-4-turbo')) {
+      return {
+        maxBatchSize: 30,
+        contextLimit: 128_000,
+        supportsBatchProcessing: true,
+      };
+    }
+    
+    // GPT-4
+    if (modelName.includes('gpt-4') && !modelName.includes('turbo') && !modelName.includes('gpt-4o')) {
+      return {
+        maxBatchSize: 25,
+        contextLimit: 8_192,
+        supportsBatchProcessing: true,
+      };
+    }
+    
+    // GPT-3.5 и другие
+    return {
+      maxBatchSize: 20,
+      contextLimit: 16_384,
+      supportsBatchProcessing: true,
+    };
   }
 }
 

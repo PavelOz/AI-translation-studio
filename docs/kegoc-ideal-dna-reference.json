@@ -1,0 +1,41 @@
+{
+  "technicalSchema": {
+    "dispatch": { "description": "Диспетчерское управление и оперативные термины" },
+    "metering": { "description": "Учет электроэнергии и системы АСКУЭ (AMR)" },
+    "protection": { "description": "Релейная защита и автоматика (РЗА)" },
+    "powerSystemStability": { "description": "Термины устойчивости и режимов энергосистемы" }
+  },
+  "namingConventions": {
+    "dateNotation": "Даты: ДД Месяц ГГГГ (например, 30 июня 2026 г.).",
+    "phaseLetters": "Фазы: только латинские буквы (A, B, C).",
+    "definitionsFormatting": "В Разделе 4 (Определения) СТРОГО соблюдать формат: 'Латинское обозначение – Полная форма' (например, 'Pinst – installed electric capacity'). Обозначение/индекс не должны исчезать.",
+    "abbreviationRedundancy": "В Разделе 5 (Ответственность) после первого упоминания в документе использовать ТОЛЬКО аббревиатуры (NDC SO, ERS, COTC, MERK, UPS). Запрещено повторять полную расшифровку в каждом пункте."
+  },
+  "abbreviationLogic": {
+    "ЕЭС": { "longForm": "Unified Power System", "shortForm": "UPS" },
+    "Руст": { "longForm": "installed electric capacity", "shortForm": "Pinst" },
+    "Рраб": { "longForm": "operating power", "shortForm": "Pwork" },
+    "НДЦ СО": { "longForm": "National Dispatch Center of the System Operator", "shortForm": "NDC SO" },
+    "КОТК": { "longForm": "Coordination Operational and Technical Committee", "shortForm": "COTC" },
+    "СРАСКУЭ": { "longForm": "Automated Meter Reading System Development Service", "shortForm": "AMRSD" },
+    "СААС": { "longForm": "Active-Adaptive Systems Service", "shortForm": "AASS" },
+    "СЭлР": { "longForm": "Electric Regime Service", "shortForm": "ERS" },
+    "СЭР": { "longForm": "Energy Regime Service", "shortForm": "ERS" },
+    "МЭ РК": { "longForm": "Ministry of Energy of the Republic of Kazakhstan", "shortForm": "MERK" },
+    "ОИК": { "longForm": "operational-information complex", "shortForm": "OIC" },
+    "ПУЛ РЭМ": { "longForm": "pool of electric power reserves of the UES of Kazakhstan", "shortForm": "PRP" },
+    "СБиКП": { "longForm": "Service of Balances and Short-Term Planning", "shortForm": "SBSP" },
+    "САОН": { "longForm": "special automation for load shedding", "shortForm": "SALS" },
+    "СДТУ": { "longForm": "dispatch and technological control means", "shortForm": "DTCM" },
+    "ВД": { "longForm": "internal document", "shortForm": "ID" },
+    "СН": { "longForm": "auxiliary power", "shortForm": "AP" }
+  },
+  "entityGroups": {
+    "institutionalMemory": [
+      "НДЦ СО -> NDC SO",
+      "СЭР -> ERS",
+      "КОТК -> COTC",
+      "ЕЭС -> UPS"
+    ]
+  }
+}

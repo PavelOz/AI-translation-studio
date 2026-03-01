@@ -1,5 +1,5 @@
 import { BaseProvider } from './baseProvider';
-import type { ProviderPromptRequest, ProviderPromptResponse } from './types';
+import type { ProviderPromptRequest, ProviderPromptResponse, ModelCapabilities } from './types';
 import { logger } from '../../utils/logger';
 import { env } from '../../utils/env';
 
@@ -200,6 +200,29 @@ export class YandexProvider extends BaseProvider {
       this.logFallback(`Error: ${errorMessage}`);
       return this.mockResponse(request);
     }
+  }
+
+  /**
+   * Get model capabilities based on model name
+   */
+  getCapabilities(model?: string): ModelCapabilities {
+    const modelName = (model || this.defaultModel).toLowerCase();
+    
+    // YandexGPT - средний контекст
+    if (modelName.includes('yandexgpt')) {
+      return {
+        maxBatchSize: 25,
+        contextLimit: 8_000,
+        supportsBatchProcessing: true,
+      };
+    }
+    
+    // По умолчанию
+    return {
+      maxBatchSize: 20,
+      contextLimit: 8_000,
+      supportsBatchProcessing: true,
+    };
   }
 }
 

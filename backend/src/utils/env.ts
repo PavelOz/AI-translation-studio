@@ -23,6 +23,8 @@ export const env = {
   yandexFolderId: process.env.YANDEX_FOLDER_ID ?? '',
   deepseekApiKey: process.env.DEEPSEEK_API_KEY ?? '',
   deepseekModel: process.env.DEEPSEEK_MODEL ?? 'deepseek-chat',
+  claudeApiKey: process.env.CLAUDE_API_KEY ?? '',
+  claudeModel: process.env.CLAUDE_MODEL ?? 'claude-sonnet-4-20250514',
   defaultAIProvider: (process.env.DEFAULT_AI_PROVIDER ?? 'gemini').toLowerCase(),
   aiBatchSize: numberFromEnv(process.env.AI_BATCH_SIZE, 20),
   aiMaxRetries: numberFromEnv(process.env.AI_MAX_RETRIES, 3),

@@ -15,17 +15,20 @@ export default function ProjectAISettingsModal({
   projectId,
 }: ProjectAISettingsModalProps) {
   const queryClient = useQueryClient();
-  const [provider, setProvider] = useState<'gemini' | 'openai' | 'yandex' | 'deepseek'>('openai');
+  const [provider, setProvider] = useState<'gemini' | 'openai' | 'yandex' | 'deepseek' | 'claude'>('openai');
+  const [selectedModel, setSelectedModel] = useState<string>('');
   const [openaiApiKey, setOpenaiApiKey] = useState('');
   const [geminiApiKey, setGeminiApiKey] = useState('');
   const [yandexApiKey, setYandexApiKey] = useState('');
   const [yandexFolderId, setYandexFolderId] = useState('');
   const [deepseekApiKey, setDeepseekApiKey] = useState('');
+  const [claudeApiKey, setClaudeApiKey] = useState('');
   const [showOpenaiApiKey, setShowOpenaiApiKey] = useState(false);
   const [showGeminiApiKey, setShowGeminiApiKey] = useState(false);
   const [showYandexApiKey, setShowYandexApiKey] = useState(false);
   const [showDeepseekApiKey, setShowDeepseekApiKey] = useState(false);
-  const [testingProvider, setTestingProvider] = useState<'openai' | 'gemini' | 'yandex' | 'deepseek' | null>(null);
+  const [showClaudeApiKey, setShowClaudeApiKey] = useState(false);
+  const [testingProvider, setTestingProvider] = useState<'openai' | 'gemini' | 'yandex' | 'deepseek' | 'claude' | null>(null);
   const [testResults, setTestResults] = useState<Record<string, { success: boolean; message: string }>>({});
 
   const { data: aiSettings, isLoading } = useQuery(
@@ -39,6 +42,25 @@ export default function ProjectAISettingsModal({
   const { data: providers } = useQuery(['ai-providers'], () => aiApi.listProviders(), {
     enabled: isOpen,
   });
+
+  const { data: availableModels } = useQuery(
+    ['ai-models', provider],
+    () => aiApi.getAvailableModels(provider),
+    {
+      enabled: isOpen,
+      onSuccess: (models) => {
+        // Set default model if not already set or if current model is not in the list
+        if (!selectedModel || !models.includes(selectedModel)) {
+          const defaultModel = providers?.find((p) => p.name === provider)?.defaultModel;
+          if (defaultModel && models.includes(defaultModel)) {
+            setSelectedModel(defaultModel);
+          } else if (models.length > 0) {
+            setSelectedModel(models[0]);
+          }
+        }
+      },
+    },
+  );
 
   const updateMutation = useMutation({
     mutationFn: (data: {
@@ -68,7 +90,17 @@ export default function ProjectAISettingsModal({
 
   useEffect(() => {
     if (aiSettings) {
-      setProvider(aiSettings.provider as 'gemini' | 'openai' | 'yandex' | 'deepseek');
+      const providerValue = aiSettings.provider as 'gemini' | 'openai' | 'yandex' | 'deepseek' | 'claude';
+      setProvider(providerValue);
+      if (aiSettings.model) {
+        setSelectedModel(aiSettings.model);
+      } else {
+        // If no model is set, use default from provider
+        const defaultModel = providers?.find((p) => p.name === providerValue)?.defaultModel;
+        if (defaultModel) {
+          setSelectedModel(defaultModel);
+        }
+      }
       // Extract API keys from config if available
       if (aiSettings.config && typeof aiSettings.config === 'object') {
         const config = aiSettings.config as Record<string, unknown>;
@@ -77,13 +109,15 @@ export default function ProjectAISettingsModal({
         if (config.yandexApiKey) setYandexApiKey(String(config.yandexApiKey));
         if (config.yandexFolderId) setYandexFolderId(String(config.yandexFolderId));
         if (config.deepseekApiKey) setDeepseekApiKey(String(config.deepseekApiKey));
+        if (config.claudeApiKey) setClaudeApiKey(String(config.claudeApiKey));
         // Legacy support: if apiKey exists, assign it to the selected provider
-        if (config.apiKey && !config.openaiApiKey && !config.geminiApiKey && !config.yandexApiKey && !config.deepseekApiKey) {
+        if (config.apiKey && !config.openaiApiKey && !config.geminiApiKey && !config.yandexApiKey && !config.deepseekApiKey && !config.claudeApiKey) {
           const key = String(config.apiKey);
           if (aiSettings.provider === 'openai') setOpenaiApiKey(key);
           else if (aiSettings.provider === 'gemini') setGeminiApiKey(key);
           else if (aiSettings.provider === 'yandex') setYandexApiKey(key);
           else if (aiSettings.provider === 'deepseek') setDeepseekApiKey(key);
+          else if (aiSettings.provider === 'claude') setClaudeApiKey(key);
         }
       }
     } else if (providers && providers.length > 0) {
@@ -109,15 +143,21 @@ export default function ProjectAISettingsModal({
     if (yandexApiKey.trim()) config.yandexApiKey = yandexApiKey.trim();
     if (yandexFolderId.trim()) config.yandexFolderId = yandexFolderId.trim();
     if (deepseekApiKey.trim()) config.deepseekApiKey = deepseekApiKey.trim();
+    if (claudeApiKey.trim()) config.claudeApiKey = claudeApiKey.trim();
+
+    if (!selectedModel) {
+      toast.error('Please select a model');
+      return;
+    }
 
     updateMutation.mutate({
       provider,
-      model: selectedProviderData.defaultModel,
+      model: selectedModel,
       config: Object.keys(config).length > 0 ? config : undefined,
     });
   };
 
-  const handleTestCredentials = async (testProvider: 'openai' | 'gemini' | 'yandex' | 'deepseek') => {
+  const handleTestCredentials = async (testProvider: 'openai' | 'gemini' | 'yandex' | 'deepseek' | 'claude') => {
     let apiKeyToTest = '';
     let folderIdToTest = '';
     if (testProvider === 'openai') apiKeyToTest = openaiApiKey.trim();
@@ -126,6 +166,7 @@ export default function ProjectAISettingsModal({
       apiKeyToTest = yandexApiKey.trim();
       folderIdToTest = yandexFolderId.trim();
     } else if (testProvider === 'deepseek') apiKeyToTest = deepseekApiKey.trim();
+    else if (testProvider === 'claude') apiKeyToTest = claudeApiKey.trim();
 
     if (!apiKeyToTest) {
       toast.error(`Please enter a ${testProvider} API key to test`);
@@ -199,7 +240,9 @@ export default function ProjectAISettingsModal({
               <select
                 value={provider}
                 onChange={(e) => {
-                  setProvider(e.target.value as 'gemini' | 'openai' | 'yandex' | 'deepseek');
+                  setProvider(e.target.value as 'gemini' | 'openai' | 'yandex' | 'deepseek' | 'claude');
+                  // Reset model selection when provider changes
+                  setSelectedModel('');
                 }}
                 className="input w-full"
                 disabled={updateMutation.isLoading}
@@ -208,10 +251,43 @@ export default function ProjectAISettingsModal({
                 <option value="openai">OpenAI (ChatGPT)</option>
                 <option value="yandex">Yandex GPT</option>
                 <option value="deepseek">DeepSeek</option>
+                <option value="claude">Anthropic Claude</option>
               </select>
               {selectedProviderData && (
                 <p className="text-xs text-gray-500 mt-1">
                   Default model: {selectedProviderData.defaultModel}
+                </p>
+              )}
+            </div>
+
+            {/* Model Selection */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                AI Model *
+              </label>
+              <select
+                value={selectedModel}
+                onChange={(e) => setSelectedModel(e.target.value)}
+                className="input w-full"
+                disabled={updateMutation.isLoading || !availableModels || availableModels.length === 0}
+              >
+                {!availableModels || availableModels.length === 0 ? (
+                  <option value="">Loading models...</option>
+                ) : (
+                  <>
+                    <option value="">Select a model</option>
+                    {availableModels.map((model) => (
+                      <option key={model} value={model}>
+                        {model}
+                        {model === selectedProviderData?.defaultModel ? ' (default)' : ''}
+                      </option>
+                    ))}
+                  </>
+                )}
+              </select>
+              {selectedModel && (
+                <p className="text-xs text-gray-500 mt-1">
+                  Selected: {selectedModel}
                 </p>
               )}
             </div>
@@ -547,6 +623,83 @@ export default function ProjectAISettingsModal({
                   }`}
                 >
                   {testResults.deepseek.success ? '✓' : '✗'} {testResults.deepseek.message}
+                </div>
+              )}
+            </div>
+
+            {/* Claude API Key */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="block text-sm font-medium text-gray-700">
+                  Anthropic Claude API Key
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setShowClaudeApiKey(!showClaudeApiKey)}
+                  className="text-xs text-primary-600 hover:text-primary-700"
+                >
+                  {showClaudeApiKey ? 'Hide' : 'Show'}
+                </button>
+              </div>
+              <input
+                type={showClaudeApiKey ? 'text' : 'password'}
+                value={claudeApiKey}
+                onChange={(e) => setClaudeApiKey(e.target.value)}
+                placeholder="Enter Anthropic Claude API key"
+                className="input w-full"
+                disabled={updateMutation.isLoading}
+              />
+              <div className="flex items-center justify-between mt-1">
+                <p className="text-xs text-gray-500">
+                  Get your API key from{' '}
+                  <a
+                    href="https://console.anthropic.com/settings/keys"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-primary-600 hover:underline"
+                  >
+                    Anthropic Console
+                  </a>
+                </p>
+                {claudeApiKey.trim() && (
+                  <button
+                    type="button"
+                    onClick={() => handleTestCredentials('claude')}
+                    disabled={testingProvider === 'claude' || updateMutation.isLoading}
+                    className="text-xs text-primary-600 hover:text-primary-700 font-medium disabled:opacity-50"
+                  >
+                    {testingProvider === 'claude' ? (
+                      <span className="flex items-center gap-1">
+                        <svg
+                          className="animate-spin h-3 w-3"
+                          xmlns="http://www.w3.org/2000/svg"
+                          fill="none"
+                          viewBox="0 0 24 24"
+                        >
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path
+                            className="opacity-75"
+                            fill="currentColor"
+                            d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                          ></path>
+                        </svg>
+                        Testing...
+                      </span>
+                    ) : (
+                      'Test credentials'
+                    )}
+                  </button>
+                )}
+              </div>
+              {testResults.claude && (
+                <div
+                  className={`text-xs mt-1 px-2 py-1 rounded ${
+                    testResults.claude.success
+                      ? 'bg-green-50 text-green-700 border border-green-200'
+                      : 'bg-red-50 text-red-700 border border-red-200'
+                  }`}
+                >
+                  {testResults.claude.success ? '✓' : '✗'} {testResults.claude.message}
                 </div>
               )}
             </div>

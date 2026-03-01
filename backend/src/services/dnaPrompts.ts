@@ -53,7 +53,9 @@ export const ULTIMATE_DNA_TEMPLATE = `{
   },
   "namingConventions": {
     "dateNotation": "Dates in DD Month YYYY format (e.g. 30 June 2026).",
-    "phaseLetters": "Phases indicated by Cyrillic letters (А, В, С) must ALWAYS be converted to Latin (A, B, C) in the target text.",
+    "phaseLetters": "Phases: only Latin letters (A, B, C). Cyrillic А, В, С must be converted to Latin.",
+    "definitionsFormatting": "In Definitions section STRICTLY use format: 'Latin label – Full form' (e.g. Pinst – installed electric capacity). Label must not disappear.",
+    "abbreviationRedundancy": "After first mention in the document use ONLY abbreviations (e.g. NDC SO, ERS, COTC, MERK, UPS). Do NOT repeat full form in every clause.",
     "priorityLevels": "Priority levels: High, Medium, Low (use nominative case in target)."
   },
   "abbreviationLogic": {
@@ -180,7 +182,7 @@ ${t.domainSpecificBlock}
 ${CATEGORIZATION_INTRO}
 ${t.categorizationExtra}
 
-4) Output structure: abbreviationLogic – every entry MUST be an object with { longForm, shortForm }; no plain strings. technicalSchema – groups: Market, Dispatch, Protection, Social, Environmental. namingConventions – dates (DD Month YYYY), phases (A, B, C).
+4) Output structure: abbreviationLogic – every entry MUST be an object with { longForm, shortForm }; no plain strings. shortForm must NOT contain the source-language key (e.g. do not put "ЕЭС" inside the value when key is "ЕЭС"); use only target-language abbreviation to avoid recursive replacement. technicalSchema – groups: Market, Dispatch, Protection, Social, Environmental. namingConventions – include dateNotation, phaseLetters; for institutional docs add definitionsFormatting and abbreviationRedundancy (after first mention use ONLY abbreviations; in Definitions use "Latin label – Full form").
 ${INSTITUTIONAL_ADB_IFC}
 ${INSTITUTIONAL_UES_KZ}
 
@@ -204,7 +206,7 @@ Extract and return ONLY a valid JSON object with exactly these four top-level ke
 
 2. "namingConventions" – Rules for naming and notation.${t.phaseLettersRule}
 
-3. "abbreviationLogic" – SOURCE-language key → TARGET-language object. MANDATORY: All entries MUST be objects with longForm and shortForm (no plain strings). longForm must not contain parentheses; put abbreviation in shortForm only. Technical indices: always Latin (Pinst, Pwork, Pavail).
+3. "abbreviationLogic" – SOURCE-language key → TARGET-language object. MANDATORY: All entries MUST be objects with longForm and shortForm (no plain strings). shortForm must be ONLY the target abbreviation (e.g. UPS, NDC SO); it must NOT contain the source key (avoids recursive "matryoshka" replacement). longForm must not contain parentheses; put abbreviation in shortForm only. Technical indices: always Latin (Pinst, Pwork, Pavail).
 
 4. "entityGroups" – Groupings of term variations; prefer ${targetLangHint} canonical form.
 
@@ -214,7 +216,7 @@ CRITICAL:
 - Return ONLY the JSON object. No markdown code blocks, no explanation before or after.
 - Use null for any key where you cannot infer meaningful content.
 - Keys in abbreviationLogic and namingConventions must be in the SOURCE language (${sourceLangHint}); values must be in the TARGET language (${targetLangHint}).
-- abbreviationLogic: ALL values MUST be objects with longForm and shortForm (no plain strings).`;
+- abbreviationLogic: ALL values MUST be objects with longForm and shortForm (no plain strings). shortForm must NOT contain the source key (clean target-only abbreviation).`;
 
   return expertRoleLine + '\n' + BASE_ROLE + profileTerminologyBlock + profileInstructionsBlock + defaultKnowledgeBlock;
 }
@@ -262,7 +264,7 @@ export function buildDnaRefineSystemPrompt(params: {
 
 DIRECTION: RU → EN: Key = Russian, Value = English. EN → RU: Key = English, Value = Russian. Keys always in SOURCE language; values in TARGET language.
 
-RULES: (1) Technical indices (Руст, Рраб, Ррасп, P_inst, P_work, P_avail): keep Latin in both longForm and shortForm (Pinst, Pwork, Pavail). (2) Fixed enums (Priority, Status): put in technicalSchema/namingConventions; use nominative case in target.${hybridNote} (4) Institutional: ADB→АБР, MERK→МЭ РК, NDC SO→НДЦ СО; "Requires a waiver" → "Требуется вейвер" or "Требуется освобождение от выполнения условия". (5) abbreviationLogic: every entry MUST be { longForm, shortForm }; no plain strings. technicalSchema: include Market, Dispatch, Protection, Social, Environmental. namingConventions: dates (DD Month YYYY), phases (A, B, C).
+RULES: (1) Technical indices (Руст, Рраб, Ррасп, P_inst, P_work, P_avail): keep Latin in both longForm and shortForm (Pinst, Pwork, Pavail). (2) Fixed enums (Priority, Status): put in technicalSchema/namingConventions; use nominative case in target.${hybridNote} (4) Institutional: ADB→АБР, MERK→МЭ РК, NDC SO→НДЦ СО; "Requires a waiver" → "Требуется вейвер" or "Требуется освобождение от выполнения условия". (5) abbreviationLogic: every entry MUST be { longForm, shortForm }; no plain strings; shortForm must NOT contain the source key (target-only abbreviation). technicalSchema: include Market, Dispatch, Protection, Social, Environmental. namingConventions: dates (DD Month YYYY), phases (A, B, C); for institutional docs add definitionsFormatting and abbreviationRedundancy.
 ${INSTITUTIONAL_ADB_IFC}
 ${INSTITUTIONAL_UES_KZ}
 

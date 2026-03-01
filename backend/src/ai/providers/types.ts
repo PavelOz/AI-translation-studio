@@ -23,10 +23,20 @@ export type ProviderPromptResponse = {
   raw?: unknown;
 };
 
+/**
+ * Возможности модели провайдера
+ */
+export interface ModelCapabilities {
+  maxBatchSize: number; // Максимальное количество терминов в одном батче
+  contextLimit: number; // Максимальный контекст в токенах
+  supportsBatchProcessing: boolean; // Поддерживает ли батч-обработку
+}
+
 export interface AIProvider {
   readonly name: string;
   readonly defaultModel: string;
   callModel(request: ProviderPromptRequest): Promise<ProviderPromptResponse>;
+  getCapabilities(model?: string): ModelCapabilities;
 }
 
 

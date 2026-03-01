@@ -540,6 +540,29 @@ export class AIOrchestrator {
     return parts.join('\n\n');
   }
 
+  /**
+   * Build explicit "OBEY" lines for namingConventions so the model follows abbreviationRedundancy and definitionsFormatting.
+   * Without this, the model often ignores these rules. When DNA has abbreviationLogic, we always add at least default rules.
+   */
+  private buildNamingConventionsObeyBlock(dna: DocumentDnaPayload | null | undefined): string {
+    if (!dna) return '';
+    const nc = dna.namingConventions && typeof dna.namingConventions === 'object' ? (dna.namingConventions as Record<string, unknown>) : {};
+    const hasAbbrevLogic = dna.abbreviationLogic && typeof dna.abbreviationLogic === 'object' && Object.keys(dna.abbreviationLogic).length > 0;
+    const lines: string[] = [];
+    if (typeof nc.abbreviationRedundancy === 'string' && nc.abbreviationRedundancy.trim()) {
+      lines.push(`ABBREVIATION REDUNDANCY (OBEY): ${String(nc.abbreviationRedundancy).trim()} Use ONLY the abbreviation (e.g. NDC SO, ERS, COTC, MERK, UPS) after the first mention; do NOT repeat the full name in every clause.`);
+    } else if (hasAbbrevLogic) {
+      lines.push('ABBREVIATION REDUNDANCY (OBEY): After the first mention in the document use ONLY the shortForm (e.g. NDC SO, ERS, COTC, MERK, UPS). Do NOT repeat the full name in every clause.');
+    }
+    if (typeof nc.definitionsFormatting === 'string' && nc.definitionsFormatting.trim()) {
+      lines.push(`DEFINITIONS FORMATTING (OBEY): ${String(nc.definitionsFormatting).trim()} In Definitions / Glossary sections always keep the Latin label (e.g. Pinst, Pwork) before the dash; never drop the index.`);
+    } else if (hasAbbrevLogic) {
+      lines.push('DEFINITIONS FORMATTING (OBEY): In Definitions / Glossary (e.g. Section 4) use format "Latin label – full form" (e.g. Pinst – installed electric capacity). Never drop the index (Pinst, Pwork, Pavail).');
+    }
+    if (lines.length === 0) return '';
+    return '\nCRITICAL – follow these namingConventions rules:\n' + lines.join('\n');
+  }
+
   private buildTranslationExamplesSection(tmExamples?: TmExample[]) {
     if (!tmExamples || tmExamples.length === 0) {
       return 'No translation examples available. Use your best judgment based on the glossary and guidelines.';
@@ -699,7 +722,7 @@ Anti-Redundancy (Hereinafter Fix): When the source has "Full Name (далее �
       projectKnowledgeBase ? `\n=== PROJECT KNOWLEDGE BASE ===
 ${dnaIntroRuEn}
 ${dnaIntroRest}${firstMentionOnlyRule}${definitionQuarantineBlock}${hereinafterFixBlock}${noDuplicateFullFormRule}
-${projectKnowledgeBase}\n` : '',
+${projectKnowledgeBase}${this.buildNamingConventionsObeyBlock(options.documentDna)}\n` : '',
       strictLatinBlock,
       `CRITICAL TRANSLATION REQUIREMENT:`,
       `- Source language: ${sourceLang} (${sourceLangCode})`,

@@ -170,6 +170,27 @@ function buildReplacementPairs(
 }
 
 /**
+ * Build (longForm -> shortForm) pairs for post-processing: when the LLM outputs the full name
+ * (e.g. "National Dispatch Center of the System Operator") replace it with the abbreviation ("NDC SO").
+ * Only Latin longForms are used so we enforce abbreviationRedundancy programmatically.
+ */
+function buildLongFormToShortFormPairs(
+  abbreviationLogic: Record<string, unknown> | null | undefined,
+): Array<{ pattern: string; target: string }> {
+  if (!abbreviationLogic || typeof abbreviationLogic !== 'object') return [];
+  const pairs: Array<{ pattern: string; target: string }> = [];
+  for (const [, value] of Object.entries(abbreviationLogic)) {
+    const longForm = getLongFormForDedupe(value);
+    const shortForm = extractAbbreviationFromValue(value);
+    if (!longForm || !shortForm || longForm === shortForm) continue;
+    if (CYRILLIC_REGEX.test(longForm)) continue; // only replace Latin (English) full form with shortForm
+    pairs.push({ pattern: longForm.trim(), target: shortForm });
+  }
+  pairs.sort((a, b) => b.pattern.length - a.pattern.length);
+  return pairs;
+}
+
+/**
  * Fuzzy-match remaining Cyrillic phrases to DNA keys (Cyrillic keys only) and replace. Threshold 0.9.
  */
 function applyDnaFuzzyMatch(
@@ -243,33 +264,46 @@ function replacementPlaceholder(index: number): string {
 type MatchSpan = { start: number; end: number; pairIndex: number };
 
 /**
+ * Unicode-aware word boundary: not preceded/followed by letter, number, or underscore.
+ * JS \b is ASCII-only and does not match around Cyrillic, so Cyrillic keys (e.g. "НДЦ СО", "Руст") were never found.
+ */
+const UNICODE_WORD_BOUNDARY_BEFORE = '(?<=^|[^\\p{L}\\p{N}_])';
+const UNICODE_WORD_BOUNDARY_AFTER = '(?=[^\\p{L}\\p{N}_]|$)';
+
+/**
  * Find all non-overlapping match positions for one pattern: "(pattern)" and whole-word pattern.
  * Returns spans (start, end) in order of appearance.
+ * Uses Unicode-aware boundaries ('u' flag) so Cyrillic keys (НДЦ СО, Руст, etc.) and Latin longForms are found.
+ * JS \\b is ASCII-only; \\p{L} and 'u' flag are required for Cyrillic and other Unicode letters.
  */
 function findPatternSpans(text: string, pattern: string): Array<{ start: number; end: number }> {
   const flexible = keyToPattern(pattern);
   const spans: Array<{ start: number; end: number }> = [];
   const seen = new Set<string>(); // avoid duplicate spans from same position
 
-  // Parenthesized: (pattern)
-  const parenRe = new RegExp(`\\((${flexible})\\)`, 'gi');
-  let m: RegExpExecArray | null;
-  while ((m = parenRe.exec(text)) !== null) {
-    const key = `${m.index},${m.index + m[0].length}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      spans.push({ start: m.index, end: m.index + m[0].length });
+  try {
+    // Parenthesized: (pattern) — 'u' flag for Unicode (Cyrillic keys and Latin phrases)
+    const parenRe = new RegExp(`\\((${flexible})\\)`, 'giu');
+    let m: RegExpExecArray | null;
+    while ((m = parenRe.exec(text)) !== null) {
+      const key = `${m.index},${m.index + m[0].length}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        spans.push({ start: m.index, end: m.index + m[0].length });
+      }
     }
-  }
 
-  // Whole-word: \bpattern\b (skip if already inside parentheses we matched)
-  const wordRe = new RegExp(`\\b(${flexible})\\b`, 'gi');
-  while ((m = wordRe.exec(text)) !== null) {
-    const key = `${m.index},${m.index + m[0].length}`;
-    if (!seen.has(key)) {
-      seen.add(key);
-      spans.push({ start: m.index, end: m.index + m[0].length });
+    // Whole-word: Unicode-aware boundary (\\b does not work for Cyrillic in JS)
+    const wordRe = new RegExp(`${UNICODE_WORD_BOUNDARY_BEFORE}(${flexible})${UNICODE_WORD_BOUNDARY_AFTER}`, 'giu');
+    while ((m = wordRe.exec(text)) !== null) {
+      const key = `${m.index},${m.index + m[0].length}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        spans.push({ start: m.index, end: m.index + m[0].length });
+      }
     }
+  } catch (e) {
+    // If RegExp fails (e.g. very long pattern or engine quirk), skip this pattern to avoid breaking replacement
   }
 
   return spans;
@@ -323,9 +357,125 @@ function applyReplacementsWithPlaceholders(
 }
 
 /**
+ * Definition line pattern: "Label – Value" (glossary / Section 4).
+ * En-dash U+2013 or hyphen-minus. Protects the value part from longForm→shortForm replacement to avoid "Pinst – Pinst".
+ */
+const DEFINITION_LINE_REGEX = /^\s*(.+?)\s+[–-]\s+(.*)$/;
+
+/**
+ * Apply longForm→shortForm replacement only where definitions are not affected.
+ * For lines matching "Label – Value", replace longForm with shortForm only in the Label part; leave Value unchanged.
+ * For other lines, apply replacement to the whole line.
+ * This implements "Protected Definition" so glossary entries stay "Pinst – installed electric capacity", not "Pinst – Pinst".
+ */
+function applyLongFormToShortFormWithProtectedDefinitions(
+  text: string,
+  pairs: Array<{ pattern: string; target: string }>,
+): string {
+  if (pairs.length === 0) return text;
+
+  const lines = text.split(/\r?\n/);
+  const resultLines = lines.map((line) => {
+    const defMatch = line.match(DEFINITION_LINE_REGEX);
+    if (defMatch) {
+      const labelPart = defMatch[1];
+      const valuePart = defMatch[2];
+      const dashChar = line.includes('\u2013') ? '\u2013' : '-';
+      const replacedLabel = applyReplacementsWithPlaceholders(labelPart, pairs);
+      return `${replacedLabel.trim()} ${dashChar} ${valuePart}`;
+    }
+    return applyReplacementsWithPlaceholders(line, pairs);
+  });
+  return resultLines.join('\n');
+}
+
+/** Unicode word of letters (use with flag 'u'). Matches any script (Latin, Cyrillic, etc.). */
+const UNICODE_WORD_CAPTURE = '(?<![\\p{L}\\p{N}_])(\\p{L}+)(?![\\p{L}\\p{N}_])';
+
+/**
+ * Remove duplicate words: (1) same word with optional brackets/spaces "ERS (ERS)" or "UPS  UPS" → single "ERS"/"UPS";
+ * (2) consecutive duplicates with spaces "AMRSD AMRSD" → "AMRSD".
+ * Uses Unicode-aware patterns so it works for "ЕЭС ЕЭС" and "UPS UPS". Runs until no change.
+ */
+export function collapseConsecutiveDuplicateWords(text: string): string {
+  if (!text || typeof text !== 'string') return text;
+  const bracketDup = new RegExp(`${UNICODE_WORD_CAPTURE}\\s*[\\(\\[]?\\s*\\1\\s*[\\)\\]]?`, 'gu');
+  const spaceDup = new RegExp(`${UNICODE_WORD_CAPTURE}(?:\\s+\\1)+`, 'gu');
+  let result = text;
+  let prev: string;
+  do {
+    prev = result;
+    result = result.replace(bracketDup, '$1');
+    result = result.replace(spaceDup, '$1');
+  } while (result !== prev);
+  return result;
+}
+
+/**
+ * Remove redundant legal keyword constructions: "Word (hereinafter Word)" → "Word".
+ * Keywords (e.g. "hereinafter", "далее") come from config so the same code works for any direction.
+ */
+export function removeLegalKeywordRedundant(text: string, legalKeywords: string[]): string {
+  if (!text || typeof text !== 'string' || legalKeywords.length === 0) return text;
+  const escaped = legalKeywords.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const re = new RegExp(`(?<![\\p{L}\\p{N}_])(\\p{L}+)\\s*\\(\\s*(?:${escaped})\\s+\\1\\s*\\)`, 'gu');
+  let result = text;
+  let prev: string;
+  do {
+    prev = result;
+    result = result.replace(re, '$1');
+  } while (result !== prev);
+  return result;
+}
+
+/**
+ * Single entry point for Janitor cleaner: legal keyword cleanup + duplicate word collapse.
+ * Options.legalKeywords optional; when empty, only duplicate collapse runs.
+ */
+export function runJanitorCleaner(
+  text: string,
+  options?: { legalKeywords?: string[] },
+): string {
+  if (!text || typeof text !== 'string') return text;
+  const keywords = options?.legalKeywords?.filter((k) => typeof k === 'string' && k.trim()) ?? [];
+  let result = text;
+  if (keywords.length > 0) {
+    result = removeLegalKeywordRedundant(result, keywords);
+  }
+  return collapseConsecutiveDuplicateWords(result);
+}
+
+/**
+ * Coerce abbreviationLogic values to { longForm, shortForm } so replacement and longForm→shortForm pairs work.
+ * Handles raw DB/API shape (plain strings or mixed) so applyTotalCyrillicBan works even when caller passes non-normalized DNA.
+ */
+function normalizeAbbreviationLogicForReplacement(
+  abbreviationLogic: Record<string, unknown> | null | undefined,
+): Record<string, { longForm: string; shortForm: string }> | null {
+  if (!abbreviationLogic || typeof abbreviationLogic !== 'object') return null;
+  const out: Record<string, { longForm: string; shortForm: string }> = {};
+  for (const [key, val] of Object.entries(abbreviationLogic)) {
+    if (!key || /^\s*$/.test(key)) continue;
+    if (typeof val === 'string') {
+      const s = val.trim();
+      if (!s) continue;
+      const abbr = extractAbbreviationFromValue(s) ?? s;
+      out[key] = { longForm: s, shortForm: abbr };
+    } else if (val != null && typeof val === 'object' && !Array.isArray(val)) {
+      const o = val as Record<string, unknown>;
+      const long = (typeof o.longForm === 'string' ? o.longForm : typeof o.value === 'string' ? o.value : '').trim();
+      const short = (typeof o.shortForm === 'string' ? o.shortForm : '').trim();
+      if (long || short) out[key] = { longForm: long || short, shortForm: short || long };
+    }
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
  * Total Cyrillic Ban: (1) Single-pass replace (key) and whole-word key with target from DNA (placeholders then targets);
  * (2) Fuzzy-match remaining Cyrillic to DNA keys (Cyrillic keys only); (3) Remove any remaining Cyrillic.
  * When targetLocale is a Cyrillic language (e.g. ru, uk), step (3) is skipped so the translation is not stripped.
+ * Uses normalized abbreviationLogic (longForm/shortForm) so longForm→shortForm replacement (abbreviationRedundancy) works.
  */
 export function applyTotalCyrillicBan(
   text: string,
@@ -336,13 +486,24 @@ export function applyTotalCyrillicBan(
 
   const skipCyrillicRemoval = isCyrillicTargetLocale(targetLocale);
 
+  const normalized = normalizeAbbreviationLogicForReplacement(abbreviationLogic);
+  const logic = normalized ?? (abbreviationLogic && typeof abbreviationLogic === 'object' ? abbreviationLogic : null);
+
   let result = text;
   let untranslatableKeys: string[] = [];
-  if (abbreviationLogic && typeof abbreviationLogic === 'object') {
-    const { pairs, untranslatableKeys: untrans } = buildReplacementPairs(abbreviationLogic);
+  if (logic && typeof logic === 'object') {
+    const { pairs, untranslatableKeys: untrans } = buildReplacementPairs(logic);
     untranslatableKeys = untrans;
     result = applyReplacementsWithPlaceholders(result, pairs);
-    result = applyDnaFuzzyMatch(result, abbreviationLogic);
+    result = applyDnaFuzzyMatch(result, logic);
+    // Enforce abbreviationRedundancy: replace longForm with shortForm, but NEVER in definition lines ("Key – Value").
+    // Protected Definition: in Section 4 (Glossary) only direct substitution is applied; longForm→shortForm is skipped for the value part.
+    const longFormPairs = buildLongFormToShortFormPairs(logic);
+    if (longFormPairs.length > 0) {
+      result = applyLongFormToShortFormWithProtectedDefinitions(result, longFormPairs);
+    }
+    // Deterministic post-processing: remove consecutive duplicate abbreviations (e.g. "AMRSD AMRSD" → "AMRSD").
+    result = collapseConsecutiveDuplicateWords(result);
   }
 
   if (skipCyrillicRemoval) {

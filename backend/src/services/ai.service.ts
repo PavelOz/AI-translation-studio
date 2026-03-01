@@ -16,6 +16,8 @@ import type { ContextRules } from './glossary.service';
 import { getDocumentGlossaryForSegment, getDocumentStyleRules, getDocumentDna } from './analysis.service';
 import { applyTotalCyrillicBan, deduplicateFullFormDash } from './translation.service';
 import { validateDocumentDnaPayload, validateDnaForCycles } from './dnaValidation';
+import { validateDnaContract } from './validate-dna';
+import { getTranslationDirection } from './dnaPrompts';
 import { normalizeDocumentDnaPayloadOrNull } from './dnaSchema';
 import { splitIntoSentences, stripFormattingTags } from '../utils/segmentation';
 import pLimit from 'p-limit';
@@ -954,6 +956,45 @@ function getKnownTargetAbbreviations(abbreviationLogic: Record<string, unknown> 
 
 export const listAIProviders = () => listAvailableProviders();
 
+/**
+ * Get available models for a specific AI provider
+ */
+export const getAvailableModels = (provider: 'gemini' | 'openai' | 'yandex' | 'deepseek' | 'claude'): string[] => {
+  const models: Record<string, string[]> = {
+    gemini: [
+      'gemini-2.0-flash-exp',
+      'gemini-2.0-flash-thinking-exp',
+      'gemini-1.5-pro',
+      'gemini-1.5-flash',
+      'gemini-pro',
+    ],
+    openai: [
+      'gpt-4o',
+      'gpt-4o-mini',
+      'gpt-4-turbo',
+      'gpt-4',
+      'gpt-3.5-turbo',
+    ],
+    yandex: [
+      'yandexgpt',
+      'yandexgpt-lite',
+    ],
+    deepseek: [
+      'deepseek-reasoner',
+      'deepseek-chat',
+    ],
+    claude: [
+      'claude-sonnet-4-20250514',
+      'claude-3-5-sonnet-20241022',
+      'claude-3-opus-20240229',
+      'claude-3-sonnet-20240229',
+      'claude-3-haiku-20240307',
+    ],
+  };
+
+  return models[provider] || [];
+};
+
 export const getProjectAISettings = (projectId: string) =>
   prisma.projectAISetting.findUnique({
     where: { projectId },
@@ -1432,8 +1473,10 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
       },
     });
 
-    // First Mention Only: load document DNA and already-expanded terms from previous segments
-    documentDnaPayload = await getDocumentDna(segment.document.id);
+    // First Mention Only: load document DNA and already-expanded terms from previous segments.
+    // Normalize DNA so abbreviationLogic entries are always { longForm, shortForm } for replacement and longForm→shortForm pairs.
+    const rawDna = await getDocumentDna(segment.document.id);
+    documentDnaPayload = (rawDna && normalizeDocumentDnaPayloadOrNull(rawDna)) ?? rawDna ?? null;
     let introducedAbbreviations: string[] = [];
     if (documentDnaPayload?.abbreviationLogic && typeof documentDnaPayload.abbreviationLogic === 'object') {
       const knownAbbrevs = getKnownTargetAbbreviations(documentDnaPayload.abbreviationLogic);
@@ -2432,8 +2475,35 @@ export const pretranslateDocument = async (
     fuzzyScore?: number;
   }> = [];
 
+  // Build AI context first to get configuration info
+  const context = await buildAiContext(
+    document.projectId,
+    document.sourceLocale,
+    document.targetLocale,
+  );
+  
+  // Use overrides if provided, otherwise use project settings
+  const effectiveProvider = options?.provider || context.settings?.provider;
+  const effectiveModel = options?.model || context.settings?.model;
+  const effectiveTemperature = options?.temperature !== undefined 
+    ? options.temperature 
+    : (context.settings?.temperature ?? getDefaultTemperature(effectiveProvider || 'gemini'));
+  
+  // Check if AI is properly configured
+  const hasAiConfig = context.settings || (options?.provider && options?.model);
+  const hasApiKey = !!context.apiKey || (effectiveProvider === 'yandex' && !!context.yandexFolderId);
+  
+  // Initialize progress tracking with AI configuration info
+  // This ensures progress exists even if there are no segments to process
+  createProgress(documentId, eligibleSegments.length, {
+    provider: effectiveProvider,
+    model: effectiveModel,
+    configured: hasAiConfig && hasApiKey,
+  });
+
   if (eligibleSegments.length === 0) {
     // Mark as completed immediately if no segments to process
+    addLogMessage(documentId, 'ℹ️ No segments to process - all segments are already translated');
     completeProgress(documentId);
     return {
       documentId,
@@ -2444,33 +2514,8 @@ export const pretranslateDocument = async (
     };
   }
 
-  try {
-    const context = await buildAiContext(
-      document.projectId,
-      document.sourceLocale,
-      document.targetLocale,
-    );
-    
-    // Use overrides if provided, otherwise use project settings
-    const effectiveProvider = options?.provider || context.settings?.provider;
-    const effectiveModel = options?.model || context.settings?.model;
-    const effectiveTemperature = options?.temperature !== undefined 
-      ? options.temperature 
-      : (context.settings?.temperature ?? getDefaultTemperature(effectiveProvider || 'gemini'));
-    
-    // Check if AI is properly configured
-    const hasAiConfig = context.settings || (options?.provider && options?.model);
-    const hasApiKey = !!context.apiKey || (effectiveProvider === 'yandex' && !!context.yandexFolderId);
-    
-    // Initialize progress tracking with AI configuration info
-    // This ensures progress exists even if there are no segments to process
-    createProgress(documentId, eligibleSegments.length, {
-      provider: effectiveProvider,
-      model: effectiveModel,
-      configured: hasAiConfig && hasApiKey,
-    });
-    
-    // Log AI configuration status
+  // Log AI configuration status (only if we have segments to process)
+  if (eligibleSegments.length > 0) {
     if (hasAiConfig && hasApiKey) {
       addLogMessage(documentId, `✅ AI configured: ${effectiveProvider} / ${effectiveModel}`);
     } else if (hasAiConfig && !hasApiKey) {
@@ -2480,6 +2525,9 @@ export const pretranslateDocument = async (
     }
     
     addLogMessage(documentId, `🚀 Starting pretranslation: ${eligibleSegments.length} segments to process`);
+  }
+
+  try {
     
     // Validate that we have required AI configuration
     if (!effectiveProvider || !effectiveModel) {
@@ -3057,6 +3105,11 @@ export const pretranslateDocument = async (
         const dnaForValidation = await getDocumentDna(document.id);
         const dnaValidation = validateDocumentDnaPayload(dnaForValidation ?? null);
         const cycleCheck = validateDnaForCycles(dnaForValidation ?? null);
+        
+        // Расширенная валидация DNA-Contract-Validator
+        const direction = getTranslationDirection(document.sourceLocale, document.targetLocale);
+        const contractValidation = validateDnaContract(dnaForValidation ?? null, direction);
+        
         if (!dnaValidation.valid) {
           const msg = `Invalid Document DNA: ${dnaValidation.errors.join('; ')}`;
           addLogMessage(documentId, `❌ ${msg}`);
@@ -3065,7 +3118,23 @@ export const pretranslateDocument = async (
           const msg = `Document DNA recursion risk: ${cycleCheck.errors.join('; ')}`;
           addLogMessage(documentId, `❌ ${msg}`);
           setError(documentId, msg);
+        } else if (contractValidation.status === 'ERROR') {
+          // Блокируем перевод при наличии ошибок в DNA-Contract-Validator
+          const errorMessages = contractValidation.issues
+            .filter(i => i.type === 'error')
+            .map(i => i.message);
+          const msg = `Document DNA validation failed: ${errorMessages.join('; ')}`;
+          addLogMessage(documentId, `❌ ${msg}`);
+          setError(documentId, msg);
         } else {
+          // Предупреждения логируем, но не блокируем перевод
+          if (contractValidation.status === 'WARNING') {
+            const warnings = contractValidation.issues
+              .filter(i => i.type === 'warning')
+              .map(i => i.message);
+            addLogMessage(documentId, `⚠️ DNA validation warnings: ${warnings.join('; ')}`);
+            logger.warn({ documentId, validation: contractValidation }, 'Document DNA validation warnings');
+          }
           const abbrevCount = dnaForValidation?.abbreviationLogic && typeof dnaForValidation.abbreviationLogic === 'object'
             ? Object.keys(dnaForValidation.abbreviationLogic).length
             : 0;
@@ -3142,7 +3211,8 @@ export const pretranslateDocument = async (
             },
           });
 
-          const documentDnaPretranslate = documentWithSummary?.documentDna
+          // Normalize DNA so abbreviationLogic is always { longForm, shortForm }; required for applyTotalCyrillicBan and longForm→shortForm replacement.
+          const rawDnaPayload = documentWithSummary?.documentDna
             ? {
                 technicalSchema: documentWithSummary.documentDna.technicalSchema as Record<string, unknown> | null | undefined,
                 namingConventions: documentWithSummary.documentDna.namingConventions as Record<string, unknown> | null | undefined,
@@ -3150,6 +3220,7 @@ export const pretranslateDocument = async (
                 entityGroups: documentWithSummary.documentDna.entityGroups as Record<string, unknown> | null | undefined,
               }
             : undefined;
+          const documentDnaPretranslate = rawDnaPayload ? (normalizeDocumentDnaPayloadOrNull(rawDnaPayload) ?? rawDnaPayload) : undefined;
 
           // Stage 2: Fetch document-specific context from Analyst Stage
           const documentStyleRules = await getDocumentStyleRules(document.id);
