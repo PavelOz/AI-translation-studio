@@ -1,26 +1,26 @@
 import { useMutation, useQueryClient } from 'react-query';
 import { segmentsApi, type Segment } from '../../api/segments.api';
-import type { UnfixableEntry } from '../../api/documents.api';
+import type { SegmentAuditResult } from '../../api/janitor.api';
 import { useState, useEffect } from 'react';
 import toast from 'react-hot-toast';
 
 type Props = {
   documentId: string;
-  unfixable: UnfixableEntry[];
+  segmentsRequiringReview: SegmentAuditResult[];
 };
 
-export default function ErrorLogExplorer({ documentId, unfixable }: Props) {
+export default function ErrorLogExplorer({ documentId, segmentsRequiringReview }: Props) {
   const queryClient = useQueryClient();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
 
-  // Ensure unfixable is always an array
-  const safeUnfixable = Array.isArray(unfixable) ? unfixable : [];
+  // Ensure segmentsRequiringReview is always an array
+  const safeSegments = Array.isArray(segmentsRequiringReview) ? segmentsRequiringReview : [];
 
   // Limit queries to prevent performance issues - only load first 50 segments initially
   // Load additional segments on demand when user interacts with them
   const MAX_INITIAL_QUERIES = 50;
-  const initialUnfixable = safeUnfixable.slice(0, MAX_INITIAL_QUERIES).filter(e => e?.segmentId);
+  const initialSegments = safeSegments.slice(0, MAX_INITIAL_QUERIES).filter(s => s?.segmentId);
   const [loadedSegmentIds, setLoadedSegmentIds] = useState<Set<string>>(new Set());
 
   // Load segments on-demand instead of using useQueries to avoid performance issues
@@ -30,7 +30,7 @@ export default function ErrorLogExplorer({ documentId, unfixable }: Props) {
   
   // Load first 50 segments on mount
   useEffect(() => {
-    const segmentIdsToLoad = initialUnfixable.slice(0, 50).map(e => e.segmentId).filter(Boolean);
+    const segmentIdsToLoad = initialSegments.slice(0, 50).map(s => s.segmentId).filter(Boolean);
     segmentIdsToLoad.forEach(segmentId => {
       if (!loadedSegments.has(segmentId) && !loadingSegmentIds.has(segmentId)) {
         setLoadingSegmentIds(prev => new Set([...prev, segmentId]));
@@ -72,36 +72,36 @@ export default function ErrorLogExplorer({ documentId, unfixable }: Props) {
     },
   });
 
-  const startEdit = (entry: UnfixableEntry) => {
+  const startEdit = (segment: SegmentAuditResult) => {
     // Load segment if not already loaded
-    if (!loadedSegments.has(entry.segmentId) && !loadingSegmentIds.has(entry.segmentId)) {
-      setLoadingSegmentIds(prev => new Set([...prev, entry.segmentId]));
-      segmentsApi.get(entry.segmentId)
-        .then(segment => {
-          setLoadedSegments(prev => new Map([...prev, [entry.segmentId, segment]]));
+    if (!loadedSegments.has(segment.segmentId) && !loadingSegmentIds.has(segment.segmentId)) {
+      setLoadingSegmentIds(prev => new Set([...prev, segment.segmentId]));
+      segmentsApi.get(segment.segmentId)
+        .then(seg => {
+          setLoadedSegments(prev => new Map([...prev, [segment.segmentId, seg]]));
           setLoadingSegmentIds(prev => {
             const next = new Set(prev);
-            next.delete(entry.segmentId);
+            next.delete(segment.segmentId);
             return next;
           });
-          // Set edit text after loading
-          setEditText(segment?.targetFinal ?? segment?.targetMt ?? '');
-          setEditingId(entry.segmentId);
+          // Set edit text after loading - use fixedText if available, otherwise original
+          setEditText(seg?.targetFinal ?? seg?.targetMt ?? segment.fixedText ?? segment.originalText);
+          setEditingId(segment.segmentId);
         })
         .catch(err => {
-          console.error(`Failed to load segment ${entry.segmentId}:`, err);
+          console.error(`Failed to load segment ${segment.segmentId}:`, err);
           setLoadingSegmentIds(prev => {
             const next = new Set(prev);
-            next.delete(entry.segmentId);
+            next.delete(segment.segmentId);
             return next;
           });
           toast.error('Failed to load segment');
         });
     } else {
       // Segment already loaded or loading
-      const seg = loadedSegments.get(entry.segmentId);
-      setEditText(seg?.targetFinal ?? seg?.targetMt ?? '');
-      setEditingId(entry.segmentId);
+      const seg = loadedSegments.get(segment.segmentId);
+      setEditText(seg?.targetFinal ?? seg?.targetMt ?? segment.fixedText ?? segment.originalText);
+      setEditingId(segment.segmentId);
     }
   };
 
@@ -114,11 +114,11 @@ export default function ErrorLogExplorer({ documentId, unfixable }: Props) {
     setEditingId(null);
   };
 
-  if (safeUnfixable.length === 0) {
+  if (safeSegments.length === 0) {
     return (
       <section className="rounded-lg border border-gray-200 bg-white p-4 shadow-sm">
-        <h2 className="text-lg font-semibold text-gray-900 mb-2">Error log (unfixable)</h2>
-        <p className="text-gray-500 text-sm">No unfixable entries.</p>
+        <h2 className="text-lg font-semibold text-gray-900 mb-2">Error log (segments requiring review)</h2>
+        <p className="text-gray-500 text-sm">No segments requiring review.</p>
       </section>
     );
   }
@@ -135,9 +135,9 @@ export default function ErrorLogExplorer({ documentId, unfixable }: Props) {
   return (
     <section className="rounded-lg border border-gray-200 bg-white shadow-sm overflow-hidden">
       <div className="px-4 py-3 border-b border-gray-200">
-        <h2 className="text-lg font-semibold text-gray-900">Error log (unfixable)</h2>
+        <h2 className="text-lg font-semibold text-gray-900">Error log (segments requiring review)</h2>
         <p className="text-sm text-gray-500">
-          {safeUnfixable.length} entries
+          {safeSegments.length} segment{safeSegments.length !== 1 ? 's' : ''} requiring review
           {isLoadingSegments && <span className="ml-2 text-xs text-gray-400">(Loading segments...)</span>}
         </p>
       </div>
@@ -147,36 +147,43 @@ export default function ErrorLogExplorer({ documentId, unfixable }: Props) {
             <tr>
               <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">#</th>
               <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Segment ID</th>
-              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
-              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Detail</th>
+              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Errors</th>
+              <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Comment</th>
               <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Target (preview)</th>
               <th className="px-4 py-2 text-right text-xs font-medium text-gray-500 uppercase">Actions</th>
             </tr>
           </thead>
           <tbody className="bg-white divide-y divide-gray-200">
-            {safeUnfixable.map((entry, entryIndex) => {
-              if (!entry?.segmentId) return null;
+            {safeSegments.map((segmentAudit, entryIndex) => {
+              if (!segmentAudit?.segmentId) return null;
               
-              const segment = loadedSegments.get(entry.segmentId);
-              const isEditing = editingId === entry.segmentId;
-              const isLoadingSegment = loadingSegmentIds.has(entry.segmentId);
+              const segment = loadedSegments.get(segmentAudit.segmentId);
+              const isEditing = editingId === segmentAudit.segmentId;
+              const isLoadingSegment = loadingSegmentIds.has(segmentAudit.segmentId);
               const hasError = false; // Track per-segment errors if needed
               
               // For entries beyond initial 50, show "Click to load" if not loaded
-              const needsLoad = entryIndex >= MAX_INITIAL_QUERIES && !loadedSegments.has(entry.segmentId) && !loadingSegmentIds.has(entry.segmentId);
+              const needsLoad = entryIndex >= MAX_INITIAL_QUERIES && !loadedSegments.has(segmentAudit.segmentId) && !loadingSegmentIds.has(segmentAudit.segmentId);
               return (
-                <tr key={entry.segmentId} className="hover:bg-gray-50">
-                  <td className="px-4 py-2 text-sm text-gray-600">{entry.segmentIndex ?? '—'}</td>
-                  <td className="px-4 py-2 text-sm font-mono text-gray-700 truncate max-w-[120px]" title={entry.segmentId}>
-                    {entry.segmentId.slice(0, 8)}…
+                <tr key={segmentAudit.segmentId} className="hover:bg-gray-50">
+                  <td className="px-4 py-2 text-sm text-gray-600">{segmentAudit.segmentIndex ?? '—'}</td>
+                  <td className="px-4 py-2 text-sm font-mono text-gray-700 truncate max-w-[120px]" title={segmentAudit.segmentId}>
+                    {segmentAudit.segmentId.slice(0, 8)}…
                   </td>
                   <td className="px-4 py-2">
-                    <span className="text-xs font-medium px-2 py-0.5 rounded bg-amber-100 text-amber-800">
-                      {entry.errorType}
-                    </span>
+                    <div className="space-y-1">
+                      {segmentAudit.errors.slice(0, 2).map((error, idx) => (
+                        <span key={idx} className="text-xs font-medium px-2 py-0.5 rounded bg-red-100 text-red-800 block">
+                          {error.type}: {error.message.slice(0, 40)}
+                        </span>
+                      ))}
+                      {segmentAudit.errors.length > 2 && (
+                        <span className="text-xs text-gray-500">+{segmentAudit.errors.length - 2} more</span>
+                      )}
+                    </div>
                   </td>
-                  <td className="px-4 py-2 text-sm text-gray-600 max-w-[200px] truncate" title={entry.detail}>
-                    {entry.detail ?? '—'}
+                  <td className="px-4 py-2 text-sm text-gray-600 max-w-[200px] truncate" title={segmentAudit.janitorComment}>
+                    {segmentAudit.janitorComment ?? '—'}
                   </td>
                   <td className="px-4 py-2 text-sm text-gray-700 max-w-[280px]">
                     {needsLoad ? (
@@ -194,8 +201,8 @@ export default function ErrorLogExplorer({ documentId, unfixable }: Props) {
                       />
                     ) : (
                       <span className="line-clamp-2">
-                        {(segment?.targetFinal || segment?.targetMt || '—').slice(0, 120)}
-                        {((segment?.targetFinal || segment?.targetMt)?.length ?? 0) > 120 ? '…' : ''}
+                        {(segment?.targetFinal || segment?.targetMt || segmentAudit.fixedText || segmentAudit.originalText || '—').slice(0, 120)}
+                        {((segment?.targetFinal || segment?.targetMt || segmentAudit.fixedText)?.length ?? 0) > 120 ? '…' : ''}
                       </span>
                     )}
                   </td>
@@ -220,7 +227,7 @@ export default function ErrorLogExplorer({ documentId, unfixable }: Props) {
                       </span>
                     ) : (
                       <button
-                        onClick={() => startEdit(entry)}
+                        onClick={() => startEdit(segmentAudit)}
                         className="text-sm text-primary-600 hover:text-primary-800 font-medium"
                       >
                         Edit

@@ -36,13 +36,13 @@ Quality Control Station provides a comprehensive UI for managing translation qua
 - 4 stat cards displaying:
   - Total Segments
   - DNA Rules (from validation)
-  - Suspicious Found (from validator-janitor)
+  - Suspicious Found (from universal janitor)
   - Resolved (sum of fixed issues)
 
 **Props:**
 ```typescript
 {
-  report: ValidatorJanitorReport | null;
+  report: JanitorReport | null;
   validation: DnaContractValidationResult | null | undefined;
 }
 ```
@@ -85,7 +85,7 @@ Quality Control Station provides a comprehensive UI for managing translation qua
 **Location:** `QualityErrorsTable.tsx`
 
 **Features:**
-- Interactive table of quality errors from validator-janitor
+- Interactive table of quality errors from universal janitor
 - Columns: ID, Type, Detail, Action
 - "Add to DNA" button for SUSPICIOUS_ABBREV errors
 - Groups errors by type (SUSPICIOUS_ABBREV, FORBIDDEN_SCRIPT, other)

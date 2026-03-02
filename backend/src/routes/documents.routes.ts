@@ -825,3 +825,4 @@ documentRoutes.get(
     res.json(report);
   }),
 );
+

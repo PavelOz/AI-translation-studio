@@ -1,6 +1,8 @@
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db/prisma';
 import { AIOrchestrator, type OrchestratorGlossaryEntry, type OrchestratorSegment, type TmExample, type TranslationProvider } from '../ai/orchestrator';
+import { TranslationOrchestrator } from '../ai/translationOrchestrator';
+import { LlmCriticService } from '../ai/llmCriticService';
 import { QAEngine } from '../ai/qaEngine';
 import { searchTranslationMemory } from './tm.service';
 import { ApiError } from '../utils/apiError';
@@ -1784,45 +1786,99 @@ export const runSegmentMachineTranslationWithCritic = async (
       }
     : undefined;
 
-  const aiResult = await orchestrator.translateWithCritic(
-    buildOrchestratorSegment(segment, previous, next, segment.document.name),
+  // MIGRATED: Using TranslationOrchestrator + LlmCriticService instead of translateWithCritic
+  // Step 1: Translate using TranslationOrchestrator
+  onProgress?.('draft', 'Generating translation...');
+  const translationOrchestrator = new TranslationOrchestrator();
+  const orchestratorSegment = buildOrchestratorSegment(segment, previous, next, segment.document.name);
+  
+  const translationResult = await translationOrchestrator.translateBatch(
+    [orchestratorSegment],
     {
-      provider: context.settings?.provider,
+      provider: context.settings?.provider as 'gemini' | 'openai' | 'yandex' | 'deepseek' | 'claude',
       model: context.settings?.model,
       apiKey: context.apiKey,
       yandexFolderId: context.yandexFolderId,
-      glossary: filteredGlossary,
-      guidelines: context.guidelines,
-      tmExamples, // TM examples used for RAG, but we always generate fresh translation
-      project: context.projectMeta,
-      document: documentWithSummary ? {
-        name: documentWithSummary.name,
-        summary: documentWithSummary.summary ?? undefined,
-        clusterSummary: documentWithSummary.clusterSummary ?? undefined,
-      } : undefined,
-      documentDna: documentDnaPayload,
-      // #region agent log
-      sourceLocale: segment.document.sourceLocale, // Pass explicit source locale from document
-      targetLocale: segment.document.targetLocale, // Pass explicit target locale from document
       temperature: options?.temperature ?? context.settings?.temperature ?? getDefaultTemperature(context.settings?.provider),
       maxTokens,
-      glossaryMode,
-      // Stage 2: Document-specific context (only if not ignoring context)
-      documentGlossary: !options?.ignoreContext && documentGlossary.length > 0 ? documentGlossary : undefined,
-      documentStyleRules: !options?.ignoreContext && documentStyleRules.length > 0 ? documentStyleRules : undefined,
-      documentId: segment.document.id,
+      dna: documentDnaPayload ?? null,
+      sourceLocale: segment.document.sourceLocale,
+      targetLocale: segment.document.targetLocale,
+      documentName: documentWithSummary?.name,
+      documentSummary: documentWithSummary?.summary ?? undefined,
     },
-    onProgress,
   );
 
-  let translationText = aiResult.targetText;
-  const fuzzyScore = Math.round((aiResult.confidence ?? 0.95) * 100);
+  const translatedSegment = translationResult.segments[0];
+  let translationText = translatedSegment?.target || segment.sourceText;
+
+  // Step 2: Review using LlmCriticService
+  onProgress?.('critic', 'Running quality review...');
+  const criticService = new LlmCriticService();
+  
+  // Extract validationHints from DNA if available
+  const dnaForCritic = documentDnaPayload
+    ? {
+        abbreviationLogic: documentDnaPayload.abbreviationLogic || null,
+        validationHints: (documentDnaPayload as any).validationHints || null,
+      }
+    : null;
+
+  const criticReview = await criticService.review(
+    segment.sourceText,
+    translationText,
+    {
+      provider: context.settings?.provider as 'gemini' | 'openai' | 'yandex' | 'deepseek' | 'claude',
+      model: context.settings?.model, // LlmCriticService will auto-switch Gemini Flash models
+      apiKey: context.apiKey,
+      yandexFolderId: context.yandexFolderId,
+      sourceLocale: segment.document.sourceLocale,
+      targetLocale: segment.document.targetLocale,
+      maxTokens: Math.max(maxTokens, 8192), // Critic needs more tokens
+      temperature: 0.3, // Lower temperature for stable critique
+      dna: dnaForCritic,
+    },
+  );
+
+  // Step 3: Handle critique results
+  const criticalErrors = criticReview.errors.filter(e => e.severity === 'critical' || e.severity === 'high');
+  const hasCriticalIssues = criticalErrors.length > 0;
+
+  // Build analysis text from critique
+  const analysisParts: string[] = [];
+  if (criticReview.score < 100) {
+    analysisParts.push(`Quality Score: ${criticReview.score}/100`);
+  }
+  if (criticReview.errors.length > 0) {
+    analysisParts.push(`Errors: ${criticReview.errors.length} (${criticalErrors.length} critical)`);
+  }
+  if (criticReview.warnings.length > 0) {
+    analysisParts.push(`Warnings: ${criticReview.warnings.length}`);
+  }
+  if (criticReview.reasoning) {
+    analysisParts.push(`Review: ${criticReview.reasoning}`);
+  }
+
+  // Calculate confidence based on critique score
+  const fuzzyScore = Math.round((criticReview.score / 100) * 100);
   const bestTmEntryId = null; // Not using TM match directly in critic mode
+
+  logger.info(
+    {
+      segmentId: segment.id,
+      score: criticReview.score,
+      errors: criticReview.errors.length,
+      warnings: criticReview.warnings.length,
+      hasCriticalIssues,
+    },
+    'Critic review completed',
+  );
 
   if (!translationText) {
     translationText = segment.sourceText;
   }
 
+  // Save translation with critique analysis
   const updatedSegment = await prisma.segment.update({
     where: { id: segmentId },
     data: {
@@ -1830,13 +1886,15 @@ export const runSegmentMachineTranslationWithCritic = async (
       fuzzyScore,
       bestTmEntryId,
       status: 'MT',
-      ...(aiResult && {
-        mtFullPrompt: aiResult.fullPrompt ?? undefined,
-        mtAnalysis: aiResult.analysis ?? undefined,
-      }),
+      mtAnalysis: analysisParts.length > 0 ? analysisParts.join(' | ') : undefined,
+      // Store critique details in mtAnalysis or create separate field if needed
     },
     include: { document: true },
   });
+
+  onProgress?.('complete', hasCriticalIssues 
+    ? `Translation completed with ${criticalErrors.length} critical issue(s)` 
+    : 'Translation completed');
 
   // Add model information to the response (extend the segment object)
   return {
@@ -2110,6 +2168,7 @@ export const runDocumentMachineTranslation = async (
             );
             const maxTokens = Math.min(calculatedMaxTokens, 8192);
 
+            // TODO: Migrate to CriticService when available
             // Call translateWithCritic for this segment
             const aiResult = await orchestrator.translateWithCritic(
               orchestratorSegment,
@@ -2883,6 +2942,7 @@ export const pretranslateDocument = async (
                 document.name ?? undefined,
               );
 
+              // TODO: Migrate to CriticService when available
               const aiResult = await orchestrator.translateWithCritic(
                 orchestratorSegment,
                 {
@@ -3256,41 +3316,76 @@ export const pretranslateDocument = async (
           });
 
           // eslint-disable-next-line no-await-in-loop
-          const aiResults = await orchestrator.translateSegments({
+          // MIGRATED: Using TranslationOrchestrator instead of AIOrchestrator for mass translation
+          const translationOrchestrator = new TranslationOrchestrator();
+          const translationResult = await translationOrchestrator.translateAll(
+            orchestratorSegments,
+            {
+              provider: aiConfig.provider as 'gemini' | 'openai' | 'yandex' | 'deepseek' | 'claude',
+              model: aiConfig.model,
+              apiKey: context.apiKey,
+              yandexFolderId: context.yandexFolderId,
+              temperature: aiConfig.temperature,
+              maxTokens: context.settings.maxTokens ?? 1024,
+              dna: documentDnaPretranslate ?? null,
+              sourceLocale: document.sourceLocale,
+              targetLocale: document.targetLocale,
+              documentName: documentWithSummary?.name,
+              documentSummary: documentWithSummary?.summary ?? undefined,
+              autoCorrect: true, // Enable self-correction loop
+              minQualityScore: 85, // Minimum quality score threshold
+              onProgress: (progress) => {
+                updateProgress(documentId, {
+                  currentSegment: progress.current,
+                  currentSegmentText: `Translating batch ${progress.batch}/${progress.totalBatches}...`,
+                });
+              },
+            },
+          );
+
+          // Convert TranslationOrchestrator results to AIOrchestrator format for compatibility
+          const aiResults = translationResult.results.map((result) => ({
+            segmentId: result.id,
+            targetText: result.target,
+            confidence: result.confidence ?? 0.85,
             provider: aiConfig.provider,
-            model: aiConfig.model,
-            apiKey: context.apiKey,
-            yandexFolderId: context.yandexFolderId,
-            document: documentWithSummary ? {
-              name: documentWithSummary.name,
-              summary: documentWithSummary.summary ?? undefined,
-              clusterSummary: documentWithSummary.clusterSummary ?? undefined,
-            } : undefined,
-            documentDna: documentDnaPretranslate,
-            segments: orchestratorSegments,
-            glossary: filteredGlossary,
-            guidelines: context.guidelines,
-            project: context.projectMeta,
-            sourceLocale: document.sourceLocale, // Pass explicit source locale from document
-            targetLocale: document.targetLocale, // Pass explicit target locale from document
-            temperature: aiConfig.temperature,
-            maxTokens: context.settings.maxTokens ?? 1024,
-            glossaryMode,
-            // Stage 2: Document-specific context
-            documentGlossary: documentGlossary.length > 0 ? documentGlossary : undefined,
-            documentStyleRules: documentStyleRules.length > 0 ? documentStyleRules : undefined,
-            documentId: document.id,
-            introducedAbbreviations, // Style Governor: already expanded in previous batches
-          });
+            fallback: false,
+            expandedTerms: undefined, // TranslationOrchestrator doesn't track expanded terms
+            fullPrompt: undefined,
+            analysis: result.analysis,
+          }));
+
+          // Handle errors from TranslationOrchestrator
+          if (translationResult.errors && translationResult.errors.length > 0) {
+            logger.warn(
+              { documentId, errors: translationResult.errors },
+              'TranslationOrchestrator returned errors',
+            );
+            // Add error results for failed segments
+            for (const error of translationResult.errors) {
+              const errorResult = {
+                segmentId: error.segmentId,
+                targetText: '', // Empty for errors
+                confidence: 0,
+                provider: aiConfig.provider,
+                fallback: false,
+                expandedTerms: undefined,
+                fullPrompt: undefined,
+                analysis: `Error: ${error.error}`,
+              };
+              aiResults.push(errorResult);
+            }
+          }
 
           const resultMap = new Map(aiResults.map((result) => [result.segmentId, result]));
 
           // Persistent state: session expandedTerms (Set) — updated after each batch and passed to next
+          // NOTE: TranslationOrchestrator doesn't track expandedTerms, so we extract them from translated text
           const knownAbbrevs = getKnownTargetAbbreviations(documentDnaPretranslate?.abbreviationLogic ?? undefined);
           if (knownAbbrevs.length > 0) {
             const newFromBatch = new Set<string>();
             for (const r of aiResults) {
-              if (r.expandedTerms) for (const t of r.expandedTerms) newFromBatch.add(t);
+              // Extract abbreviations from translated text (format: "Full Name (ABBR)")
               const text = r.targetText ?? '';
               const re = /\(([A-Z][A-Z0-9]{1,})\)/g;
               let m: RegExpExecArray | null;
@@ -3312,6 +3407,24 @@ export const pretranslateDocument = async (
             let targetText = aiResult?.targetText ?? entry.segment.sourceText;
             targetText = applyTotalCyrillicBan(targetText, documentDnaPretranslate?.abbreviationLogic as Record<string, unknown> | null | undefined, document.targetLocale);
             targetText = deduplicateFullFormDash(targetText, documentDnaPretranslate?.abbreviationLogic as Record<string, unknown> | null | undefined);
+            
+            // Determine status: REQUIRES_REVIEW if quality is still low after correction
+            const segmentStatus = (aiResult as any)?.requiresReview ? 'REQUIRES_REVIEW' : 'MT';
+            
+            // Build analysis text with self-correction metadata
+            let analysisText = aiResult?.analysis;
+            if ((aiResult as any)?.autoCorrected) {
+              const parts = [analysisText || ''];
+              parts.push(`[Auto-corrected: ${(aiResult as any).correctionAttempts} attempt(s)]`);
+              if ((aiResult as any)?.finalCriticScore !== undefined) {
+                parts.push(`[Final Score: ${(aiResult as any).finalCriticScore}/100]`);
+              }
+              if ((aiResult as any)?.requiresReview) {
+                parts.push(`[Requires Review: Quality still below threshold]`);
+              }
+              analysisText = parts.filter(p => p).join(' | ');
+            }
+            
             // Add to pending updates
             pendingUpdates.push(
               prisma.segment.update({
@@ -3321,10 +3434,11 @@ export const pretranslateDocument = async (
                   targetFinal: targetText,
                   fuzzyScore: aiResult ? Math.round((aiResult.confidence ?? 0.85) * 100) : null,
                   bestTmEntryId: null,
-                  status: 'MT',
-                  ...(aiResult && {
-                    mtFullPrompt: aiResult.fullPrompt ?? undefined,
-                    mtAnalysis: aiResult.analysis ?? undefined,
+                  status: segmentStatus,
+                  mtAnalysis: analysisText ?? undefined,
+                  // Store auto-correction metadata in janitorComment for Janitor to pick up
+                  ...((aiResult as any)?.requiresReview && {
+                    janitorComment: `Auto-corrected but quality score ${(aiResult as any).finalCriticScore ?? 'unknown'}/100 still below threshold. Requires manual review.`,
                   }),
                 },
               }),

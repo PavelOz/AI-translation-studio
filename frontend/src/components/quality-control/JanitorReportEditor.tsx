@@ -1,8 +1,8 @@
 import { useState } from 'react';
-import type { ValidatorJanitorReport } from '../../api/documents.api';
+import type { JanitorReport } from '../../api/janitor.api';
 
 type Props = {
-  report: ValidatorJanitorReport;
+  report: JanitorReport;
   json: string;
   onJsonChange: (json: string) => void;
   onSave: () => void;
@@ -43,19 +43,19 @@ export default function JanitorReportEditor({ report, json, onJsonChange, onSave
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div className="bg-gray-50 rounded p-3">
           <p className="text-xs text-gray-500">Total Segments</p>
-          <p className="text-lg font-semibold text-gray-900">{report.totalSegments}</p>
+          <p className="text-lg font-semibold text-gray-900">{report.statistics.totalSegments}</p>
         </div>
         <div className="bg-gray-50 rounded p-3">
-          <p className="text-xs text-gray-500">Unfixable</p>
-          <p className="text-lg font-semibold text-gray-900">{report.unfixable?.length || 0}</p>
+          <p className="text-xs text-gray-500">Requires Review</p>
+          <p className="text-lg font-semibold text-red-600">{report.statistics.requiresReview}</p>
         </div>
         <div className="bg-gray-50 rounded p-3">
-          <p className="text-xs text-gray-500">Spot Checks</p>
-          <p className="text-lg font-semibold text-gray-900">{report.spotCheckSegmentIds?.length || 0}</p>
+          <p className="text-xs text-gray-500">Auto-fixed</p>
+          <p className="text-lg font-semibold text-amber-600">{report.statistics.autoFixed}</p>
         </div>
         <div className="bg-gray-50 rounded p-3">
-          <p className="text-xs text-gray-500">Suspicious Abbrev</p>
-          <p className="text-lg font-semibold text-amber-600">{report.counts?.suspiciousAbbrevCount || 0}</p>
+          <p className="text-xs text-gray-500">Validated</p>
+          <p className="text-lg font-semibold text-green-600">{report.statistics.validated}</p>
         </div>
       </div>
 
@@ -106,30 +106,27 @@ export default function JanitorReportEditor({ report, json, onJsonChange, onSave
         <div className="flex flex-wrap gap-2">
           <button
             onClick={() => {
-              const updated = { ...report, unfixable: [] };
+              const updated = { 
+                ...report, 
+                segments: report.segments.filter(s => s.status !== 'REQUIRES_REVIEW')
+              };
               onJsonChange(JSON.stringify(updated, null, 2));
             }}
             className="px-3 py-1.5 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
           >
-            Clear Unfixable
+            Clear Requires Review
           </button>
           <button
             onClick={() => {
-              const updated = { ...report, spotCheckSegmentIds: [] };
+              const updated = { 
+                ...report, 
+                statistics: { ...report.statistics, requiresReview: 0 }
+              };
               onJsonChange(JSON.stringify(updated, null, 2));
             }}
             className="px-3 py-1.5 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
           >
-            Clear Spot Checks
-          </button>
-          <button
-            onClick={() => {
-              const updated = { ...report, counts: { ...report.counts, suspiciousAbbrevCount: 0 } };
-              onJsonChange(JSON.stringify(updated, null, 2));
-            }}
-            className="px-3 py-1.5 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
-          >
-            Reset Suspicious Count
+            Reset Requires Review Count
           </button>
         </div>
       </div>

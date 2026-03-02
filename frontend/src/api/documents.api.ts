@@ -227,15 +227,39 @@ export const documentsApi = {
     return response.data;
   },
 
-  /** Run Validator-Janitor: report + optional apply fixes. dryRun: true = report only. */
-  runValidatorJanitor: async (
+  // Legacy runValidatorJanitor removed - use janitorApi.auditSegments() instead
+
+  analyze: async (
     documentId: string,
-    options?: { dryRun?: boolean },
-  ): Promise<ValidatorJanitorReport> => {
-    const response = await apiClient.post<ValidatorJanitorReport>(
-      `/documents/${documentId}/validator-janitor`,
-      options ?? { dryRun: true },
-    );
+    options?: {
+      forceReset?: boolean;
+      glossaryMode?: 'fast' | 'deep';
+      provider?: string;
+      model?: string;
+      tags?: string[];
+    },
+  ): Promise<{ status: string; documentId: string }> => {
+    const response = await apiClient.post(`/documents/${documentId}/analyze`, options || {});
+    return response.data;
+  },
+
+  smartExport: async (
+    documentId: string,
+    options?: {
+      highlightColor?: string;
+      includeComments?: boolean;
+      validateAbbreviations?: boolean;
+    },
+  ): Promise<Blob> => {
+    const params = new URLSearchParams();
+    if (options?.highlightColor) params.append('highlightColor', options.highlightColor);
+    if (options?.includeComments !== undefined) params.append('includeComments', String(options.includeComments));
+    if (options?.validateAbbreviations !== undefined) params.append('validateAbbreviations', String(options.validateAbbreviations));
+
+    const response = await apiClient.get(`/documents/${documentId}/smart-export`, {
+      params,
+      responseType: 'blob',
+    });
     return response.data;
   },
 };
@@ -258,14 +282,5 @@ export type JanitorCounts = {
   suspiciousAbbrevCount: number;
 };
 
-export type ValidatorJanitorReport = {
-  documentId: string;
-  documentName?: string;
-  direction: string;
-  totalSegments: number;
-  counts: JanitorCounts;
-  unfixable: UnfixableEntry[];
-  spotCheckSegmentIds: string[];
-  preflightFailed?: string;
-};
+// Legacy ValidatorJanitorReport removed - use JanitorReport from janitor.api.ts instead
 

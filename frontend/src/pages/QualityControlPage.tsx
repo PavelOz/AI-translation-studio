@@ -1,7 +1,8 @@
 import Layout from '../components/Layout';
 import { useParams, Link } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
-import { documentsApi, type ValidatorJanitorReport, type JanitorCounts } from '../api/documents.api';
+import { documentsApi } from '../api/documents.api';
+import { janitorApi, type JanitorReport } from '../api/janitor.api';
 import { analysisApi } from '../api/analysis.api';
 import toast from 'react-hot-toast';
 import ErrorLogExplorer from '../components/quality-control/ErrorLogExplorer';
@@ -36,14 +37,18 @@ export default function QualityControlPage() {
 
   const runReportMutation = useMutation({
     mutationFn: (dryRun: boolean) =>
-      documentsApi.runValidatorJanitor(documentId, { dryRun }),
-    onSuccess: (report: ValidatorJanitorReport, dryRun: boolean) => {
-      queryClient.setQueryData(['validator-janitor', documentId], report);
-      toast.success(dryRun ? 'Report generated' : 'Validator-Janitor applied');
+      janitorApi.auditSegments(documentId, { 
+        autoFix: !dryRun, 
+        strictMode: true, 
+        dryRun 
+      }),
+    onSuccess: (report: JanitorReport, dryRun: boolean) => {
+      queryClient.setQueryData(['janitor-report', documentId], report);
+      toast.success(dryRun ? 'Report generated' : 'Janitor audit completed and fixes applied');
     },
     onError: (err: any) => {
-      console.error('Error running validator-janitor:', err);
-      toast.error(err.response?.data?.message || err.response?.data?.error || 'Validator-Janitor failed');
+      console.error('Error running janitor audit:', err);
+      toast.error(err.response?.data?.message || err.response?.data?.error || 'Janitor audit failed');
     },
   });
 
@@ -53,14 +58,14 @@ export default function QualityControlPage() {
     error: reportError,
     refetch: refetchReport 
   } = useQuery({
-    queryKey: ['validator-janitor', documentId],
-    queryFn: () => documentsApi.runValidatorJanitor(documentId, { dryRun: true }),
+    queryKey: ['janitor-report', documentId],
+    queryFn: () => janitorApi.getReport(documentId),
     enabled: !!documentId,
     staleTime: 60_000,
     retry: 1,
     refetchOnWindowFocus: false,
     onError: (err: any) => {
-      console.error('Error loading validator-janitor report:', err);
+      console.error('Error loading janitor report:', err);
     },
   });
 
@@ -155,21 +160,46 @@ export default function QualityControlPage() {
 
         {report && (
           <>
+            {/* Segments requiring review */}
+            {report.statistics.requiresReview > 0 && (
+              <div className="rounded-lg border border-red-200 bg-red-50 p-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-lg font-semibold text-red-900">
+                      {report.statistics.requiresReview} segments require review
+                    </h3>
+                    <p className="text-sm text-red-700 mt-1">
+                      These segments have validation errors that need manual attention.
+                    </p>
+                  </div>
+                  <Link
+                    to={`/documents/${documentId}/janitor`}
+                    className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700"
+                  >
+                    Review Segments
+                  </Link>
+                </div>
+              </div>
+            )}
+
             {/* Quality Errors Table with Add to DNA */}
             <QualityErrorsTable
               documentId={documentId}
-              unfixable={report.unfixable || []}
+              segmentsRequiringReview={report.segments.filter(s => s.status === 'REQUIRES_REVIEW')}
             />
 
-            {/* Legacy Components */}
+            {/* Legacy Components - адаптированные для нового формата */}
             <div className="grid gap-6 lg:grid-cols-1">
               <ErrorLogExplorer
                 documentId={documentId}
-                unfixable={report.unfixable || []}
+                segmentsRequiringReview={report.segments.filter(s => s.status === 'REQUIRES_REVIEW')}
               />
               <SpotCheckWizard
                 documentId={documentId}
-                spotCheckSegmentIds={report.spotCheckSegmentIds || []}
+                spotCheckSegmentIds={report.segments
+                  .filter(s => s.status === 'REQUIRES_REVIEW')
+                  .slice(0, 500)
+                  .map(s => s.segmentId)}
               />
             </div>
           </>

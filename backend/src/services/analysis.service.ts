@@ -14,6 +14,7 @@ import { normalizeDocumentDnaPayload } from './dnaSchema';
 import { Prisma } from '@prisma/client';
 // @ts-ignore - compromise doesn't have TypeScript types
 import nlp from 'compromise';
+import { DnaSynthesisService } from './dnaSynthesis.service';
 
 // In-memory cancellation flags for analysis (similar to pretranslation)
 const analysisCancellationFlags = new Set<string>();
@@ -7222,7 +7223,8 @@ export const runFullAnalysis = async (
   forceReset: boolean = false,
   glossaryMode: 'fast' | 'deep' = 'fast',
   provider?: string,
-  model?: string
+  model?: string,
+  tags: string[] = []
 ): Promise<{
   glossaryCount: number;
   styleRulesCount: number;
@@ -7399,12 +7401,29 @@ export const runFullAnalysis = async (
       );
     }
 
-    // Run both extractions in parallel
+    // Run DNA synthesis (replaces extractGlossary) and style rules extraction in parallel
     // CRITICAL: Use Promise.allSettled to allow one to fail while the other continues
     // This ensures that if one extraction fails (e.g., rate limit), the other can still complete
     // We'll handle partial failures gracefully and report what succeeded
-    const [glossarySettlement, styleRulesSettlement] = await Promise.allSettled([
-      extractGlossary(documentId, glossaryMode, provider, model), // Use provided mode (fast or deep) and AI provider/model
+    
+    // Prepare DNA synthesis with tags for Master DNA resolution
+    const dnaSynthesisService = new DnaSynthesisService();
+    const sourceData = {
+      type: 'document' as const,
+      documentId,
+      tags: tags.length > 0 ? tags : undefined,
+    };
+    const synthesisOptions = {
+      useLLM: glossaryMode === 'deep', // Use LLM enrichment in deep mode
+      llmProvider: provider as any,
+      llmModel: model,
+      glossaryMode,
+      enableGlossaryExtraction: true, // Extract glossary from document
+      autoResolveMasterDna: tags.length > 0, // Auto-resolve Master DNA if tags provided
+    };
+    
+    const [dnaSynthesisSettlement, styleRulesSettlement] = await Promise.allSettled([
+      dnaSynthesisService.synthesize(sourceData, null, documentId, synthesisOptions), // Master DNA will be auto-resolved by tags
       extractStyleRules(documentId),
     ]);
     
@@ -7414,8 +7433,23 @@ export const runFullAnalysis = async (
     let hasErrors = false;
     const errorMessages: string[] = [];
     
-    if (glossarySettlement.status === 'fulfilled') {
-      glossaryResult = glossarySettlement.value;
+    if (dnaSynthesisSettlement.status === 'fulfilled') {
+      const synthesisResult = dnaSynthesisSettlement.value;
+      // DNA is already saved by DnaSynthesisService.saveSynthesizedDna()
+      // Count terms from synthesized DNA
+      const termCount = synthesisResult.synthesized.abbreviationLogic 
+        ? Object.keys(synthesisResult.synthesized.abbreviationLogic).length 
+        : 0;
+      glossaryResult = { count: termCount };
+      logger.info(
+        { 
+          documentId, 
+          termCount, 
+          statistics: synthesisResult.statistics,
+          tags: tags.length > 0 ? tags : 'none',
+        },
+        'DNA synthesis completed successfully',
+      );
     } else {
       const error = glossarySettlement.reason;
       const errorMsg = error?.message || 'Unknown error during glossary extraction';
@@ -7439,10 +7473,10 @@ export const runFullAnalysis = async (
       }
       
       hasErrors = true;
-      errorMessages.push(`Glossary extraction failed: ${errorMsg}`);
+      errorMessages.push(`DNA synthesis failed: ${errorMsg}`);
       logger.error(
         { documentId, error: errorMsg, errorStack: error?.stack },
-        'Glossary extraction failed during full analysis',
+        'DNA synthesis failed during full analysis',
       );
     }
     

@@ -11,6 +11,7 @@
 
 import { logger } from '../utils/logger';
 import { getProvider } from './providers/registry';
+import { LlmCriticService } from './llmCriticService';
 import type {
   OrchestratorSegment,
   DocumentDnaPayload,
@@ -34,6 +35,8 @@ export interface BatchTranslationOptions {
   documentName?: string;
   documentSummary?: string;
   onProgress?: (progress: { current: number; total: number; batch: number; totalBatches: number }) => void;
+  autoCorrect?: boolean; // Enable self-correction loop with LlmCriticService
+  minQualityScore?: number; // Minimum quality score (0-100) to trigger correction, default: 85
 }
 
 /**
@@ -44,6 +47,16 @@ export interface TranslatedSegment {
   target: string;
   confidence?: number;
   analysis?: string;
+  // Self-correction metadata
+  autoCorrected?: boolean; // Was this segment auto-corrected?
+  correctionAttempts?: number; // Number of correction attempts (0 = no correction needed)
+  finalCriticScore?: number; // Final quality score from critic (0-100)
+  requiresReview?: boolean; // Should be reviewed by Janitor (score still low after correction)
+  criticReview?: {
+    errors: number;
+    warnings: number;
+    reasoning?: string;
+  };
 }
 
 /**
@@ -478,10 +491,20 @@ Do not include any markdown, explanations, or additional text. Only the JSON arr
       );
 
       // Парсим ответ
-      const translatedSegments = this.parseTranslationResponse(
+      let translatedSegments = this.parseTranslationResponse(
         response.outputText,
         segments,
       );
+
+      // Self-Correction Loop: проверка качества и автокоррекция
+      if (options.autoCorrect) {
+        translatedSegments = await this.applySelfCorrection(
+          segments,
+          translatedSegments,
+          options,
+          relevantDna,
+        );
+      }
 
       return {
         segments: translatedSegments,
@@ -587,6 +610,304 @@ Do not include any markdown, explanations, or additional text. Only the JSON arr
         target: s.sourceText,
       }));
     }
+  }
+
+  /**
+   * Self-Correction Loop: проверка качества через LlmCriticService и автокоррекция
+   */
+  private async applySelfCorrection(
+    originalSegments: OrchestratorSegment[],
+    initialTranslations: TranslatedSegment[],
+    options: BatchTranslationOptions,
+    relevantDna: RelevantDna,
+  ): Promise<TranslatedSegment[]> {
+    const minQualityScore = options.minQualityScore ?? 85;
+    const criticService = new LlmCriticService();
+    const correctedSegments: TranslatedSegment[] = [];
+
+    logger.info(
+      {
+        segmentsCount: originalSegments.length,
+        minQualityScore,
+      },
+      'Starting self-correction loop',
+    );
+
+    for (let i = 0; i < originalSegments.length; i++) {
+      const segment = originalSegments[i];
+      let translation = initialTranslations[i];
+      let correctionAttempts = 0;
+      let finalScore = 100;
+      let requiresReview = false;
+
+      // Проверяем качество перевода
+      const criticReview = await criticService.review(
+        segment.sourceText,
+        translation.target,
+        {
+          provider: options.provider,
+          model: options.model,
+          apiKey: options.apiKey,
+          yandexFolderId: options.yandexFolderId,
+          sourceLocale: options.sourceLocale,
+          targetLocale: options.targetLocale,
+          maxTokens: Math.max(options.maxTokens ?? 2048, 8192),
+          temperature: 0.3,
+          dna: {
+            abbreviationLogic: relevantDna.abbreviationLogic || null,
+            validationHints: relevantDna.validationHints || null,
+          },
+        },
+      );
+
+      finalScore = criticReview.score;
+      const hasCriticalErrors = criticReview.errors.some(
+        e => e.severity === 'critical' || e.severity === 'high',
+      );
+      const isAcceptable = criticReview.score >= minQualityScore && !hasCriticalErrors;
+
+      // Если качество низкое - выполняем одну попытку исправления
+      if (!isAcceptable && correctionAttempts < 1) {
+        logger.info(
+          {
+            segmentId: segment.segmentId,
+            initialScore: criticReview.score,
+            errors: criticReview.errors.length,
+            hasCriticalErrors,
+          },
+          'Translation quality below threshold, attempting correction',
+        );
+
+        // Формируем промпт для исправления
+        const correctionPrompt = this.buildCorrectionPrompt(
+          segment,
+          translation.target,
+          criticReview,
+          relevantDna,
+          options,
+        );
+
+        try {
+          const provider = getProvider(
+            options.provider,
+            options.apiKey,
+            options.yandexFolderId,
+          );
+          const model = options.model || provider.defaultModel;
+          const supportsSystemInstructions = this.supportsSystemInstructions(options.provider);
+
+          const systemPrompt = this.buildSystemPrompt(
+            relevantDna,
+            options.sourceLocale,
+            options.targetLocale,
+            supportsSystemInstructions,
+          );
+
+          const correctionResponse = await (provider as any).callModelWithRetry(
+            {
+              prompt: correctionPrompt,
+              systemPrompt: supportsSystemInstructions ? systemPrompt : undefined,
+              model,
+              temperature: (options.temperature ?? 0.2) * 0.8,
+              maxTokens: options.maxTokens ?? 2048,
+              segments: [{
+                segmentId: segment.segmentId,
+                sourceText: segment.sourceText,
+              }],
+            },
+            {
+              maxRetries: 2,
+              onRetry: (attempt, delay, error) => {
+                logger.warn(
+                  { attempt, delay, error: error.message, segmentId: segment.segmentId },
+                  'Retrying correction',
+                );
+              },
+            },
+          );
+
+          // Парсим исправленный перевод
+          const correctedResults = this.parseTranslationResponse(
+            correctionResponse.outputText,
+            [segment],
+          );
+
+          if (correctedResults.length > 0) {
+            translation = correctedResults[0];
+            correctionAttempts = 1;
+
+            // Проверяем качество исправленного перевода
+            const secondReview = await criticService.review(
+              segment.sourceText,
+              translation.target,
+              {
+                provider: options.provider,
+                model: options.model,
+                apiKey: options.apiKey,
+                yandexFolderId: options.yandexFolderId,
+                sourceLocale: options.sourceLocale,
+                targetLocale: options.targetLocale,
+                maxTokens: Math.max(options.maxTokens ?? 2048, 8192),
+                temperature: 0.3,
+                dna: {
+                  abbreviationLogic: relevantDna.abbreviationLogic || null,
+                  validationHints: relevantDna.validationHints || null,
+                },
+              },
+            );
+
+            finalScore = secondReview.score;
+            const stillHasCriticalErrors = secondReview.errors.some(
+              e => e.severity === 'critical' || e.severity === 'high',
+            );
+
+            // Если после исправления качество все еще низкое - помечаем для ревью
+            if (secondReview.score < minQualityScore || stillHasCriticalErrors) {
+              requiresReview = true;
+              logger.warn(
+                {
+                  segmentId: segment.segmentId,
+                  finalScore: secondReview.score,
+                  errors: secondReview.errors.length,
+                },
+                'Translation still requires review after correction',
+              );
+            } else {
+              logger.info(
+                {
+                  segmentId: segment.segmentId,
+                  initialScore: criticReview.score,
+                  finalScore: secondReview.score,
+                },
+                'Translation improved after correction',
+              );
+            }
+
+            translation.criticReview = {
+              errors: secondReview.errors.length,
+              warnings: secondReview.warnings.length,
+              reasoning: secondReview.reasoning,
+            };
+          }
+        } catch (error) {
+          logger.error(
+            {
+              error: error instanceof Error ? error.message : String(error),
+              segmentId: segment.segmentId,
+            },
+            'Correction attempt failed, using original translation',
+          );
+          translation.criticReview = {
+            errors: criticReview.errors.length,
+            warnings: criticReview.warnings.length,
+            reasoning: criticReview.reasoning,
+          };
+        }
+      } else {
+        translation.criticReview = {
+          errors: criticReview.errors.length,
+          warnings: criticReview.warnings.length,
+          reasoning: criticReview.reasoning,
+        };
+      }
+
+      // Добавляем метаданные
+      translation.autoCorrected = correctionAttempts > 0;
+      translation.correctionAttempts = correctionAttempts;
+      translation.finalCriticScore = finalScore;
+      translation.requiresReview = requiresReview;
+      translation.confidence = finalScore / 100;
+
+      correctedSegments.push(translation);
+    }
+
+    const correctedCount = correctedSegments.filter(s => s.autoCorrected).length;
+    const reviewRequiredCount = correctedSegments.filter(s => s.requiresReview).length;
+
+    logger.info(
+      {
+        totalSegments: originalSegments.length,
+        corrected: correctedCount,
+        requiresReview: reviewRequiredCount,
+      },
+      'Self-correction loop completed',
+    );
+
+    return correctedSegments;
+  }
+
+  /**
+   * Построение промпта для исправления перевода на основе замечаний критика
+   */
+  private buildCorrectionPrompt(
+    segment: OrchestratorSegment,
+    currentTranslation: string,
+    criticReview: any,
+    relevantDna: RelevantDna,
+    options: BatchTranslationOptions,
+  ): string {
+    const sourceLang = options.sourceLocale;
+    const targetLang = options.targetLocale;
+
+    const errorsList = criticReview.errors
+      .map((e: any) => {
+        let errorText = `- ${e.message}`;
+        if (e.term) errorText += ` (term: "${e.term}")`;
+        if (e.expected && e.found) {
+          errorText += ` Expected: "${e.expected}", Found: "${e.found}"`;
+        }
+        if (e.suggestion) errorText += ` Suggestion: ${e.suggestion}`;
+        return errorText;
+      })
+      .join('\n');
+
+    const warningsList = criticReview.warnings
+      .map((w: any) => `- ${w.message}${w.suggestion ? ` (${w.suggestion})` : ''}`)
+      .join('\n');
+
+    let prompt = `Your previous translation was reviewed and found to have quality issues.\n\n`;
+    prompt += `=== ORIGINAL SOURCE TEXT (${sourceLang}) ===\n`;
+    prompt += `"${segment.sourceText}"\n\n`;
+    prompt += `=== YOUR PREVIOUS TRANSLATION (${targetLang}) ===\n`;
+    prompt += `"${currentTranslation}"\n\n`;
+    prompt += `=== QUALITY SCORE ===\n`;
+    prompt += `Score: ${criticReview.score}/100\n`;
+    prompt += `Reasoning: ${criticReview.reasoning}\n\n`;
+
+    if (errorsList) {
+      prompt += `=== ERRORS FOUND ===\n${errorsList}\n\n`;
+    }
+
+    if (warningsList) {
+      prompt += `=== WARNINGS ===\n${warningsList}\n\n`;
+    }
+
+    prompt += `=== YOUR TASK ===\n`;
+    prompt += `Translate the source text again, but this time:\n`;
+    prompt += `1. Fix ALL the errors listed above\n`;
+    prompt += `2. Address the warnings if possible\n`;
+    prompt += `3. Ensure you use the correct glossary terms from DNA\n`;
+    prompt += `4. Follow all style rules from validation hints\n`;
+    prompt += `5. Maintain the same meaning and tone\n\n`;
+
+    if (relevantDna.abbreviationLogic && Object.keys(relevantDna.abbreviationLogic).length > 0) {
+      prompt += `=== RELEVANT GLOSSARY TERMS ===\n`;
+      for (const [key, value] of Object.entries(relevantDna.abbreviationLogic)) {
+        const entry = value as Record<string, unknown>;
+        const longForm = entry.longForm || entry.value || key;
+        const shortForm = entry.shortForm || longForm;
+        if (typeof longForm === 'string' && typeof shortForm === 'string' && longForm !== shortForm) {
+          prompt += `"${key}" → "${longForm}" (long) / "${shortForm}" (short)\n`;
+        } else {
+          prompt += `"${key}" → "${longForm}"\n`;
+        }
+      }
+      prompt += `\n`;
+    }
+
+    prompt += `Return ONLY the corrected translation in ${targetLang}. Do not include explanations, just the translation text.`;
+
+    return prompt;
   }
 
   /**

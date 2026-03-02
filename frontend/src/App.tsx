@@ -17,6 +17,7 @@ import StageMonitoringDashboard from './components/StageMonitoringDashboard';
 import QualityControlPage from './pages/QualityControlPage';
 import AdminQualityControlPage from './pages/AdminQualityControlPage';
 import JanitorReviewScreen from './components/JanitorReviewScreen';
+import DashboardV2 from './components/DashboardV2';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore();
@@ -96,6 +97,14 @@ function App() {
         element={
           <PrivateRoute>
             <JanitorReviewScreen />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/documents/:documentId/dashboard-v2"
+        element={
+          <PrivateRoute>
+            <DashboardV2 />
           </PrivateRoute>
         }
       />

@@ -106,6 +106,12 @@ export default function DocumentViewPage() {
           </div>
           <div className="flex items-center gap-2">
             <Link
+              to={`/documents/${documentId}/dashboard-v2`}
+              className="btn border border-blue-300 bg-blue-50 text-blue-700 hover:bg-blue-100"
+            >
+              Dashboard V2
+            </Link>
+            <Link
               to={`/documents/${documentId}/quality-control`}
               className="btn border border-gray-300 bg-white text-gray-700 hover:bg-gray-50"
             >

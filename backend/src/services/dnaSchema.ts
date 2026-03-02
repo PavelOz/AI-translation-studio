@@ -56,6 +56,19 @@ export const documentDnaPayloadSchema = z.object({
   namingConventions: z.record(z.string(), z.unknown()).nullable().optional(),
   abbreviationLogic: abbreviationLogicSchema,
   entityGroups: z.record(z.string(), z.unknown()).nullable().optional(),
+  validationHints: z.object({
+    rules: z.array(z.object({
+      term: z.string(),
+      context: z.string(),
+      rule: z.string(),
+      example: z.string().optional(),
+    })).optional(),
+    warnings: z.array(z.object({
+      term: z.string(),
+      message: z.string(),
+    })).optional(),
+    notes: z.array(z.string()).optional(),
+  }).nullable().optional(),
 });
 
 export type NormalizedDocumentDnaPayload = z.infer<typeof documentDnaPayloadSchema>;
