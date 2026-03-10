@@ -243,10 +243,17 @@ const SegmentEditor = memo(function SegmentEditor({
   };
 
   const statusBg = getStatusBackground();
-  
+  const isAutoPropagated = segment._meta?.autoPropagated ?? (typeof segment.fuzzyScore === 'number' && segment.fuzzyScore >= 1000);
+  const withNumberReplacement = segment._meta?.differsOnlyByNumbers ?? (typeof segment.fuzzyScore === 'number' && segment.fuzzyScore >= 2000);
+  const actualTmScore = isAutoPropagated && segment.fuzzyScore != null
+    ? (withNumberReplacement ? segment.fuzzyScore - 2000 : segment.fuzzyScore - 1000)
+    : segment.fuzzyScore;
+
   return (
     <div
       className={`border-2 rounded-lg p-4 transition-all ${statusBg} ${
+        isAutoPropagated ? 'bg-purple-50/70 border-purple-200' : ''
+      } ${
         isActive
           ? 'border-primary-500 shadow-md'
           : 'border-gray-200 hover:border-gray-300'
@@ -265,8 +272,26 @@ const SegmentEditor = memo(function SegmentEditor({
           <span className={`px-2 py-1 rounded text-xs font-medium border ${getStatusColor()}`}>
             {displayStatus}
           </span>
-          {segment.fuzzyScore && (
-            <span className="text-xs text-gray-500">TM: {segment.fuzzyScore}%</span>
+          {isAutoPropagated && (
+            <>
+              <span
+                className="px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800 border border-purple-300"
+                title={actualTmScore != null ? `Auto-propagated from a similar segment (${actualTmScore}% similarity)` : 'Translation was auto-propagated from a confirmed similar segment'}
+              >
+                Auto-propagated
+              </span>
+              {withNumberReplacement && (
+                <span
+                  className="px-2 py-0.5 rounded text-xs font-medium bg-purple-200 text-purple-900 border border-purple-400"
+                  title="Numbers/dates were substituted for this segment"
+                >
+                  🔢 Numbers
+                </span>
+              )}
+            </>
+          )}
+          {!isAutoPropagated && actualTmScore != null && (
+            <span className="text-xs text-gray-500">TM: {actualTmScore}%</span>
           )}
         </div>
         {isSaving && <span className="text-xs text-gray-500">Saving...</span>}

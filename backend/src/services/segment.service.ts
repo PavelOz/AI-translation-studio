@@ -3,6 +3,7 @@ import { prisma } from '../db/prisma';
 import { ApiError } from '../utils/apiError';
 import { upsertTranslationMemoryEntry } from './tm.service';
 import { splitIntoSentences, stripFormattingTags } from '../utils/segmentation';
+import { logger } from '../utils/logger';
 
 type SegmentUpdateInput = {
   targetMt?: string | null;
@@ -190,17 +191,17 @@ export const updateSegment = async (segmentId: string, data: SegmentUpdateInput)
     data,
   });
 
-  // If segment is confirmed and has targetFinal, add/update it in TM with "Update" flag
+  // Track propagation info for response
+  let propagatedCount = 0;
+
+  // If segment is confirmed and has targetFinal: save to TM (optional) and run auto-propagation (always)
   if (data.status === 'CONFIRMED' && updated.targetFinal && updated.targetFinal.trim()) {
+    // 1) Save to TM (non-blocking: skip if no userId or on error; do not block propagation)
     try {
-      // Get the confirmedById from the updated segment or use a default system user
-      // We need to fetch the updated segment to get confirmedById
       const confirmedSegment = await prisma.segment.findUnique({
         where: { id: segmentId },
         select: { confirmedById: true },
       });
-      
-      // If no confirmedById, try to get from project members or use first admin
       let userId = confirmedSegment?.confirmedById;
       if (!userId) {
         const projectMember = await prisma.projectMember.findFirst({
@@ -209,30 +210,121 @@ export const updateSegment = async (segmentId: string, data: SegmentUpdateInput)
         });
         userId = projectMember?.userId;
       }
-      
-      if (!userId) {
+      if (userId) {
+        await saveToTranslationMemory(
+          updated.sourceText,
+          updated.targetFinal.trim(),
+          segment.document.sourceLocale,
+          segment.document.targetLocale,
+          segment.document.projectId,
+          userId,
+          segment.document.project.clientName,
+          segment.document.project.domain,
+        );
+      } else {
         console.warn(`Cannot add segment ${segmentId} to TM: no user ID available`);
-        return updated;
       }
+    } catch (tmError) {
+      console.error('Failed to add confirmed segment to TM:', tmError);
+    }
 
-      // Smart Save: Save as sentences if alignment matches, otherwise as paragraph
-      await saveToTranslationMemory(
-        updated.sourceText,
-        updated.targetFinal.trim(),
-        segment.document.sourceLocale,
-        segment.document.targetLocale,
-        segment.document.projectId,
-        userId,
-        segment.document.project.clientName,
-        segment.document.project.domain,
+    // 2) Auto-propagation: always run in its own try so TM failure or missing userId does not skip it
+    try {
+        const autoPropSettings = await getAutoPropagationSettings(segment.document.projectId);
+
+        if (autoPropSettings.enabled) {
+          const similarSegments = await findSimilarSegmentsInDocument(
+            segment.documentId,
+            updated.sourceText,
+            segmentId,
+            autoPropSettings.similarityThreshold,
+          );
+
+          if (similarSegments.length > 0) {
+            // Apply translation to similar segments with smart number/date replacement
+            const propagationUpdates: Array<{ id: string; targetFinal: string; status: SegmentStatus; fuzzyScore: number }> = [];
+            for (const similar of similarSegments) {
+              let targetFinal = updated.targetFinal!;
+              let appliedNumberReplacement = false;
+
+              if (similar.differsOnlyByNumbers) {
+                const { applied, result } = replaceNumbersAndDates(
+                  updated.targetFinal!,
+                  updated.sourceText,
+                  similar.sourceText,
+                  segment.document.targetLocale,
+                );
+                if (applied && isValidReplacement(updated.targetFinal!, result, updated.sourceText, similar.sourceText)) {
+                  targetFinal = result;
+                  appliedNumberReplacement = true;
+                } else if (!applied) {
+                  const fallback = replaceLeadingSectionNumber(updated.targetFinal!, similar.sourceText);
+                  if (fallback !== updated.targetFinal! && isValidReplacement(updated.targetFinal!, fallback, updated.sourceText, similar.sourceText)) {
+                    targetFinal = fallback;
+                    appliedNumberReplacement = true;
+                  }
+                }
+              } else {
+                // Text differs (e.g. "Монтаж" vs "Подвеска") - still replace leading section number so target matches similar source
+                const fallback = replaceLeadingSectionNumber(updated.targetFinal!, similar.sourceText);
+                if (fallback !== updated.targetFinal! && isValidReplacement(updated.targetFinal!, fallback, updated.sourceText, similar.sourceText)) {
+                  targetFinal = fallback;
+                  appliedNumberReplacement = true;
+                }
+              }
+
+              // Ensure target leading section number matches similar segment's source (fixes wrong number when replaceNumbersAndDates/applied path didn't substitute)
+              const similarSectionMatch = similar.sourceText.match(LEADING_SECTION_NUMBER);
+              if (similarSectionMatch) {
+                const similarSection = similarSectionMatch[1];
+                if (!targetFinal.startsWith(similarSection)) {
+                  const fixed = replaceLeadingSectionNumber(targetFinal, similar.sourceText);
+                  if (fixed !== targetFinal && isValidReplacement(targetFinal, fixed, updated.sourceText, similar.sourceText)) {
+                    targetFinal = fixed;
+                    appliedNumberReplacement = true;
+                  }
+                }
+              }
+
+              const actualSimilarity = Math.round(similar.similarity * 100);
+              const propagationMarker = appliedNumberReplacement ? 2000 : 1000;
+              propagationUpdates.push({
+                id: similar.id,
+                targetFinal,
+                status: 'EDITED' as SegmentStatus,
+                fuzzyScore: propagationMarker + actualSimilarity,
+              });
+            }
+
+            if (propagationUpdates.length > 0) {
+              await bulkUpdateSegments(propagationUpdates);
+              propagatedCount = propagationUpdates.length;
+              logger.info(
+                {
+                  documentId: segment.documentId,
+                  confirmedSegmentId: segmentId,
+                  propagatedCount: propagationUpdates.length,
+                  similarityThreshold: autoPropSettings.similarityThreshold,
+                  similarSegmentIds: propagationUpdates.map((u) => u.id),
+                },
+                'Auto-propagated confirmed translation to similar segments',
+              );
+            }
+          }
+        }
+    } catch (propagationError) {
+      logger.warn(
+        { segmentId, error: (propagationError as Error).message },
+        'Failed to auto-propagate to similar segments (non-critical)',
       );
-    } catch (error) {
-      // Log error but don't fail the segment update
-      console.error('Failed to add confirmed segment to TM:', error);
     }
   }
 
-  return updated;
+  // Add propagation metadata to response (as a custom property that won't conflict with Prisma types)
+  return {
+    ...updated,
+    _meta: propagatedCount > 0 ? { propagatedCount } : undefined,
+  } as typeof updated & { _meta?: { propagatedCount: number } };
 };
 
 export const bulkUpsertSegments = (
@@ -362,5 +454,548 @@ export const getSegmentWithDocument = (segmentId: string) =>
       },
     },
   });
+
+/**
+ * Extract numbers and dates from text
+ */
+function extractNumbersAndDates(text: string): Array<{ value: string; type: 'number' | 'date'; index: number }> {
+  const results: Array<{ value: string; type: 'number' | 'date'; index: number }> = [];
+  
+  // Match numbers (integers, decimals, percentages, currency)
+  const numberRegex = /(\d+[.,]?\d*%?|\d+[.,]\d+)/g;
+  let match;
+  while ((match = numberRegex.exec(text)) !== null) {
+    results.push({
+      value: match[0],
+      type: 'number',
+      index: match.index,
+    });
+  }
+  
+  // Merge consecutive number matches that form a section number (XX.XX.XX) at start of text
+  // so that "11.06" + "02" and "35" stay as two tokens ["11.06.02", "35"] instead of ["11.06", "02", "35"]
+  // and position-based replacement does not mix section number with other numbers (e.g. km)
+  const merged: Array<{ value: string; type: 'number' | 'date'; index: number }> = [];
+  let i = 0;
+  while (i < results.length) {
+    const a = results[i];
+    const hasNext = i + 1 < results.length;
+    const gapStart = a.index + a.value.length;
+    const gap = hasNext ? text.substring(gapStart, results[i + 1].index) : '';
+    const canMergeNext =
+      hasNext &&
+      /^\d{1,2}\.\d{1,2}$/.test(a.value) &&
+      /^\d{1,2}$/.test(results[i + 1].value) &&
+      (a.index === 0 || /^[\s.]*$/.test(text.substring(0, a.index))) &&
+      (gap === '.' || gap === ' ' || gap === '' || /^\s+$/.test(gap));
+    const sectionValue = canMergeNext ? `${a.value}.${results[i + 1].value}` : null;
+    if (sectionValue && /^\d{1,2}\.\d{1,2}\.\d{1,2}$/.test(sectionValue)) {
+      merged.push({ value: sectionValue, type: 'number', index: a.index });
+      i += 2;
+    } else {
+      merged.push(a);
+      i += 1;
+    }
+  }
+  results.length = 0;
+  results.push(...merged);
+
+  // Match dates (various formats: DD.MM.YYYY, MM/DD/YYYY, YYYY-MM-DD, etc.)
+  // BUT exclude section numbers (XX.XX.XX at start of line or after period/space)
+  const dateRegex = /(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}[./-]\d{1,2}[./-]\d{1,2})/g;
+  while ((match = dateRegex.exec(text)) !== null) {
+    // Skip if it's a section number (pattern XX.XX.XX at start or after period/space, followed by period)
+    const beforeMatch = text.substring(Math.max(0, match.index - 10), match.index);
+    const afterMatch = text.substring(match.index + match[0].length, match.index + match[0].length + 1);
+    const isSectionNumber = (
+      (match.index === 0 || /^[\s.]*$/.test(beforeMatch)) && // At start or after only spaces/periods
+      afterMatch === '.' && // Followed by period
+      /^\d{1,2}\.\d{1,2}\.\d{1,2}$/.test(match[0]) // Pattern XX.XX.XX
+    );
+    
+    if (isSectionNumber) {
+      // Treat as number, not date - skip date matching for this pattern
+      continue;
+    }
+    
+    // Avoid duplicates (if a date was already matched as part of a number)
+    const isDuplicate = results.some(r => 
+      r.index <= match.index && r.index + r.value.length >= match.index + match[0].length
+    );
+    if (!isDuplicate) {
+      results.push({
+        value: match[0],
+        type: 'date',
+        index: match.index,
+      });
+    }
+  }
+  
+  return results.sort((a, b) => a.index - b.index);
+}
+
+/**
+ * Check if two texts differ only by numbers/dates
+ */
+function differsOnlyByNumbers(source1: string, source2: string): boolean {
+  // Normalize by replacing numbers/dates with placeholders
+  const normalize = (text: string) => {
+    let normalized = text;
+    const numbersAndDates = extractNumbersAndDates(text);
+    
+    // Replace from end to start to preserve indices
+    for (let i = numbersAndDates.length - 1; i >= 0; i--) {
+      const item = numbersAndDates[i];
+      normalized = normalized.substring(0, item.index) + 
+                   `[${item.type}]` + 
+                   normalized.substring(item.index + item.value.length);
+    }
+    return normalized;
+  };
+  
+  const norm1 = normalize(source1);
+  const norm2 = normalize(source2);
+  
+  // If normalized texts are identical (case-insensitive, trimmed), they differ only by numbers/dates
+  return norm1.toLowerCase().trim() === norm2.toLowerCase().trim();
+}
+
+/**
+ * Format date according to target locale conventions
+ */
+function formatDateForLocale(dateStr: string, locale: string): string {
+  try {
+    // Parse common date formats
+    let date: Date | null = null;
+    
+    // Try DD.MM.YYYY or DD/MM/YYYY
+    const ddmmyyyy = dateStr.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
+    if (ddmmyyyy) {
+      const day = parseInt(ddmmyyyy[1]);
+      const month = parseInt(ddmmyyyy[2]);
+      const year = parseInt(ddmmyyyy[3]);
+      // Check if it's US format (MM/DD) or European (DD/MM) based on locale
+      if (locale.toLowerCase().startsWith('en-us') && month <= 12 && day <= 12) {
+        // Ambiguous - try US format first
+        date = new Date(year, month - 1, day);
+        if (date.getMonth() !== month - 1 || date.getDate() !== day) {
+          // Try European format
+          date = new Date(year, day - 1, month);
+        }
+      } else {
+        // European format (DD/MM)
+        date = new Date(year, month - 1, day);
+      }
+    }
+    
+    // Try YYYY-MM-DD
+    if (!date) {
+      const yyyymmdd = dateStr.match(/^(\d{4})[./-](\d{1,2})[./-](\d{1,2})$/);
+      if (yyyymmdd) {
+        date = new Date(parseInt(yyyymmdd[1]), parseInt(yyyymmdd[2]) - 1, parseInt(yyyymmdd[3]));
+      }
+    }
+    
+    // Try 2-digit year formats
+    if (!date) {
+      const ddmmyy = dateStr.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2})$/);
+      if (ddmmyy) {
+        const year = parseInt(ddmmyy[3]);
+        const fullYear = year < 50 ? 2000 + year : 1900 + year; // Assume 2000s for years < 50
+        if (locale.toLowerCase().startsWith('en-us')) {
+          date = new Date(fullYear, parseInt(ddmmyy[1]) - 1, parseInt(ddmmyy[2]));
+        } else {
+          date = new Date(fullYear, parseInt(ddmmyy[2]) - 1, parseInt(ddmmyy[1]));
+        }
+      }
+    }
+    
+    if (!date || isNaN(date.getTime())) {
+      return dateStr; // Return original if parsing fails
+    }
+    
+    // Format according to locale
+    const localeMap: Record<string, Intl.DateTimeFormatOptions> = {
+      'en': { day: '2-digit', month: '2-digit', year: 'numeric' },
+      'en-us': { month: '2-digit', day: '2-digit', year: 'numeric' },
+      'ru': { day: '2-digit', month: '2-digit', year: 'numeric' },
+      'de': { day: '2-digit', month: '2-digit', year: 'numeric' },
+      'fr': { day: '2-digit', month: '2-digit', year: 'numeric' },
+    };
+    
+    const localeKey = locale.toLowerCase().split('-')[0];
+    const options = localeMap[locale.toLowerCase()] || localeMap[localeKey] || { 
+      day: '2-digit', 
+      month: '2-digit', 
+      year: 'numeric' 
+    };
+    
+    try {
+      const formatter = new Intl.DateTimeFormat(locale, options);
+      return formatter.format(date);
+    } catch {
+      // Fallback to simple format
+      return `${date.getDate().toString().padStart(2, '0')}.${(date.getMonth() + 1).toString().padStart(2, '0')}.${date.getFullYear()}`;
+    }
+  } catch {
+    return dateStr; // Return original on error
+  }
+}
+
+/**
+ * Format number according to target locale conventions
+ */
+function formatNumberForLocale(numberStr: string, locale: string): string {
+  try {
+    // Remove percentage sign if present
+    const hasPercent = numberStr.includes('%');
+    const numStr = numberStr.replace('%', '').trim();
+    
+    // Parse number (handle both comma and dot as decimal separator)
+    const normalizedNumStr = numStr.replace(',', '.');
+    const num = parseFloat(normalizedNumStr);
+    if (isNaN(num)) {
+      return numberStr;
+    }
+    
+    // Format according to locale
+    const formatter = new Intl.NumberFormat(locale, {
+      minimumFractionDigits: (normalizedNumStr.includes('.') || normalizedNumStr.includes(',')) ? 2 : 0,
+      maximumFractionDigits: 2,
+    });
+    
+    let formatted = formatter.format(num);
+    
+    // Restore percentage sign if it was there
+    if (hasPercent) {
+      formatted += '%';
+    }
+    
+    return formatted;
+  } catch {
+    return numberStr; // Return original on error
+  }
+}
+
+/** Section number pattern (e.g. 11.04.05) - do not format as decimal, use as-is */
+const SECTION_NUMBER_PATTERN = /^\d{1,2}\.\d{1,2}\.\d{1,2}$/;
+/** Section number at start of text (with optional trailing dot/space) */
+const LEADING_SECTION_NUMBER = /^\s*(\d{1,2}\.\d{1,2}\.\d{1,2})[.\s]/;
+const TARGET_LEADING_SECTION = /^(\s*)(\d{1,2}\.\d{1,2}\.\d{1,2})([.\s])/;
+
+/**
+ * Replace only the leading section number (XX.XX.XX) in target with the one from similar source.
+ * Used when full token-based replacement doesn't apply (e.g. different tokenization).
+ */
+function replaceLeadingSectionNumber(targetText: string, similarSourceText: string): string {
+  const matchSource = similarSourceText.match(LEADING_SECTION_NUMBER);
+  const matchTarget = targetText.match(TARGET_LEADING_SECTION);
+  if (!matchSource || !matchTarget) return targetText;
+  const [, prefix, , suffix] = matchTarget;
+  return targetText.replace(TARGET_LEADING_SECTION, `${prefix}${matchSource[1]}${suffix}`);
+}
+
+/**
+ * Replace numbers/dates in target text with corresponding values from source segment text.
+ * Returns { applied: false } when token counts don't match (caller may try section-number-only fallback).
+ */
+function replaceNumbersAndDates(
+  targetText: string,
+  sourceText: string,
+  sourceSegmentText: string,
+  targetLocale: string,
+): { applied: boolean; result: string } {
+  const sourceNumbers = extractNumbersAndDates(sourceText);
+  const sourceSegmentNumbers = extractNumbersAndDates(sourceSegmentText);
+  const targetNumbers = extractNumbersAndDates(targetText);
+  
+  const sameCount =
+    sourceNumbers.length === sourceSegmentNumbers.length &&
+    targetNumbers.length === sourceSegmentNumbers.length;
+  if (!sameCount || sourceNumbers.length === 0) {
+    // Different number of tokens or no numbers - do not propagate (caller will skip this segment)
+    return { applied: false, result: targetText };
+  }
+  
+  // Replace numbers in target text
+  let result = targetText;
+  let offset = 0;
+  
+  // Sort target numbers by index (descending) to replace from end to start
+  const sortedTargetNumbers = [...targetNumbers].sort((a, b) => b.index - a.index);
+  
+  for (const targetNum of sortedTargetNumbers) {
+    const targetIndex = targetNumbers.indexOf(targetNum);
+    
+    if (targetIndex >= 0 && targetIndex < sourceNumbers.length && targetIndex < sourceSegmentNumbers.length) {
+      const segmentValue = sourceSegmentNumbers[targetIndex].value;
+      
+      if (targetNum.type === 'date' && sourceNumbers[targetIndex].type === 'date') {
+        const formattedDate = formatDateForLocale(segmentValue, targetLocale);
+        result = result.substring(0, targetNum.index + offset) + 
+                 formattedDate + 
+                 result.substring(targetNum.index + targetNum.value.length + offset);
+        offset += formattedDate.length - targetNum.value.length;
+      } else if (targetNum.type === 'number' && sourceNumbers[targetIndex].type === 'number') {
+        // Section numbers (XX.XX.XX) must not be formatted - parseFloat would truncate to 11.04
+        const replacement = SECTION_NUMBER_PATTERN.test(segmentValue)
+          ? segmentValue
+          : formatNumberForLocale(segmentValue, targetLocale);
+        result = result.substring(0, targetNum.index + offset) + 
+                 replacement + 
+                 result.substring(targetNum.index + targetNum.value.length + offset);
+        offset += replacement.length - targetNum.value.length;
+      }
+    }
+  }
+  
+  return { applied: true, result };
+}
+
+/**
+ * Validate that a replacement result is reasonable
+ * Returns false if the replacement is clearly wrong (e.g., section numbers were incorrectly replaced)
+ */
+function isValidReplacement(
+  originalTarget: string,
+  replacedTarget: string,
+  originalSource: string,
+  newSource: string,
+): boolean {
+  // If replacement didn't change anything, it's valid
+  if (originalTarget === replacedTarget) {
+    return true;
+  }
+  
+  // Check if replacement contains obviously wrong patterns
+  // 1. Check for malformed numbers (e.g., "108/11/20010" instead of "11.08.01")
+  const malformedNumberPattern = /\d{3,}\/\d{1,2}\/\d{4,}/; // Pattern like "108/11/20010"
+  if (malformedNumberPattern.test(replacedTarget) && !malformedNumberPattern.test(originalTarget)) {
+    return false;
+  }
+  
+  // 2. Reject mangled section numbers (e.g. "111.045.00" instead of "11.04.05")
+  const mangledSectionPattern = /^\d{3,}[./]\d{3,}[./]\d{1,2}\b/;
+  if (mangledSectionPattern.test(replacedTarget) && !mangledSectionPattern.test(originalTarget)) {
+    return false;
+  }
+
+  // 3. Check if section numbers (XX.XX.XX pattern) were incorrectly replaced
+  const sectionNumberPattern = /^\d{1,2}\.\d{1,2}\.\d{1,2}\./; // Pattern like "11.08.01."
+  const originalHasSectionNumber = sectionNumberPattern.test(originalSource);
+  const newHasSectionNumber = sectionNumberPattern.test(newSource);
+  
+  if (originalHasSectionNumber && newHasSectionNumber) {
+    // Both have section numbers - they should be preserved, not replaced
+    const originalSectionMatch = originalSource.match(sectionNumberPattern);
+    const newSectionMatch = newSource.match(sectionNumberPattern);
+    if (originalSectionMatch && newSectionMatch) {
+      const originalSection = originalSectionMatch[0];
+      const newSection = newSectionMatch[0];
+      // If section numbers are different, check if they were incorrectly replaced in target
+      if (originalSection !== newSection) {
+        // Check if the section number in target was incorrectly modified
+        const targetSectionPattern = /^\d{1,2}[./]\d{1,2}[./]\d{1,2}[./]/;
+        const targetSectionMatch = replacedTarget.match(targetSectionPattern);
+        if (targetSectionMatch) {
+          // If target section doesn't match new source section, replacement is wrong
+          const targetSection = targetSectionMatch[0].replace(/[./]/g, '.');
+          if (targetSection !== newSection) {
+            return false;
+          }
+        }
+      }
+    }
+  }
+  
+  // 4. Check if the replacement is too different from original (more than 50% length change)
+  const lengthDiff = Math.abs(replacedTarget.length - originalTarget.length);
+  const maxLength = Math.max(originalTarget.length, replacedTarget.length);
+  if (maxLength > 0 && lengthDiff / maxLength > 0.5) {
+    return false;
+  }
+  
+  // 5. Check for suspicious patterns: if original had a simple number and replacement has a complex date-like pattern
+  const simpleNumberPattern = /^\d{1,2}\.\d{1,2}\.\d{1,2}$/;
+  const complexDatePattern = /\d{3,}[./-]\d{1,2}[./-]\d{4,}/;
+  if (simpleNumberPattern.test(originalSource) && complexDatePattern.test(replacedTarget)) {
+    return false;
+  }
+  
+  return true;
+}
+
+/**
+ * Calculate Levenshtein distance between two strings
+ */
+function levenshteinDistance(a: string, b: string): number {
+  const matrix: number[][] = [];
+  for (let i = 0; i <= b.length; i++) {
+    matrix[i] = [i];
+  }
+  for (let j = 0; j <= a.length; j++) {
+    matrix[0][j] = j;
+  }
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j] + 1,
+        );
+      }
+    }
+  }
+  return matrix[b.length][a.length];
+}
+
+/**
+ * Get auto-propagation settings from project AI settings
+ */
+export const getAutoPropagationSettings = async (projectId: string): Promise<{
+  enabled: boolean;
+  similarityThreshold: number;
+}> => {
+  const aiSettings = await prisma.projectAISetting.findUnique({
+    where: { projectId },
+    select: { config: true },
+  });
+
+  // Default settings
+  const defaults = {
+    enabled: true,
+    similarityThreshold: 0.95, // 95% similarity
+  };
+
+  if (!aiSettings?.config || typeof aiSettings.config !== 'object') {
+    return defaults;
+  }
+
+  const config = aiSettings.config as Record<string, unknown>;
+  const autoPropagation = config.autoPropagation;
+
+  if (!autoPropagation || typeof autoPropagation !== 'object') {
+    return defaults;
+  }
+
+  const settings = autoPropagation as Record<string, unknown>;
+  return {
+    enabled: typeof settings.enabled === 'boolean' ? settings.enabled : defaults.enabled,
+    similarityThreshold: typeof settings.similarityThreshold === 'number'
+      ? Math.max(0.5, Math.min(1.0, settings.similarityThreshold)) // Clamp between 0.5 and 1.0
+      : defaults.similarityThreshold,
+  };
+};
+
+/**
+ * Find similar segments in the same document by source text similarity
+ */
+export const findSimilarSegmentsInDocument = async (
+  documentId: string,
+  sourceText: string,
+  excludeSegmentId: string,
+  similarityThreshold: number = 0.95,
+): Promise<Array<{ 
+  id: string; 
+  sourceText: string; 
+  similarity: number;
+  differsOnlyByNumbers?: boolean;
+}>> => {
+  const allSegments = await prisma.segment.findMany({
+    where: {
+      documentId,
+      id: { not: excludeSegmentId },
+      status: { not: 'CONFIRMED' }, // Only propagate to non-confirmed segments
+    },
+    select: {
+      id: true,
+      sourceText: true,
+    },
+  });
+
+  if (allSegments.length === 0) {
+    return [];
+  }
+
+  // Normalize text for comparison (remove formatting, lowercase, trim)
+  const normalize = (text: string) => 
+    stripFormattingTags(text).toLowerCase().trim();
+  
+  const normalizedSource = normalize(sourceText);
+  if (normalizedSource.length === 0) {
+    return [];
+  }
+
+  const similarSegments: Array<{ 
+    id: string; 
+    sourceText: string; 
+    similarity: number;
+    differsOnlyByNumbers?: boolean;
+  }> = [];
+
+  const addedIds = new Set<string>();
+
+  for (const segment of allSegments) {
+    const normalizedSegment = normalize(segment.sourceText);
+    if (normalizedSegment.length === 0) continue;
+
+    const onlyNumbersDiff = differsOnlyByNumbers(normalizedSource, normalizedSegment);
+    const maxLen = Math.max(normalizedSource.length, normalizedSegment.length);
+    const distance = levenshteinDistance(normalizedSource, normalizedSegment);
+    const similarity = 1 - distance / maxLen;
+    const effectiveThreshold = onlyNumbersDiff ? Math.max(0.7, similarityThreshold - 0.1) : similarityThreshold;
+
+    if (similarity >= effectiveThreshold || onlyNumbersDiff) {
+      addedIds.add(segment.id);
+      similarSegments.push({
+        id: segment.id,
+        sourceText: segment.sourceText,
+        similarity: onlyNumbersDiff ? 0.99 : similarity,
+        differsOnlyByNumbers: onlyNumbersDiff,
+      });
+    }
+  }
+
+  // Also propagate to segments with the same leading section number (e.g. 11.02.05.)
+  const confirmedSectionMatch = normalizedSource.match(LEADING_SECTION_NUMBER);
+  if (confirmedSectionMatch) {
+    const sectionPrefix = confirmedSectionMatch[1];
+    const restAfterSection = normalizedSource.replace(LEADING_SECTION_NUMBER, '');
+
+    for (const segment of allSegments) {
+      if (addedIds.has(segment.id)) continue;
+      const normalizedSegment = normalize(segment.sourceText);
+      if (normalizedSegment.length === 0) continue;
+      const segSectionMatch = normalizedSegment.match(LEADING_SECTION_NUMBER);
+
+      if (segSectionMatch && segSectionMatch[1] === sectionPrefix) {
+        addedIds.add(segment.id);
+        similarSegments.push({
+          id: segment.id,
+          sourceText: segment.sourceText,
+          similarity: 0.85,
+          differsOnlyByNumbers: false,
+        });
+      } else if (segSectionMatch && restAfterSection.length > 0) {
+        // Same structure, different section number (e.g. 11.07.05 vs 11.08.05): same text after the number
+        const segRest = normalizedSegment.replace(LEADING_SECTION_NUMBER, '');
+        if (segRest === restAfterSection) {
+          addedIds.add(segment.id);
+          similarSegments.push({
+            id: segment.id,
+            sourceText: segment.sourceText,
+            similarity: 0.95,
+            differsOnlyByNumbers: true, // only section number differs, we'll replace it
+          });
+        }
+      }
+    }
+  }
+
+  return similarSegments.sort((a, b) => b.similarity - a.similarity);
+};
 
 

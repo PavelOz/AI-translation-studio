@@ -267,8 +267,39 @@ export default function EditorPage() {
   }, [activeSegmentIndex]);
 
   const handleConfirm = useCallback(() => {
-    handleNext();
-  }, [handleNext]);
+    // When confirming, move to next unedited segment (skip CONFIRMED and EDITED)
+    if (!activeSegment) {
+      if (filteredSegments.length > 0) {
+        const firstUnedited = filteredSegments.find(seg => 
+          seg.status !== 'CONFIRMED' && seg.status !== 'EDITED'
+        );
+        if (firstUnedited) {
+          const index = filteredSegments.findIndex(seg => seg.id === firstUnedited.id);
+          setActiveSegmentIndex(index);
+        } else {
+          setActiveSegmentIndex(0);
+        }
+      }
+      return;
+    }
+    
+    const currentIndex = filteredSegments.findIndex(seg => seg.id === activeSegment.id);
+    if (currentIndex >= 0 && currentIndex < filteredSegments.length - 1) {
+      // Find next unedited segment
+      const nextUnedited = filteredSegments.slice(currentIndex + 1).find(seg => 
+        seg.status !== 'CONFIRMED' && seg.status !== 'EDITED'
+      );
+      if (nextUnedited) {
+        const nextIndex = filteredSegments.findIndex(seg => seg.id === nextUnedited.id);
+        setActiveSegmentIndex(nextIndex);
+      } else {
+        // No unedited segments found, just move to next
+        handleNext();
+      }
+    } else {
+      handleNext();
+    }
+  }, [activeSegment, filteredSegments, handleNext]);
 
   const handleApplyTM = useCallback(async (targetText: string) => {
     if (activeSegment && segmentsData) {

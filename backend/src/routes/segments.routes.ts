@@ -84,8 +84,39 @@ segmentRoutes.get(
       const segments = await searchSegments(req.params.documentId, query);
       res.json({ segments, page: 1, pageSize: segments.length, total: segments.length, totalPages: 1 });
     } else {
-      const segments = await getDocumentSegments(req.params.documentId, page, pageSize);
-      res.json(segments);
+      const result = await getDocumentSegments(req.params.documentId, page, pageSize);
+      
+      // Add metadata for auto-propagated segments (fuzzyScore >= 1000 indicates propagation)
+      const segmentsWithMeta = result.segments.map((segment: any) => {
+        const isPropagated = segment.fuzzyScore && segment.fuzzyScore >= 1000;
+        const differsOnlyByNumbers = segment.fuzzyScore && segment.fuzzyScore >= 2000;
+        
+        let actualSimilarity: number | undefined;
+        if (isPropagated) {
+          if (differsOnlyByNumbers) {
+            actualSimilarity = segment.fuzzyScore - 2000;
+          } else {
+            actualSimilarity = segment.fuzzyScore - 1000;
+          }
+        }
+        
+        const segmentObj: any = { ...segment };
+        
+        if (isPropagated) {
+          segmentObj._meta = {
+            autoPropagated: true,
+            actualSimilarity: actualSimilarity || undefined,
+            differsOnlyByNumbers: differsOnlyByNumbers || false,
+          };
+        }
+        
+        return segmentObj;
+      });
+      
+      res.json({
+        ...result,
+        segments: segmentsWithMeta,
+      });
     }
   }),
 );

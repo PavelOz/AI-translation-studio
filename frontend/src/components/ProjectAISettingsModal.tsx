@@ -30,6 +30,10 @@ export default function ProjectAISettingsModal({
   const [showClaudeApiKey, setShowClaudeApiKey] = useState(false);
   const [testingProvider, setTestingProvider] = useState<'openai' | 'gemini' | 'yandex' | 'deepseek' | 'claude' | null>(null);
   const [testResults, setTestResults] = useState<Record<string, { success: boolean; message: string }>>({});
+  
+  // Auto-propagation settings
+  const [autoPropagationEnabled, setAutoPropagationEnabled] = useState(true);
+  const [similarityThreshold, setSimilarityThreshold] = useState(0.95);
 
   const { data: aiSettings, isLoading } = useQuery(
     ['ai-settings', projectId],
@@ -119,6 +123,17 @@ export default function ProjectAISettingsModal({
           else if (aiSettings.provider === 'deepseek') setDeepseekApiKey(key);
           else if (aiSettings.provider === 'claude') setClaudeApiKey(key);
         }
+        
+        // Extract auto-propagation settings
+        if (config.autoPropagation && typeof config.autoPropagation === 'object') {
+          const autoProp = config.autoPropagation as Record<string, unknown>;
+          if (typeof autoProp.enabled === 'boolean') {
+            setAutoPropagationEnabled(autoProp.enabled);
+          }
+          if (typeof autoProp.similarityThreshold === 'number') {
+            setSimilarityThreshold(Math.max(0.5, Math.min(1.0, autoProp.similarityThreshold)));
+          }
+        }
       }
     } else if (providers && providers.length > 0) {
       // Default to OpenAI if available
@@ -136,14 +151,52 @@ export default function ProjectAISettingsModal({
       return;
     }
 
-    // Build config with all API keys
-    const config: Record<string, unknown> = {};
-    if (openaiApiKey.trim()) config.openaiApiKey = openaiApiKey.trim();
-    if (geminiApiKey.trim()) config.geminiApiKey = geminiApiKey.trim();
-    if (yandexApiKey.trim()) config.yandexApiKey = yandexApiKey.trim();
-    if (yandexFolderId.trim()) config.yandexFolderId = yandexFolderId.trim();
-    if (deepseekApiKey.trim()) config.deepseekApiKey = deepseekApiKey.trim();
-    if (claudeApiKey.trim()) config.claudeApiKey = claudeApiKey.trim();
+    // Build config with all API keys and auto-propagation settings
+    // Preserve existing config to avoid losing other settings
+    const existingConfig = aiSettings?.config && typeof aiSettings.config === 'object' 
+      ? (aiSettings.config as Record<string, unknown>)
+      : {};
+    
+    const config: Record<string, unknown> = { ...existingConfig };
+    
+    // Update API keys (only update if provided, preserve existing otherwise)
+    if (openaiApiKey.trim()) {
+      config.openaiApiKey = openaiApiKey.trim();
+    } else if (existingConfig.openaiApiKey) {
+      // Preserve existing key if not changed
+      config.openaiApiKey = existingConfig.openaiApiKey;
+    }
+    if (geminiApiKey.trim()) {
+      config.geminiApiKey = geminiApiKey.trim();
+    } else if (existingConfig.geminiApiKey) {
+      config.geminiApiKey = existingConfig.geminiApiKey;
+    }
+    if (yandexApiKey.trim()) {
+      config.yandexApiKey = yandexApiKey.trim();
+    } else if (existingConfig.yandexApiKey) {
+      config.yandexApiKey = existingConfig.yandexApiKey;
+    }
+    if (yandexFolderId.trim()) {
+      config.yandexFolderId = yandexFolderId.trim();
+    } else if (existingConfig.yandexFolderId) {
+      config.yandexFolderId = existingConfig.yandexFolderId;
+    }
+    if (deepseekApiKey.trim()) {
+      config.deepseekApiKey = deepseekApiKey.trim();
+    } else if (existingConfig.deepseekApiKey) {
+      config.deepseekApiKey = existingConfig.deepseekApiKey;
+    }
+    if (claudeApiKey.trim()) {
+      config.claudeApiKey = claudeApiKey.trim();
+    } else if (existingConfig.claudeApiKey) {
+      config.claudeApiKey = existingConfig.claudeApiKey;
+    }
+    
+    // Add/update auto-propagation settings
+    config.autoPropagation = {
+      enabled: autoPropagationEnabled,
+      similarityThreshold: similarityThreshold,
+    };
 
     if (!selectedModel) {
       toast.error('Please select a model');
@@ -702,6 +755,57 @@ export default function ProjectAISettingsModal({
                   {testResults.claude.success ? '✓' : '✗'} {testResults.claude.message}
                 </div>
               )}
+            </div>
+
+            {/* Auto-Propagation Settings */}
+            <div className="border-t pt-4 mt-4">
+              <h3 className="text-lg font-semibold text-gray-900 mb-3">Auto-Propagation Settings</h3>
+              <p className="text-sm text-gray-600 mb-4">
+                When you confirm a segment, automatically apply the same translation to similar segments in the same document.
+              </p>
+              
+              <div className="space-y-4">
+                {/* Enable/Disable */}
+                <div className="flex items-center">
+                  <input
+                    type="checkbox"
+                    id="autoPropagationEnabled"
+                    checked={autoPropagationEnabled}
+                    onChange={(e) => setAutoPropagationEnabled(e.target.checked)}
+                    className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
+                    disabled={updateMutation.isLoading}
+                  />
+                  <label htmlFor="autoPropagationEnabled" className="ml-2 block text-sm text-gray-700">
+                    Enable auto-propagation
+                  </label>
+                </div>
+
+                {/* Similarity Threshold */}
+                {autoPropagationEnabled && (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Similarity Threshold: {(similarityThreshold * 100).toFixed(0)}%
+                    </label>
+                    <input
+                      type="range"
+                      min="0.5"
+                      max="1.0"
+                      step="0.01"
+                      value={similarityThreshold}
+                      onChange={(e) => setSimilarityThreshold(parseFloat(e.target.value))}
+                      className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer"
+                      disabled={updateMutation.isLoading}
+                    />
+                    <div className="flex justify-between text-xs text-gray-500 mt-1">
+                      <span>50% (More matches)</span>
+                      <span>100% (Exact matches only)</span>
+                    </div>
+                    <p className="text-xs text-gray-500 mt-2">
+                      Segments with similarity ≥ {(similarityThreshold * 100).toFixed(0)}% will automatically receive the same translation when you confirm a segment.
+                    </p>
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Info */}

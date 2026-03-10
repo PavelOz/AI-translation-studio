@@ -23,6 +23,12 @@ export type Segment = {
   mtAnalysis?: string | null;
   /** Full prompt sent to LLM for last MT run */
   mtFullPrompt?: string | null;
+  /** Metadata for auto-propagation */
+  _meta?: {
+    autoPropagated?: boolean;
+    actualSimilarity?: number;
+    differsOnlyByNumbers?: boolean;
+  };
 };
 
 export type SegmentListResponse = {

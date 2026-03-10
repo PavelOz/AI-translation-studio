@@ -1000,10 +1000,27 @@ export const getProjectAISettings = (projectId: string) =>
     where: { projectId },
   });
 
-export const upsertProjectAISettings = (projectId: string, payload: ProjectAISettingsPayload) => {
-  // Only include config if it's provided and not empty
-  const configValue = payload.config && Object.keys(payload.config).length > 0 
-    ? toJsonValue(payload.config) 
+export const upsertProjectAISettings = async (projectId: string, payload: ProjectAISettingsPayload) => {
+  // Get existing settings to merge config
+  const existing = await prisma.projectAISetting.findUnique({
+    where: { projectId },
+    select: { config: true },
+  });
+
+  // Merge config: preserve existing config and merge with new config
+  let mergedConfig: Record<string, unknown> | undefined;
+  if (payload.config && Object.keys(payload.config).length > 0) {
+    mergedConfig = {
+      ...(existing?.config && typeof existing.config === 'object' ? (existing.config as Record<string, unknown>) : {}),
+      ...payload.config,
+    };
+  } else if (existing?.config && typeof existing.config === 'object') {
+    // Preserve existing config if no new config provided
+    mergedConfig = existing.config as Record<string, unknown>;
+  }
+
+  const configValue = mergedConfig && Object.keys(mergedConfig).length > 0 
+    ? toJsonValue(mergedConfig) 
     : undefined;
   
   return prisma.projectAISetting.upsert({
