@@ -70,6 +70,18 @@ export const ULTIMATE_DNA_TEMPLATE = `{
   "entityGroups": {}
 }`;
 
+/** Syntactic few-shot: structure-based extraction examples (improves term boundary detection per research). */
+const SYNTACTIC_FEW_SHOT = `
+SYNTACTIC FEW-SHOT (use structure, not topic, to detect term boundaries):
+
+Example A – Section number + noun phrase (RU): "11.02.05. Подвеска провода, на 35 км"
+→ Extract leading "11.02.05." as section numbering convention; extract "Подвеска провода" as one term → abbreviationLogic: { "Подвеска провода": { "longForm": "Conductor stringing", "shortForm": "Conductor stringing" } }. Do not split "Подвеска провода"; do not treat "на 35 км" as the main term.
+
+Example B – Section number + noun phrase (EN): "3.2.1. Busbar section alignment, at 110 kV"
+→ Section "3.2.1." as naming convention; "Busbar section alignment" as one term. Keep "at 110 kV" as context, not a separate term.
+
+Rule: When you see [digits.digits.digits.] followed by [Noun phrase], [modifier], treat the noun phrase as a single term and the leading digits as a section identifier. Preserve exact boundaries; do not merge unrelated words into one term or split multi-word technical phrases.`;
+
 /** Shared categorization: three layers (Technical Indices, Fixed Enums, Hybrid Abbreviations). */
 const CATEGORIZATION_INTRO = `
 UNIVERSAL DNA ARCHITECT – CATEGORIZATION (apply automatically):
@@ -191,6 +203,7 @@ Merge Golden DNA (verified translations) with Revision hierarchy. Use this struc
 
 Ideal DNA (structure + verified terms):
 ${ULTIMATE_DNA_TEMPLATE}
+${SYNTACTIC_FEW_SHOT}
 
 INFERENCE RULE: If you see ПУЛ РЭМ, САОН or АРЧМ in the document text, extract their definitions from the document and add them to abbreviationLogic/namingConventions, translating according to the same standard.
 
@@ -270,6 +283,8 @@ ${INSTITUTIONAL_UES_KZ}
 
 CHAIN OF THOUGHT (mandatory): First, write a DRAFT section where you list every abbreviation and its exact definition as found in the document, with clause/section reference. Only after this draft, output the final JSON.
 
+SYNTACTIC BOUNDARIES: Use structure to detect term boundaries. For patterns like "[digits.] [Noun phrase], [modifier]" (e.g. "11.02.05. Подвеска провода, на 35 км"), extract the noun phrase as one term and the leading digits as section convention; do not split the noun phrase or merge unrelated words.
+
 1. SCAN: Scan the entire document text for definitions of any remaining null or unclear terms. Use explicit definitions, parenthetical explanations, table headers, and lists.
 
 2. TRANSLATE: Translate source-language terms into the TARGET language. Keep keys in SOURCE language and values in TARGET language.
@@ -310,4 +325,80 @@ ${textToUse}
 --- END TEXT ---
 
 Review the JSON against the document, fix terms and fill nulls. abbreviationLogic: ALL entries MUST be objects (no strings). Each object has "longForm" (full name in target language, NO parentheses) and "shortForm" (abbreviation only).${shortFormNote} Move content from parentheses into shortForm; do not leave parentheses in longForm. Technical indices: keep Latin (Pinst, Pwork, Pavail). Fixed enums: use nominative case. Return only the corrected JSON with keys: technicalSchema, namingConventions, abbreviationLogic, entityGroups.`;
+}
+
+/** Max number of term pairs to send to the QC judge (LLM-as-judge). */
+export const DNA_QC_SAMPLE_SIZE = 10;
+
+/** Minimum score (1–5) to keep a term; below this the term is filtered out. */
+export const DNA_QC_MIN_SCORE = 3;
+
+export interface DnaQcTermEntry {
+  key: string;
+  longForm: string;
+  shortForm: string;
+}
+
+/**
+ * Build system prompt for DNA term QC (LLM-as-judge on extracted term pairs).
+ * Used to filter low-quality extractions before saving Document DNA.
+ */
+export function buildDnaQcJudgeSystemPrompt(params: {
+  sourceLocale: string;
+  targetLocale: string;
+}): string {
+  const { sourceLocale, targetLocale } = params;
+  return `You are a terminology quality judge. You will receive a list of term pairs: source term (${sourceLocale}) → target longForm and shortForm (${targetLocale}). For each pair, score from 1 to 5:
+- 5: Correct and relevant domain term; translation is accurate and appropriate.
+- 4: Good; minor style or convention quibble.
+- 3: Acceptable; usable but not ideal.
+- 2: Weak; likely incorrect or too generic.
+- 1: Bad; wrong translation, not a real term, or irrelevant.
+
+Score strictly. Output ONLY a JSON object mapping each source term (exact key as given) to its score (number 1–5). Example: {"term1": 4, "term2": 2}. No explanation, no markdown.`;
+}
+
+/**
+ * Build user prompt for DNA term QC: list of term entries to score.
+ */
+export function buildDnaQcJudgeUserPrompt(params: {
+  entries: DnaQcTermEntry[];
+  sourceLocale: string;
+  targetLocale: string;
+}): string {
+  const { entries, sourceLocale, targetLocale } = params;
+  const lines = entries.map(
+    (e) => `- "${e.key}" → longForm: "${e.longForm}", shortForm: "${e.shortForm}"`
+  ).join('\n');
+  return `Source language: ${sourceLocale}. Target language: ${targetLocale}.\n\nScore each term pair (1–5). Return only a JSON object: key = source term in quotes, value = number.\n\n${lines}`;
+}
+
+/** Response shape for glossary-from-document extraction. */
+export interface GlossaryExtractPair {
+  sourceTerm: string;
+  targetTerm: string;
+}
+
+/**
+ * Build system prompt for extracting glossary term pairs from document text (LLM extraction into glossary).
+ */
+export function buildGlossaryExtractSystemPrompt(params: {
+  sourceLocale: string;
+  targetLocale: string;
+}): string {
+  const { sourceLocale, targetLocale } = params;
+  return `You are a terminology extractor. From the given document text, identify key domain term pairs: source term (${sourceLocale}) → target term (${targetLocale}). Include technical terms, abbreviations (with expansion in target), and named entities. Output ONLY a JSON array of objects, each with exactly "sourceTerm" and "targetTerm" (strings). Example: [{"sourceTerm":"сальдо-переток","targetTerm":"Net tie-line flow"},{"sourceTerm":"Руст","targetTerm":"Pinst (installed capacity)"}]. No explanation, no markdown. Extract up to 50 most important term pairs.`;
+}
+
+/**
+ * Build user prompt for glossary extraction: document text to analyze.
+ */
+export function buildGlossaryExtractUserPrompt(params: {
+  documentName: string;
+  textSample: string;
+  sourceLocale: string;
+  targetLocale: string;
+}): string {
+  const { documentName, textSample, sourceLocale, targetLocale } = params;
+  return `Document: "${documentName}". Direction: ${sourceLocale} → ${targetLocale}.\n\nExtract term pairs from this text. Return only a JSON array of {"sourceTerm":"...","targetTerm":"..."}.\n\n--- BEGIN TEXT ---\n${textSample}\n--- END TEXT ---`;
 }

@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom';
 import { analysisApi, type AnalysisResults, type AnalysisStatus, type DocumentDnaPayload, type UpdateDocumentDnaResponse } from '../api/analysis.api';
 import { documentsApi } from '../api/documents.api';
 import { aiApi } from '../api/ai.api';
+import apiClient from '../api/client';
 import toast from 'react-hot-toast';
 import { DocumentDnaEditor } from './DocumentDnaEditor';
 import DnaValidationPanel from './DnaValidationPanel';
@@ -1166,6 +1167,31 @@ function DocumentDnaBlock({ documentId }: { documentId: string }) {
     },
   });
 
+  const extractGlossaryMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiClient.post<{
+        added: number;
+        entries: Array<{ sourceTerm: string; targetTerm: string }>;
+      }>(`/documents/${documentId}/extract-glossary`);
+      return res.data;
+    },
+    onSuccess: (data) => {
+      const added = data?.added ?? 0;
+      toast.success(`Glossary extracted: ${added} term${added === 1 ? '' : 's'} added`);
+      queryClient.invalidateQueries({ queryKey: ['glossary', documentId] });
+      queryClient.invalidateQueries({ queryKey: ['document-glossary', documentId] });
+      queryClient.invalidateQueries({ queryKey: ['analysis', documentId] });
+    },
+    onError: (err: any) => {
+      const msg =
+        err?.response?.data?.message ||
+        err?.response?.data?.error ||
+        err?.message ||
+        'Failed to extract glossary';
+      toast.error(msg, { duration: 8000 });
+    },
+  });
+
   const saveMutation = useMutation({
     mutationFn: (payload: DocumentDnaPayload) => analysisApi.updateDocumentDna(documentId, payload),
     onSuccess: (data: UpdateDocumentDnaResponse) => {
@@ -1523,6 +1549,15 @@ function DocumentDnaBlock({ documentId }: { documentId: string }) {
                 title="Enrich abbreviationLogic from CSV file"
               >
                 Enrich from CSV
+              </button>
+              <button
+                type="button"
+                onClick={() => extractGlossaryMutation.mutate()}
+                disabled={extractGlossaryMutation.isLoading}
+                className="btn btn-secondary text-sm disabled:opacity-50"
+                title="Extract glossary term pairs from the document (AI) and add as CANDIDATE entries"
+              >
+                {extractGlossaryMutation.isLoading ? 'Extracting glossary…' : 'Extract glossary (AI)'}
               </button>
             </>
           )}

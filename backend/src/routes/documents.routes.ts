@@ -16,7 +16,7 @@ import { runValidatorJanitor } from '../services/validatorJanitor';
 import { UniversalJanitor } from '../services/universalJanitor';
 import { getDocumentMetricsSummary, runDocumentQualityCheck } from '../services/quality.service';
 import { getProgress, cancelProgress, clearProgress } from '../services/pretranslateProgress';
-import { runFullAnalysis, getAnalysisResults, cancelAnalysis, resetAnalysisStatus, getStageMonitoringData, listDocumentGlossary, updateDocumentGlossaryEntry, translateSingleTerm, getDocumentDna, updateDocumentDna, generateDocumentDna, refineDocumentDna } from '../services/analysis.service';
+import { runFullAnalysis, getAnalysisResults, cancelAnalysis, resetAnalysisStatus, getStageMonitoringData, listDocumentGlossary, updateDocumentGlossaryEntry, translateSingleTerm, getDocumentDna, updateDocumentDna, generateDocumentDna, refineDocumentDna, extractGlossaryFromDocument } from '../services/analysis.service';
 import { validateDocumentDnaPayload, validateDnaForCycles } from '../services/dnaValidation';
 import { validateDnaContract, formatValidationReport } from '../services/validate-dna';
 import { getTranslationDirection } from '../services/dnaPrompts';
@@ -645,6 +645,14 @@ documentRoutes.post(
     const preview = req.body && typeof req.body === 'object' && req.body.preview === true;
     const dna = await refineDocumentDna(req.params.documentId, { preview });
     res.json(dna);
+  }),
+);
+
+documentRoutes.post(
+  '/:documentId/extract-glossary',
+  asyncHandler(async (req, res) => {
+    const result = await extractGlossaryFromDocument(req.params.documentId);
+    res.json(result);
   }),
 );
 

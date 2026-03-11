@@ -5,10 +5,19 @@ import { getLanguageName } from '../utils/languages';
 import {
   buildDnaGenerateSystemPrompt,
   buildDnaGenerateUserPrompt,
+  buildDnaQcJudgeSystemPrompt,
+  buildDnaQcJudgeUserPrompt,
   buildDnaRefineSystemPrompt,
   buildDnaRefineUserPrompt,
+  buildGlossaryExtractSystemPrompt,
+  buildGlossaryExtractUserPrompt,
+  DNA_QC_MIN_SCORE,
+  DNA_QC_SAMPLE_SIZE,
   getTranslationDirection,
+  type DnaQcTermEntry,
+  type GlossaryExtractPair,
 } from './dnaPrompts';
+import { upsertGlossaryEntry } from './glossary.service';
 import { stripFormattingTags } from '../utils/segmentation';
 import { normalizeDocumentDnaPayload } from './dnaSchema';
 import { Prisma } from '@prisma/client';
@@ -5431,6 +5440,65 @@ export type DocumentDnaPayload = {
 };
 
 /**
+ * LLM-as-judge: score a sample of DNA abbreviationLogic term pairs (1–5).
+ * Returns a Map of source term key → score. Entries not in the map are left unchanged when filtering.
+ */
+async function runDnaTermQc(
+  provider: import('../ai/providers/types').AIProvider,
+  model: string,
+  abbreviationLogic: Record<string, unknown>,
+  sourceLocale: string,
+  targetLocale: string,
+): Promise<Map<string, number>> {
+  const entries: DnaQcTermEntry[] = [];
+  const keys = Object.keys(abbreviationLogic).slice(0, DNA_QC_SAMPLE_SIZE);
+  for (const key of keys) {
+    const val = abbreviationLogic[key];
+    if (val && typeof val === 'object' && 'longForm' in val && 'shortForm' in val) {
+      const obj = val as { longForm?: string; shortForm?: string };
+      entries.push({
+        key,
+        longForm: typeof obj.longForm === 'string' ? obj.longForm : '',
+        shortForm: typeof obj.shortForm === 'string' ? obj.shortForm : '',
+      });
+    }
+  }
+  if (entries.length === 0) return new Map();
+
+  const systemPrompt = buildDnaQcJudgeSystemPrompt({ sourceLocale, targetLocale });
+  const userPrompt = buildDnaQcJudgeUserPrompt({ entries, sourceLocale, targetLocale });
+  let response: { outputText?: string };
+  try {
+    response = await provider.callModel({
+      prompt: userPrompt,
+      systemPrompt,
+      model,
+      temperature: 0.1,
+      maxTokens: 1024,
+      segments: [] as { segmentId: string; sourceText: string }[],
+    });
+  } catch (err) {
+    logger.warn({ err: (err as Error).message }, 'Document DNA QC: judge call failed; skipping filter');
+    return new Map();
+  }
+  const raw = (response?.outputText || '').trim();
+  const cleaned = raw.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
+  const scores = new Map<string, number>();
+  try {
+    const parsed = JSON.parse(cleaned);
+    if (typeof parsed === 'object' && parsed !== null) {
+      for (const key of keys) {
+        const s = parsed[key];
+        if (typeof s === 'number' && s >= 1 && s <= 5) scores.set(key, s);
+      }
+    }
+  } catch {
+    logger.warn('Document DNA QC: could not parse judge response; skipping filter');
+  }
+  return scores;
+}
+
+/**
  * Pre-flight analysis: generate Document DNA (technical schema, naming conventions,
  * abbreviations, entity groups) from document content. Uses all segments; for documents
  * exceeding the token budget (300k chars), uses stride sampling: 150 evenly distributed
@@ -5816,6 +5884,23 @@ export const generateDocumentDna = async (
     );
   }
 
+  // Optional QC step (LLM-as-judge): filter low-scoring term pairs when dnaQcEnabled is set
+  const config = aiSettings?.config && typeof aiSettings.config === 'object' && !Array.isArray(aiSettings.config)
+    ? (aiSettings.config as Record<string, unknown>)
+    : undefined;
+  if (config?.dnaQcEnabled === true && payload.abbreviationLogic && typeof payload.abbreviationLogic === 'object') {
+    const scores = await runDnaTermQc(provider, model, payload.abbreviationLogic, sourceLocale, targetLocale);
+    if (scores.size > 0) {
+      const filtered: Record<string, unknown> = {};
+      for (const [key, val] of Object.entries(payload.abbreviationLogic!)) {
+        const score = scores.get(key) ?? 5;
+        if (score >= DNA_QC_MIN_SCORE) filtered[key] = val;
+        else logger.debug({ documentId, key, score }, 'Document DNA QC: filtered out low-scoring term');
+      }
+      payload = { ...payload, abbreviationLogic: Object.keys(filtered).length > 0 ? filtered : {} };
+    }
+  }
+
   // Validate that we have some data before saving
   const hasData = payload.technicalSchema || payload.namingConventions || 
                   payload.abbreviationLogic || payload.entityGroups;
@@ -5874,6 +5959,120 @@ export const getDocumentDna = async (documentId: string): Promise<DocumentDnaPay
     entityGroups: row.entityGroups as Record<string, unknown> | null | undefined,
   };
 };
+
+/** Max characters of document text to send to glossary extraction LLM. */
+const GLOSSARY_EXTRACT_TEXT_LIMIT = 40_000;
+
+/**
+ * Extract glossary term pairs from document text via LLM and upsert as CANDIDATE entries (for review).
+ * Uses project AI settings. Optional provider/model/apiKey override in options.
+ */
+export async function extractGlossaryFromDocument(
+  documentId: string,
+  options?: { provider?: string; model?: string; apiKey?: string; yandexFolderId?: string },
+): Promise<{ added: number; entries: GlossaryExtractPair[] }> {
+  const document = await prisma.document.findUnique({
+    where: { id: documentId },
+    select: { id: true, projectId: true, name: true, sourceLocale: true, targetLocale: true },
+  });
+  if (!document?.projectId) {
+    throw ApiError.notFound('Document not found or has no project');
+  }
+
+  const segments = await prisma.segment.findMany({
+    where: { documentId },
+    orderBy: { segmentIndex: 'asc' },
+    select: { sourceText: true },
+  });
+  const fullText = segments.map((s) => s.sourceText.trim()).filter(Boolean).join('\n\n');
+  if (!fullText) {
+    throw ApiError.badRequest('Document has no segment text to extract from');
+  }
+  const textSample = fullText.length > GLOSSARY_EXTRACT_TEXT_LIMIT
+    ? fullText.slice(0, GLOSSARY_EXTRACT_TEXT_LIMIT) + '\n... [truncated]'
+    : fullText;
+
+  const sourceLocale = document.sourceLocale || 'en';
+  const targetLocale = document.targetLocale || 'en';
+  const { getProvider } = await import('../ai/providers/registry');
+  const { getProjectAISettings } = await import('./ai.service');
+  const aiSettings = await getProjectAISettings(document.projectId);
+  let apiKey: string | undefined = options?.apiKey;
+  let yandexFolderId: string | undefined = options?.yandexFolderId;
+  if (!apiKey && aiSettings?.config && typeof aiSettings.config === 'object' && !Array.isArray(aiSettings.config)) {
+    const config = aiSettings.config as Record<string, unknown>;
+    const providerName = (options?.provider ?? aiSettings?.provider)?.toLowerCase();
+    const keyName = providerName ? `${providerName}ApiKey` : null;
+    if (keyName && keyName in config) apiKey = config[keyName] as string;
+    else if ('apiKey' in config) apiKey = config.apiKey as string;
+    if ('yandexFolderId' in config) yandexFolderId = config.yandexFolderId as string;
+  }
+  const provider = getProvider(options?.provider ?? aiSettings?.provider, apiKey, yandexFolderId);
+  const model = options?.model ?? aiSettings?.model ?? provider.defaultModel;
+
+  const systemPrompt = buildGlossaryExtractSystemPrompt({ sourceLocale, targetLocale });
+  const userPrompt = buildGlossaryExtractUserPrompt({
+    documentName: document.name,
+    textSample,
+    sourceLocale,
+    targetLocale,
+  });
+
+  let rawText: string;
+  try {
+    const response = await provider.callModel({
+      prompt: userPrompt,
+      systemPrompt,
+      model,
+      temperature: 0.2,
+      maxTokens: 4096,
+      segments: [] as { segmentId: string; sourceText: string }[],
+    });
+    rawText = (response?.outputText || '').trim();
+  } catch (err) {
+    logger.error({ documentId, err: (err as Error).message }, 'Glossary extraction failed');
+    throw ApiError.internalServerError(
+      `Glossary extraction failed: ${(err as Error).message}. Check AI provider settings.`,
+    );
+  }
+
+  const cleaned = rawText.replace(/^```(?:json)?\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim();
+  let pairs: GlossaryExtractPair[] = [];
+  try {
+    const parsed = JSON.parse(cleaned);
+    if (Array.isArray(parsed)) {
+      pairs = parsed
+        .filter((item: unknown) => item && typeof item === 'object' && 'sourceTerm' in item && 'targetTerm' in item)
+        .map((item: { sourceTerm?: string; targetTerm?: string }) => ({
+          sourceTerm: String((item as { sourceTerm?: string }).sourceTerm ?? '').trim(),
+          targetTerm: String((item as { targetTerm?: string }).targetTerm ?? '').trim(),
+        }))
+        .filter((p) => p.sourceTerm.length > 0 && p.targetTerm.length > 0);
+    }
+  } catch {
+    logger.warn({ documentId }, 'Glossary extraction: could not parse LLM response as JSON array');
+    return { added: 0, entries: [] };
+  }
+
+  let added = 0;
+  for (const { sourceTerm, targetTerm } of pairs) {
+    try {
+      await upsertGlossaryEntry({
+        projectId: document.projectId,
+        sourceTerm,
+        targetTerm,
+        sourceLocale,
+        targetLocale,
+        status: 'CANDIDATE',
+      });
+      added += 1;
+    } catch (e) {
+      logger.debug({ documentId, sourceTerm, err: (e as Error).message }, 'Glossary extraction: skip duplicate or invalid');
+    }
+  }
+  logger.info({ documentId, added, total: pairs.length }, 'Glossary extraction completed');
+  return { added, entries: pairs };
+}
 
 /**
  * Build a short document summary string from Document DNA payload.

@@ -34,6 +34,8 @@ export default function ProjectAISettingsModal({
   // Auto-propagation settings
   const [autoPropagationEnabled, setAutoPropagationEnabled] = useState(true);
   const [similarityThreshold, setSimilarityThreshold] = useState(0.95);
+  // Document DNA QC (LLM-as-judge on sample of extracted terms)
+  const [dnaQcEnabled, setDnaQcEnabled] = useState(false);
 
   const { data: aiSettings, isLoading } = useQuery(
     ['ai-settings', projectId],
@@ -134,6 +136,9 @@ export default function ProjectAISettingsModal({
             setSimilarityThreshold(Math.max(0.5, Math.min(1.0, autoProp.similarityThreshold)));
           }
         }
+        if (typeof config.dnaQcEnabled === 'boolean') {
+          setDnaQcEnabled(config.dnaQcEnabled);
+        }
       }
     } else if (providers && providers.length > 0) {
       // Default to OpenAI if available
@@ -197,6 +202,7 @@ export default function ProjectAISettingsModal({
       enabled: autoPropagationEnabled,
       similarityThreshold: similarityThreshold,
     };
+    config.dnaQcEnabled = dnaQcEnabled;
 
     if (!selectedModel) {
       toast.error('Please select a model');
@@ -805,6 +811,27 @@ export default function ProjectAISettingsModal({
                     </p>
                   </div>
                 )}
+              </div>
+            </div>
+
+            {/* Document DNA QC */}
+            <div className="border border-gray-200 rounded p-4 bg-gray-50/50">
+              <h4 className="text-sm font-medium text-gray-800 mb-2">Document DNA QC</h4>
+              <p className="text-xs text-gray-600 mb-3">
+                When generating Document DNA, run an LLM-as-judge on a sample of extracted terms and filter out low-quality pairs (optional).
+              </p>
+              <div className="flex items-center">
+                <input
+                  type="checkbox"
+                  id="dnaQcEnabled"
+                  checked={dnaQcEnabled}
+                  onChange={(e) => setDnaQcEnabled(e.target.checked)}
+                  className="h-4 w-4 text-primary-600 focus:ring-primary-500 border-gray-300 rounded"
+                  disabled={updateMutation.isLoading}
+                />
+                <label htmlFor="dnaQcEnabled" className="ml-2 block text-sm text-gray-700">
+                  Enable DNA term QC (LLM-as-judge)
+                </label>
               </div>
             </div>
 
