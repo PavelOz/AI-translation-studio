@@ -437,6 +437,17 @@ export const deleteGlossaryEntry = async (entryId: string) => {
   return prisma.glossaryEntry.delete({ where: { id: entryId } });
 };
 
+/** Delete multiple glossary entries by id. Returns number deleted. */
+export const deleteManyGlossaryEntries = async (ids: string[]): Promise<{ deleted: number }> => {
+  if (!ids || ids.length === 0) {
+    return { deleted: 0 };
+  }
+  const result = await prisma.glossaryEntry.deleteMany({
+    where: { id: { in: ids } },
+  });
+  return { deleted: result.count };
+};
+
 /**
  * Detect CSV delimiter (comma or semicolon)
  * Returns the most common delimiter in the first few rows

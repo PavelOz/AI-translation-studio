@@ -16,7 +16,7 @@ import { runValidatorJanitor } from '../services/validatorJanitor';
 import { UniversalJanitor } from '../services/universalJanitor';
 import { getDocumentMetricsSummary, runDocumentQualityCheck } from '../services/quality.service';
 import { getProgress, cancelProgress, clearProgress } from '../services/pretranslateProgress';
-import { runFullAnalysis, getAnalysisResults, cancelAnalysis, resetAnalysisStatus, getStageMonitoringData, listDocumentGlossary, updateDocumentGlossaryEntry, translateSingleTerm, getDocumentDna, updateDocumentDna, generateDocumentDna, refineDocumentDna, extractGlossaryFromDocument } from '../services/analysis.service';
+import { runFullAnalysis, getAnalysisResults, cancelAnalysis, resetAnalysisStatus, getStageMonitoringData, listDocumentGlossary, clearDocumentGlossary, updateDocumentGlossaryEntry, translateSingleTerm, getDocumentDna, updateDocumentDna, generateDocumentDna, refineDocumentDna, extractGlossaryFromDocument } from '../services/analysis.service';
 import { validateDocumentDnaPayload, validateDnaForCycles } from '../services/dnaValidation';
 import { validateDnaContract, formatValidationReport } from '../services/validate-dna';
 import { getTranslationDirection } from '../services/dnaPrompts';
@@ -452,6 +452,14 @@ documentRoutes.get(
   asyncHandler(async (req, res) => {
     const entries = await listDocumentGlossary(req.params.documentId);
     res.json(entries);
+  }),
+);
+
+documentRoutes.delete(
+  '/:documentId/glossary',
+  asyncHandler(async (req, res) => {
+    const result = await clearDocumentGlossary(req.params.documentId);
+    res.json(result);
   }),
 );
 

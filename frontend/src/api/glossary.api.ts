@@ -64,6 +64,12 @@ export const glossaryApi = {
     await apiClient.delete(`/glossary/${entryId}`);
   },
 
+  /** Delete multiple entries by id. */
+  deleteMany: async (ids: string[]): Promise<{ deleted: number }> => {
+    const response = await apiClient.post<{ deleted: number }>('/glossary/delete-many', { ids });
+    return response.data;
+  },
+
   import: async (
     file: File,
     sourceLocale: string,
@@ -93,6 +99,12 @@ export const glossaryApi = {
     source: 'global' | 'project' | 'new';
   }>> => {
     const response = await apiClient.get(`/documents/${documentId}/glossary`);
+    return response.data;
+  },
+
+  /** Clear all document glossary entries for this document. */
+  clearDocumentGlossary: async (documentId: string): Promise<{ deleted: number }> => {
+    const response = await apiClient.delete<{ deleted: number }>(`/documents/${documentId}/glossary`);
     return response.data;
   },
 

@@ -3,7 +3,7 @@ import multer from 'multer';
 import { z } from 'zod';
 import { asyncHandler } from '../utils/asyncHandler';
 import { requireAuth } from '../utils/authMiddleware';
-import { listGlossaryEntries, upsertGlossaryEntry, getGlossaryEntry, deleteGlossaryEntry, importGlossaryCsv } from '../services/glossary.service';
+import { listGlossaryEntries, upsertGlossaryEntry, getGlossaryEntry, deleteGlossaryEntry, deleteManyGlossaryEntries, importGlossaryCsv } from '../services/glossary.service';
 import { findRelevantGlossaryEntries } from '../services/glossary-search.service';
 import { getGlossaryEmbeddingStats } from '../services/vector-search.service';
 import { ApiError } from '../utils/apiError';
@@ -78,6 +78,19 @@ glossaryRoutes.get(
       req.query.projectId as string | undefined,
     );
     res.json(stats);
+  }),
+);
+
+const deleteManySchema = z.object({
+  ids: z.array(z.string().min(1)).min(1).max(500),
+});
+
+glossaryRoutes.post(
+  '/delete-many',
+  asyncHandler(async (req, res) => {
+    const { ids } = deleteManySchema.parse(req.body);
+    const result = await deleteManyGlossaryEntries(ids);
+    res.json(result);
   }),
 );
 

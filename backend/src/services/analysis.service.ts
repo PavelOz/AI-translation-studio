@@ -85,6 +85,64 @@ const cleanJsonOutput = (text: string): string => {
   return cleaned.trim();
 };
 
+/**
+ * Attempt to repair truncated DNA JSON (e.g. when the model hit max_tokens and stopped mid-string).
+ * Closes an unterminated string and balances open brackets so we can parse the partial result.
+ */
+const repairTruncatedDnaJson = (text: string): string => {
+  if (!text || text.length === 0) return text;
+  let openBraces = 0;
+  let openBrackets = 0;
+  let inString = false;
+  let escape = false;
+  let quoteChar = '';
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (c === '\\' && inString) {
+      escape = true;
+      continue;
+    }
+    if (inString) {
+      if (c === quoteChar) inString = false;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      inString = true;
+      quoteChar = c;
+      continue;
+    }
+    if (c === '{') openBraces++;
+    else if (c === '}') openBraces--;
+    else if (c === '[') openBrackets++;
+    else if (c === ']') openBrackets--;
+  }
+  let repaired = text;
+  if (inString) repaired = repaired + quoteChar;
+  repaired = repaired + ']'.repeat(openBrackets) + '}'.repeat(openBraces);
+  return repaired;
+};
+
+/**
+ * Relax JSON that uses single-quoted keys or trailing commas (common LLM output).
+ * - Replaces 'key': with "key": (single-quoted property names -> double-quoted).
+ * - Removes trailing commas before } or ].
+ */
+const repairRelaxedDnaJson = (text: string): string => {
+  if (!text || text.length === 0) return text;
+  let out = text;
+  // Trailing commas before } or ]
+  out = out.replace(/,(\s*[}\]])/g, '$1');
+  // Single-quoted property names: after { or , we may have 'key': -> "key":
+  out = out.replace(/([{,])\s*'([^']*)'\s*:/g, (_, before, key) =>
+    before + ` "${key.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}": `
+  );
+  return out;
+};
+
 // Common stop words to filter out (shared between functions)
 const stopWords = new Set([
   'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
@@ -5858,29 +5916,46 @@ export const generateDocumentDna = async (
   const cleaned = cleanJsonOutput(rawText);
   let payload: DocumentDnaPayload = {};
   try {
-    const parsed = JSON.parse(cleaned);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch (parseError) {
+      const msg = (parseError as Error).message || '';
+      if (msg.includes('Unterminated') || msg.includes('Unexpected end of JSON')) {
+        const repaired = repairTruncatedDnaJson(cleaned);
+        parsed = JSON.parse(repaired);
+        logger.warn({ documentId, repairedLength: repaired.length }, 'Document DNA: parsed after repairing truncated JSON');
+      } else if (msg.includes('Expected') && (msg.includes('property name') || msg.includes('double-quoted'))) {
+        const repaired = repairRelaxedDnaJson(cleaned);
+        parsed = JSON.parse(repaired);
+        logger.warn({ documentId }, 'Document DNA: parsed after relaxing single-quoted keys / trailing commas');
+      } else {
+        throw parseError;
+      }
+    }
     if (typeof parsed === 'object' && parsed !== null) {
       payload = {
-        technicalSchema: parsed.technicalSchema ?? null,
-        namingConventions: parsed.namingConventions ?? null,
-        abbreviationLogic: parsed.abbreviationLogic ?? null,
-        entityGroups: parsed.entityGroups ?? null,
+        technicalSchema: (parsed as Record<string, unknown>).technicalSchema ?? null,
+        namingConventions: (parsed as Record<string, unknown>).namingConventions ?? null,
+        abbreviationLogic: (parsed as Record<string, unknown>).abbreviationLogic ?? null,
+        entityGroups: (parsed as Record<string, unknown>).entityGroups ?? null,
       };
     } else {
       logger.warn({ documentId }, 'Document DNA: parsed result is not an object');
     }
   } catch (e) {
+    const errMsg = (e as Error).message || '';
     logger.error(
-      { 
-        documentId, 
-        error: (e as Error).message,
+      {
+        documentId,
+        error: errMsg,
         cleanedPreview: cleaned.substring(0, 500),
         cleanedLength: cleaned.length,
       },
       'Document DNA JSON parse failed',
     );
     throw ApiError.internalServerError(
-      `Failed to parse DNA JSON from AI response: ${(e as Error).message}. The AI model may have returned invalid JSON. Please try again.`,
+      `Failed to parse DNA JSON from AI response: ${errMsg}. The AI model may have returned invalid JSON. Please try again.`,
     );
   }
 
@@ -8822,6 +8897,21 @@ export const listDocumentGlossary = async (
     );
     throw ApiError.badRequest(`Failed to get document glossary: ${error.message}`);
   }
+};
+
+/**
+ * Clear all document glossary entries for a document.
+ * Does not touch style rules or DNA.
+ */
+export const clearDocumentGlossary = async (documentId: string): Promise<{ deleted: number }> => {
+  if (!prisma.documentGlossaryEntry) {
+    throw ApiError.badRequest('DocumentGlossaryEntry model not available. Please run: npx prisma generate');
+  }
+  const result = await prisma.documentGlossaryEntry.deleteMany({
+    where: { documentId },
+  });
+  logger.info({ documentId, deleted: result.count }, 'Document glossary cleared');
+  return { deleted: result.count };
 };
 
 /**

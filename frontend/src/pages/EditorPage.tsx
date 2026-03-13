@@ -584,7 +584,7 @@ export default function EditorPage() {
             });
           }}
           onBatchTranslate={refetchSegments}
-          onResetSegments={async (segmentIds) => {
+          onResetSegments={async (_segmentIds) => {
             // Invalidate and refetch segments after reset
             queryClient.invalidateQueries({ queryKey: ['segments', documentId] });
             await refetchSegments();

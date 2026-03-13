@@ -48,6 +48,19 @@ export default function GlossaryReviewTable({ documentId }: GlossaryReviewTableP
     },
   });
 
+  const clearGlossaryMutation = useMutation({
+    mutationFn: () => glossaryApi.clearDocumentGlossary(documentId),
+    onSuccess: (data) => {
+      const n = data?.deleted ?? 0;
+      toast.success(n > 0 ? `Glossary cleared (${n} term${n === 1 ? '' : 's'} removed)` : 'Glossary cleared');
+      queryClient.invalidateQueries({ queryKey: ['document-glossary', documentId] });
+      queryClient.invalidateQueries({ queryKey: ['glossary', documentId] });
+    },
+    onError: (error: any) => {
+      toast.error(`Failed to clear glossary: ${error.response?.data?.message || error.message || 'Unknown error'}`);
+    },
+  });
+
   const handleApprove = async (entry: GlossaryEntry) => {
     updateMutation.mutate(
       {
@@ -216,11 +229,22 @@ export default function GlossaryReviewTable({ documentId }: GlossaryReviewTableP
 
   return (
     <div className="bg-white rounded-lg shadow flex flex-col" style={{ maxHeight: '400px' }}>
-      <div className="px-6 py-4 border-b border-gray-200 flex-shrink-0">
-        <h2 className="text-xl font-semibold text-gray-900">Glossary Review</h2>
-        <p className="text-sm text-gray-500 mt-1">
-          Review and approve extracted glossary terms ({glossaryEntries.length} terms)
-        </p>
+      <div className="px-6 py-4 border-b border-gray-200 flex-shrink-0 flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-xl font-semibold text-gray-900">Glossary Review</h2>
+          <p className="text-sm text-gray-500 mt-1">
+            Review and approve extracted glossary terms ({glossaryEntries.length} terms)
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => window.confirm('Clear all document glossary terms?') && clearGlossaryMutation.mutate()}
+          disabled={clearGlossaryMutation.isLoading}
+          className="px-3 py-1.5 text-sm rounded border border-red-200 text-red-700 hover:bg-red-50 disabled:opacity-50"
+          title="Remove all document glossary entries"
+        >
+          {clearGlossaryMutation.isLoading ? 'Clearing…' : 'Clear glossary'}
+        </button>
       </div>
       <div className="overflow-x-auto overflow-y-auto flex-1 min-h-0">
         <table className="min-w-full divide-y divide-gray-200">

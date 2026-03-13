@@ -19,6 +19,7 @@ export default function GlossaryPage() {
   const [targetLocaleFilter, setTargetLocaleFilter] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [searchMode, setSearchMode] = useState<'source' | 'target' | 'both'>('both');
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
   // Fetch projects for filter dropdown
   const { data: projects } = useQuery({
@@ -42,7 +43,7 @@ export default function GlossaryPage() {
     queryFn: () => glossaryApi.getEmbeddingStats(projectFilter || undefined),
   });
 
-  // Delete mutation
+  // Delete mutation (single)
   const deleteMutation = useMutation({
     mutationFn: glossaryApi.delete,
     onSuccess: () => {
@@ -52,6 +53,21 @@ export default function GlossaryPage() {
     },
     onError: (error: any) => {
       toast.error(error.response?.data?.message || 'Failed to delete glossary entry');
+    },
+  });
+
+  // Delete many mutation
+  const deleteManyMutation = useMutation({
+    mutationFn: glossaryApi.deleteMany,
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['glossary'] });
+      queryClient.invalidateQueries({ queryKey: ['glossary-embedding-stats'] });
+      setSelectedIds(new Set());
+      const n = data?.deleted ?? 0;
+      toast.success(n > 0 ? `${n} entries deleted` : 'Entries deleted');
+    },
+    onError: (error: any) => {
+      toast.error(error.response?.data?.message || 'Failed to delete selected entries');
     },
   });
 
@@ -90,6 +106,42 @@ export default function GlossaryPage() {
     if (window.confirm('Are you sure you want to delete this glossary entry?')) {
       deleteMutation.mutate(entryId);
     }
+  };
+
+  const filteredIds = filteredEntries.map((e) => e.id);
+  const allFilteredSelected = filteredIds.length > 0 && filteredIds.every((id) => selectedIds.has(id));
+  const someFilteredSelected = filteredIds.some((id) => selectedIds.has(id));
+
+  const handleSelectAll = () => {
+    if (allFilteredSelected) {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        filteredIds.forEach((id) => next.delete(id));
+        return next;
+      });
+    } else {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        filteredIds.forEach((id) => next.add(id));
+        return next;
+      });
+    }
+  };
+
+  const handleToggleSelect = (entryId: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(entryId)) next.delete(entryId);
+      else next.add(entryId);
+      return next;
+    });
+  };
+
+  const handleDeleteSelected = () => {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    if (!window.confirm(`Delete ${ids.length} selected entries from the shared glossary?`)) return;
+    deleteManyMutation.mutate(ids);
   };
 
   const handleModalClose = () => {
@@ -254,9 +306,40 @@ export default function GlossaryPage() {
         </div>
 
         <div className="card">
-          <h2 className="text-xl font-semibold mb-4">
-            Glossary Entries ({filteredEntries.length})
-          </h2>
+          <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
+            <h2 className="text-xl font-semibold">
+              Glossary Entries ({filteredEntries.length})
+            </h2>
+            {filteredEntries.length > 0 && (
+              <div className="flex items-center gap-4">
+                <label className="flex items-center gap-2 cursor-pointer select-none text-sm text-gray-700">
+                  <input
+                    type="checkbox"
+                    checked={allFilteredSelected}
+                    ref={(el) => {
+                      if (el) (el as HTMLInputElement).indeterminate = someFilteredSelected && !allFilteredSelected;
+                    }}
+                    onChange={handleSelectAll}
+                    className="rounded border-gray-300"
+                  />
+                  Select all
+                </label>
+                {selectedIds.size > 0 && (
+                  <>
+                    <span className="text-sm text-gray-500">{selectedIds.size} selected</span>
+                    <button
+                      type="button"
+                      onClick={handleDeleteSelected}
+                      disabled={deleteManyMutation.isLoading}
+                      className="btn btn-danger text-sm disabled:opacity-50"
+                    >
+                      {deleteManyMutation.isLoading ? 'Deleting…' : 'Delete selected'}
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
           {isLoading ? (
             <div className="text-center py-8">Loading...</div>
           ) : filteredEntries.length > 0 ? (
@@ -264,7 +347,7 @@ export default function GlossaryPage() {
               {filteredEntries.map((entry: GlossaryEntry) => (
                 <div
                   key={entry.id}
-                  className={`border rounded-lg p-4 hover:bg-gray-50 transition-colors ${
+                  className={`border rounded-lg p-4 hover:bg-gray-50 transition-colors flex items-start gap-3 ${
                     entry.forbidden
                       ? 'border-red-300 bg-red-50'
                       : entry.status === 'DEPRECATED'
@@ -274,8 +357,16 @@ export default function GlossaryPage() {
                       : 'border-gray-200'
                   }`}
                 >
-                  <div className="flex justify-between items-start">
-                    <div className="flex-1">
+                  <label className="flex-shrink-0 pt-0.5 cursor-pointer select-none" title="Select entry">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(entry.id)}
+                      onChange={() => handleToggleSelect(entry.id)}
+                      className="rounded border-gray-300"
+                    />
+                  </label>
+                  <div className="flex justify-between items-start flex-1 min-w-0">
+                    <div className="flex-1 min-w-0">
                       <div className="mb-2">
                         <div className="flex items-center gap-2 mb-1">
                           <p className="text-sm text-gray-600">

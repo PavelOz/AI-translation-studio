@@ -455,31 +455,72 @@ export const getSegmentWithDocument = (segmentId: string) =>
     },
   });
 
+type NumberOrDateToken = { value: string; type: 'number' | 'date' | 'phone'; index: number };
+
+function isInsideSpan(index: number, length: number, spans: Array<{ index: number; value: string }>): boolean {
+  return spans.some(s => index >= s.index && index + length <= s.index + s.value.length);
+}
+
 /**
- * Extract numbers and dates from text
+ * Extract numbers, dates, and phone numbers from text.
+ * Phones are extracted first so digit sequences inside them are not treated as separate numbers.
+ * Date+time (e.g. 18.11.2025 15:18:02) is matched as one token so time is replaced with the date.
  */
-function extractNumbersAndDates(text: string): Array<{ value: string; type: 'number' | 'date'; index: number }> {
-  const results: Array<{ value: string; type: 'number' | 'date'; index: number }> = [];
-  
-  // Match numbers (integers, decimals, percentages, currency)
-  const numberRegex = /(\d+[.,]?\d*%?|\d+[.,]\d+)/g;
+function extractNumbersAndDates(text: string): NumberOrDateToken[] {
+  const results: NumberOrDateToken[] = [];
+
+  // 1. Match phone numbers first (whole token; no locale formatting on replace)
+  const phoneRegex = /\+\d{1,4}[\s().-]*\d{2,4}[\s().-]*\d{2,4}[\s().-]*\d{2,4}([\s.-]*\d{2,4})?/g;
+  const phoneSpans: Array<{ index: number; value: string }> = [];
   let match;
+  while ((match = phoneRegex.exec(text)) !== null) {
+    const value = match[0];
+    results.push({ value, type: 'phone', index: match.index });
+    phoneSpans.push({ index: match.index, value });
+  }
+
+  // 2. Match dates (with optional time) before numbers so "18.11.2025 15:18:02" is one token
+  const dateTimeRegex = /(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?|\d{4}[./-]\d{1,2}[./-]\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?)/g;
+  const dateSpans: Array<{ index: number; value: string }> = [];
+  while ((match = dateTimeRegex.exec(text)) !== null) {
+    if (isInsideSpan(match.index, match[0].length, phoneSpans)) continue;
+    const beforeMatch = text.substring(Math.max(0, match.index - 10), match.index);
+    const afterMatch = text.substring(match.index + match[0].length, match.index + match[0].length + 1);
+    const datePart = (match[0].trim().split(/\s+/)[0] ?? '').trim();
+    const isSectionNumber = (
+      (match.index === 0 || /^[\s.]*$/.test(beforeMatch)) &&
+      afterMatch === '.' &&
+      /^\d{1,2}\.\d{1,2}\.\d{1,2}$/.test(datePart)
+    );
+    if (isSectionNumber) continue;
+    results.push({ value: match[0], type: 'date', index: match.index });
+    dateSpans.push({ index: match.index, value: match[0] });
+  }
+
+  const excludeSpans = [...phoneSpans, ...dateSpans];
+
+  // 3. Match numbers (integers, decimals, percentages) but skip those inside phone or date
+  const numberRegex = /(\d+[.,]?\d*%?|\d+[.,]\d+)/g;
   while ((match = numberRegex.exec(text)) !== null) {
+    if (isInsideSpan(match.index, match[0].length, excludeSpans)) continue;
     results.push({
       value: match[0],
       type: 'number',
       index: match.index,
     });
   }
-  
+
   // Merge consecutive number matches that form a section number (XX.XX.XX) at start of text
-  // so that "11.06" + "02" and "35" stay as two tokens ["11.06.02", "35"] instead of ["11.06", "02", "35"]
-  // and position-based replacement does not mix section number with other numbers (e.g. km)
-  const merged: Array<{ value: string; type: 'number' | 'date'; index: number }> = [];
+  const merged: NumberOrDateToken[] = [];
   let i = 0;
   while (i < results.length) {
     const a = results[i];
-    const hasNext = i + 1 < results.length;
+    if (a.type !== 'number') {
+      merged.push(a);
+      i += 1;
+      continue;
+    }
+    const hasNext = i + 1 < results.length && results[i + 1].type === 'number';
     const gapStart = a.index + a.value.length;
     const gap = hasNext ? text.substring(gapStart, results[i + 1].index) : '';
     const canMergeNext =
@@ -500,37 +541,6 @@ function extractNumbersAndDates(text: string): Array<{ value: string; type: 'num
   results.length = 0;
   results.push(...merged);
 
-  // Match dates (various formats: DD.MM.YYYY, MM/DD/YYYY, YYYY-MM-DD, etc.)
-  // BUT exclude section numbers (XX.XX.XX at start of line or after period/space)
-  const dateRegex = /(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{4}[./-]\d{1,2}[./-]\d{1,2})/g;
-  while ((match = dateRegex.exec(text)) !== null) {
-    // Skip if it's a section number (pattern XX.XX.XX at start or after period/space, followed by period)
-    const beforeMatch = text.substring(Math.max(0, match.index - 10), match.index);
-    const afterMatch = text.substring(match.index + match[0].length, match.index + match[0].length + 1);
-    const isSectionNumber = (
-      (match.index === 0 || /^[\s.]*$/.test(beforeMatch)) && // At start or after only spaces/periods
-      afterMatch === '.' && // Followed by period
-      /^\d{1,2}\.\d{1,2}\.\d{1,2}$/.test(match[0]) // Pattern XX.XX.XX
-    );
-    
-    if (isSectionNumber) {
-      // Treat as number, not date - skip date matching for this pattern
-      continue;
-    }
-    
-    // Avoid duplicates (if a date was already matched as part of a number)
-    const isDuplicate = results.some(r => 
-      r.index <= match.index && r.index + r.value.length >= match.index + match[0].length
-    );
-    if (!isDuplicate) {
-      results.push({
-        value: match[0],
-        type: 'date',
-        index: match.index,
-      });
-    }
-  }
-  
   return results.sort((a, b) => a.index - b.index);
 }
 
@@ -561,15 +571,21 @@ function differsOnlyByNumbers(source1: string, source2: string): boolean {
 }
 
 /**
- * Format date according to target locale conventions
+ * Format date (and optional time) according to target locale conventions.
+ * If input is "DD.MM.YYYY HH:MM:SS", the time is preserved and appended after the formatted date.
  */
 function formatDateForLocale(dateStr: string, locale: string): string {
   try {
-    // Parse common date formats
+    const trimmed = dateStr.trim();
+    const dateTimeParts = trimmed.split(/\s+(?=\d{1,2}:\d{2})/); // split before "HH:MM" or "HH:MM:SS"
+    const dateOnly = dateTimeParts[0] ?? trimmed;
+    const timePart = dateTimeParts[1]; // e.g. "15:18:02" or "15:18"
+
+    // Parse common date formats (date part only)
     let date: Date | null = null;
-    
+
     // Try DD.MM.YYYY or DD/MM/YYYY
-    const ddmmyyyy = dateStr.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
+    const ddmmyyyy = dateOnly.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
     if (ddmmyyyy) {
       const day = parseInt(ddmmyyyy[1]);
       const month = parseInt(ddmmyyyy[2]);
@@ -587,10 +603,10 @@ function formatDateForLocale(dateStr: string, locale: string): string {
         date = new Date(year, month - 1, day);
       }
     }
-    
+
     // Try YYYY-MM-DD
     if (!date) {
-      const yyyymmdd = dateStr.match(/^(\d{4})[./-](\d{1,2})[./-](\d{1,2})$/);
+      const yyyymmdd = dateOnly.match(/^(\d{4})[./-](\d{1,2})[./-](\d{1,2})$/);
       if (yyyymmdd) {
         date = new Date(parseInt(yyyymmdd[1]), parseInt(yyyymmdd[2]) - 1, parseInt(yyyymmdd[3]));
       }
@@ -598,7 +614,7 @@ function formatDateForLocale(dateStr: string, locale: string): string {
     
     // Try 2-digit year formats
     if (!date) {
-      const ddmmyy = dateStr.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2})$/);
+      const ddmmyy = dateOnly.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{2})$/);
       if (ddmmyy) {
         const year = parseInt(ddmmyy[3]);
         const fullYear = year < 50 ? 2000 + year : 1900 + year; // Assume 2000s for years < 50
@@ -613,7 +629,7 @@ function formatDateForLocale(dateStr: string, locale: string): string {
     if (!date || isNaN(date.getTime())) {
       return dateStr; // Return original if parsing fails
     }
-    
+
     // Format according to locale
     const localeMap: Record<string, Intl.DateTimeFormatOptions> = {
       'en': { day: '2-digit', month: '2-digit', year: 'numeric' },
@@ -622,21 +638,26 @@ function formatDateForLocale(dateStr: string, locale: string): string {
       'de': { day: '2-digit', month: '2-digit', year: 'numeric' },
       'fr': { day: '2-digit', month: '2-digit', year: 'numeric' },
     };
-    
+
     const localeKey = locale.toLowerCase().split('-')[0];
-    const options = localeMap[locale.toLowerCase()] || localeMap[localeKey] || { 
-      day: '2-digit', 
-      month: '2-digit', 
-      year: 'numeric' 
+    const options = localeMap[locale.toLowerCase()] || localeMap[localeKey] || {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
     };
-    
+
+    let formatted: string;
     try {
       const formatter = new Intl.DateTimeFormat(locale, options);
-      return formatter.format(date);
+      formatted = formatter.format(date);
     } catch {
-      // Fallback to simple format
-      return `${date.getDate().toString().padStart(2, '0')}.${(date.getMonth() + 1).toString().padStart(2, '0')}.${date.getFullYear()}`;
+      formatted = `${date.getDate().toString().padStart(2, '0')}.${(date.getMonth() + 1).toString().padStart(2, '0')}.${date.getFullYear()}`;
     }
+    // Preserve time part if present (e.g. 15:18:02)
+    if (timePart && /^\d{1,2}:\d{2}(:\d{2})?$/.test(timePart.trim())) {
+      return `${formatted} ${timePart.trim()}`;
+    }
+    return formatted;
   } catch {
     return dateStr; // Return original on error
   }
@@ -699,16 +720,45 @@ function replaceLeadingSectionNumber(targetText: string, similarSourceText: stri
  * Replace numbers/dates in target text with corresponding values from source segment text.
  * Returns { applied: false } when token counts don't match (caller may try section-number-only fallback).
  */
+/** Match time in already-localized target (e.g. "18 November 2025 14:43:48") */
+const TIME_IN_TARGET = /\d{1,2}:\d{2}(?::\d{2})?/;
+
 function replaceNumbersAndDates(
   targetText: string,
   sourceText: string,
   sourceSegmentText: string,
   targetLocale: string,
 ): { applied: boolean; result: string } {
-  const sourceNumbers = extractNumbersAndDates(sourceText);
-  const sourceSegmentNumbers = extractNumbersAndDates(sourceSegmentText);
-  const targetNumbers = extractNumbersAndDates(targetText);
-  
+  // Strip formatting tags so extraction sees one date token (e.g. "18.11.2025 14:43:48") not "{{0}}18.11.2025{{/0}}" -> 3 tokens
+  const cleanSource = stripFormattingTags(sourceText);
+  const cleanSourceSegment = stripFormattingTags(sourceSegmentText);
+  const cleanTarget = stripFormattingTags(targetText);
+  const sourceNumbers = extractNumbersAndDates(cleanSource);
+  const sourceSegmentNumbers = extractNumbersAndDates(cleanSourceSegment);
+  const targetNumbers = extractNumbersAndDates(cleanTarget);
+
+  // Special case: both sources have a single date+time token, target is already localized
+  // (e.g. target "18 November 2025 14:43:48" has no numeric date, so token count mismatches)
+  if (
+    sourceNumbers.length === 1 &&
+    sourceSegmentNumbers.length === 1 &&
+    sourceNumbers[0].type === 'date' &&
+    sourceSegmentNumbers[0].type === 'date' &&
+    cleanTarget.match(TIME_IN_TARGET)
+  ) {
+    const segmentDateValue = sourceSegmentNumbers[0].value;
+    const newTimeMatch = segmentDateValue.match(TIME_IN_TARGET);
+    if (newTimeMatch) {
+      // Replace only the time in target so we keep the existing date format (e.g. "18 November 2025")
+      const newTime = newTimeMatch[0];
+      const result = targetText.replace(TIME_IN_TARGET, newTime);
+      return { applied: true, result };
+    }
+    // No time in segment (date only): replace full target with formatted date
+    const newFormatted = formatDateForLocale(segmentDateValue, targetLocale || 'en');
+    return { applied: true, result: newFormatted };
+  }
+
   const sameCount =
     sourceNumbers.length === sourceSegmentNumbers.length &&
     targetNumbers.length === sourceSegmentNumbers.length;
@@ -729,20 +779,27 @@ function replaceNumbersAndDates(
     
     if (targetIndex >= 0 && targetIndex < sourceNumbers.length && targetIndex < sourceSegmentNumbers.length) {
       const segmentValue = sourceSegmentNumbers[targetIndex].value;
-      
-      if (targetNum.type === 'date' && sourceNumbers[targetIndex].type === 'date') {
+      const sourceType = sourceNumbers[targetIndex].type;
+
+      if (targetNum.type === 'phone' && sourceType === 'phone') {
+        // Phone: use segment value as-is (no locale formatting to avoid breaking +7 (701) 719-1101)
+        result = result.substring(0, targetNum.index + offset) +
+                 segmentValue +
+                 result.substring(targetNum.index + targetNum.value.length + offset);
+        offset += segmentValue.length - targetNum.value.length;
+      } else if (targetNum.type === 'date' && sourceType === 'date') {
         const formattedDate = formatDateForLocale(segmentValue, targetLocale);
-        result = result.substring(0, targetNum.index + offset) + 
-                 formattedDate + 
+        result = result.substring(0, targetNum.index + offset) +
+                 formattedDate +
                  result.substring(targetNum.index + targetNum.value.length + offset);
         offset += formattedDate.length - targetNum.value.length;
-      } else if (targetNum.type === 'number' && sourceNumbers[targetIndex].type === 'number') {
+      } else if (targetNum.type === 'number' && sourceType === 'number') {
         // Section numbers (XX.XX.XX) must not be formatted - parseFloat would truncate to 11.04
         const replacement = SECTION_NUMBER_PATTERN.test(segmentValue)
           ? segmentValue
           : formatNumberForLocale(segmentValue, targetLocale);
-        result = result.substring(0, targetNum.index + offset) + 
-                 replacement + 
+        result = result.substring(0, targetNum.index + offset) +
+                 replacement +
                  result.substring(targetNum.index + targetNum.value.length + offset);
         offset += replacement.length - targetNum.value.length;
       }

@@ -4757,7 +4757,6 @@ export const getSegmentDebugInfo = async (segmentId: string) => {
     documentName: segment.document.name,
     documentType: undefined,
   };
-  // Get relevant glossary entries using vector search + strict filtering (Hybrid Approach)
   const filteredGlossary = await getRelevantGlossaryEntries(
     segment.sourceText,
     segment.document.sourceLocale,
@@ -4765,7 +4764,7 @@ export const getSegmentDebugInfo = async (segmentId: string) => {
     segment.document.projectId,
     documentContext,
   );
-  
+
   // Map to API format for display
   const relevantGlossaryEntries = filteredGlossary.map(entry => ({
     sourceTerm: entry.term,
@@ -4812,9 +4811,8 @@ export const getSegmentDebugInfo = async (segmentId: string) => {
       }
     : undefined;
 
-  // Build the prompt using orchestrator's public method (with filtered glossary)
   const prompt = orchestrator.buildPromptForSegment(orchestratorSegment, {
-    segments: [orchestratorSegment], // Required by TranslateSegmentsOptions, but buildPromptForSegment uses the first parameter
+    segments: [orchestratorSegment],
     project: context.projectMeta,
     guidelines: context.guidelines,
     glossary: filteredGlossary,

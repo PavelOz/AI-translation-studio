@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { Link } from 'react-router-dom';
 import { analysisApi, type AnalysisResults, type AnalysisStatus, type DocumentDnaPayload, type UpdateDocumentDnaResponse } from '../api/analysis.api';
 import { documentsApi } from '../api/documents.api';
+import { glossaryApi } from '../api/glossary.api';
 import { aiApi } from '../api/ai.api';
 import apiClient from '../api/client';
 import toast from 'react-hot-toast';
@@ -1192,6 +1193,20 @@ function DocumentDnaBlock({ documentId }: { documentId: string }) {
     },
   });
 
+  const clearGlossaryMutation = useMutation({
+    mutationFn: () => glossaryApi.clearDocumentGlossary(documentId),
+    onSuccess: (data) => {
+      const n = data?.deleted ?? 0;
+      toast.success(n > 0 ? `Glossary cleared (${n} term${n === 1 ? '' : 's'} removed)` : 'Glossary cleared');
+      queryClient.invalidateQueries({ queryKey: ['glossary', documentId] });
+      queryClient.invalidateQueries({ queryKey: ['document-glossary', documentId] });
+      queryClient.invalidateQueries({ queryKey: ['analysis', documentId] });
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.message || err?.message || 'Failed to clear glossary');
+    },
+  });
+
   const saveMutation = useMutation({
     mutationFn: (payload: DocumentDnaPayload) => analysisApi.updateDocumentDna(documentId, payload),
     onSuccess: (data: UpdateDocumentDnaResponse) => {
@@ -1558,6 +1573,15 @@ function DocumentDnaBlock({ documentId }: { documentId: string }) {
                 title="Extract glossary term pairs from the document (AI) and add as CANDIDATE entries"
               >
                 {extractGlossaryMutation.isLoading ? 'Extracting glossary…' : 'Extract glossary (AI)'}
+              </button>
+              <button
+                type="button"
+                onClick={() => window.confirm('Clear all document glossary terms for this document?') && clearGlossaryMutation.mutate()}
+                disabled={clearGlossaryMutation.isLoading}
+                className="btn btn-secondary text-sm disabled:opacity-50 border-red-200 text-red-700 hover:bg-red-50"
+                title="Remove all document glossary entries (does not affect DNA or style rules)"
+              >
+                {clearGlossaryMutation.isLoading ? 'Clearing…' : 'Clear glossary'}
               </button>
             </>
           )}

@@ -57,6 +57,7 @@ const mtSchema = z.object({
   minScore: z.number().min(0).max(100).optional(),
   glossaryMode: z.enum(['off', 'strict_source', 'strict_semantic']).optional(),
   useCritic: z.boolean().optional(), // Enable critic workflow
+  verbose: z.boolean().optional(), // Return steps for process log UI
   temperature: z.number().min(0).max(1).optional(), // Temperature for AI translation
   tmRagSettings: z.object({
     minScore: z.number().min(0).max(100).optional(),
@@ -280,7 +281,7 @@ segmentRoutes.post(
               targetFinal: result.targetFinal,
               status: result.status,
               fuzzyScore: result.fuzzyScore,
-              _metadata: (result as any)._metadata, // Include model info if available
+              _metadata: (result as any)._metadata,
             },
             timestamp: new Date().toISOString() 
           })}\n\n`);

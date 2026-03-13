@@ -4,6 +4,7 @@ import { segmentsApi } from '../../api/segments.api';
 import apiClient from '../../api/client';
 import toast from 'react-hot-toast';
 import PretranslateModal from './PretranslateModal';
+import GuidedTranslationModal from './GuidedTranslationModal';
 import type { GlossaryMode } from '../../types/glossary';
 
 interface EditorToolbarProps {
@@ -24,6 +25,7 @@ export default function EditorToolbar({
   glossaryMode = 'strict_source',
 }: EditorToolbarProps) {
   const [isPretranslateModalOpen, setIsPretranslateModalOpen] = useState(false);
+  const [isGuidedModalOpen, setIsGuidedModalOpen] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState<{
     stage: 'preparing' | 'downloading' | 'processing' | 'complete';
@@ -153,6 +155,13 @@ export default function EditorToolbar({
             className="btn btn-primary text-sm"
           >
             Pretranslate
+          </button>
+          <button
+            onClick={() => setIsGuidedModalOpen(true)}
+            className="btn btn-secondary text-sm"
+            title="Step-by-step guide: see how translation uses DNA and glossary"
+          >
+            Guide me through translation
           </button>
           <div className="relative" ref={batchOptionsRef}>
             <button 
@@ -292,6 +301,17 @@ export default function EditorToolbar({
             onBatchTranslate();
           }, 1000);
         }}
+        glossaryMode={glossaryMode}
+      />
+      <GuidedTranslationModal
+        documentId={documentId}
+        isOpen={isGuidedModalOpen}
+        onClose={() => setIsGuidedModalOpen(false)}
+        onComplete={() => {
+          onRefresh();
+          setTimeout(() => onBatchTranslate(), 1000);
+        }}
+        initialSegmentId={selectedSegmentIds?.[0] ?? null}
         glossaryMode={glossaryMode}
       />
     </>
