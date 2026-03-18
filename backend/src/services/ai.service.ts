@@ -3335,6 +3335,28 @@ export const pretranslateDocument = async (
           });
 
           const resultMap = new Map(aiResults.map((result) => [result.segmentId, result]));
+          const fallbackResults = aiResults.filter((r) => r.fallback || r.provider === 'rule-based' || r.provider === 'rule');
+          const missingResults = batch.filter((entry) => !resultMap.has(entry.segment.id));
+          if (fallbackResults.length > 0 || missingResults.length > 0) {
+            addLogMessage(
+              documentId,
+              `⚠️ AI provider degraded for batch ${batchNumber}/${totalBatches}: ` +
+                `${fallbackResults.length} fallback result(s) and ${missingResults.length} missing result(s). ` +
+                `Source text was used as a placeholder for affected segments.`,
+            );
+            logger.warn(
+              {
+                documentId,
+                batchNumber,
+                totalBatches,
+                fallbackCount: fallbackResults.length,
+                missingCount: missingResults.length,
+                fallbackProviders: Array.from(new Set(fallbackResults.map((r) => r.provider))),
+                missingSegmentIds: missingResults.slice(0, 20).map((e) => e.segment.id),
+              },
+              'Pretranslate: AI degraded (fallback/missing results)',
+            );
+          }
 
           // Persistent state: session expandedTerms (Set) — updated after each batch and passed to next
           const knownAbbrevs = getKnownTargetAbbreviations(documentDnaPretranslate?.abbreviationLogic ?? undefined);
@@ -3872,6 +3894,28 @@ export const patchTranslate = async (
       }
 
       const resultMap = new Map(aiResults.map((r) => [r.segmentId, r]));
+      const fallbackResults = aiResults.filter((r) => r.fallback || r.provider === 'rule-based' || r.provider === 'rule');
+      const missingResults = batch.filter((entry) => !resultMap.has(entry.segment.id));
+      if (fallbackResults.length > 0 || missingResults.length > 0) {
+        addLogMessage(
+          documentId,
+          `⚠️ AI provider degraded for batch ${batchNumber}/${totalBatches}: ` +
+            `${fallbackResults.length} fallback result(s) and ${missingResults.length} missing result(s). ` +
+            `Source text was used as a placeholder for affected segments.`,
+        );
+        logger.warn(
+          {
+            documentId,
+            batchNumber,
+            totalBatches,
+            fallbackCount: fallbackResults.length,
+            missingCount: missingResults.length,
+            fallbackProviders: Array.from(new Set(fallbackResults.map((r) => r.provider))),
+            missingSegmentIds: missingResults.slice(0, 20).map((e) => e.segment.id),
+          },
+          'PatchTranslate: AI degraded (fallback/missing results)',
+        );
+      }
       batch.forEach((entry) => {
         const aiResult = resultMap.get(entry.segment.id);
         let targetText = aiResult?.targetText ?? entry.segment.sourceText;

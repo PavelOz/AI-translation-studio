@@ -838,6 +838,17 @@ function replaceLeadingSectionNumber(targetText: string, similarSourceText: stri
 const TARGET_HAS_LEADING_SECTION =
   /^[\s\uFEFF]*[\u00AB\u201C\u201E\u201F"]?\s*\d{1,2}\.\d{1,2}\.\d{1,2}(?:[.\s\u00BB]+|(?=\s+\S)|$)/;
 
+/** Collapse «5.1.4. 5.1.4. or 5.1.4. 5.1.4. at segment start (duplicate clause from TM + prepend). */
+function dedupeLeadingClauseRepeat(text: string): string {
+  let s = text;
+  s = s.replace(
+    /^([\s\uFEFF]*)(«\s*)(\d{1,2}\.\d{1,2}\.\d{1,2})\.\s+\3\.\s+/i,
+    '$1$2$3. ',
+  );
+  s = s.replace(/^([\s\uFEFF]*)(\d{1,2}\.\d{1,2}\.\d{1,2})\.\s+\2\.\s+/i, '$1$2. ');
+  return s;
+}
+
 /**
  * Extract canonical leading clause prefix «X.X.X. (or same opening quote as source) from segment.
  * Uses stripped text so {{0}}«3.3.3» … works. Handles «3.3.3» immediately before word (» not matched by old [.\s]+).
@@ -865,14 +876,33 @@ function leadingClausePrefixFromSegmentSource(segmentSource: string): string | n
  */
 export function ensureLeadingSectionFromSegment(targetText: string, segmentSource: string): string {
   if (!segmentSource || !targetText) return targetText;
-  const targetHasLeading = targetText.match(TARGET_HAS_LEADING_SECTION);
-  if (targetHasLeading) return targetText;
 
   const segmentLeadingPrefix = leadingClausePrefixFromSegmentSource(segmentSource);
-  if (segmentLeadingPrefix && targetText.trim().length > 0) {
-    return `${segmentLeadingPrefix}${targetText.trimStart()}`;
+  const segmentNumMatch = segmentLeadingPrefix?.match(/(\d{1,2}\.\d{1,2}\.\d{1,2})/);
+  const segmentNums = segmentNumMatch?.[1] ?? null;
+  const cleanTarget = (stripFormattingTags(targetText) || targetText).trimStart();
+  const targetHasLeading =
+    TARGET_HAS_LEADING_SECTION.test(cleanTarget) || TARGET_HAS_LEADING_SECTION.test(targetText.trimStart());
+
+  // TM often returns "5.1.4. In…" while source has «5.1.4. — prepend would yield «5.1.4. 5.1.4.
+  if (segmentLeadingPrefix && segmentNums && cleanTarget.length > 0) {
+    const esc = segmentNums.replace(/\./g, '\\.');
+    const bareLead = new RegExp(`^${esc}\\.\\s+`);
+    if (bareLead.test(cleanTarget) && !/^[\s\uFEFF]*[\u00AB\u201C\u201E\u201F"]/i.test(cleanTarget)) {
+      const rest = cleanTarget.replace(bareLead, '');
+      const out = `${segmentLeadingPrefix}${rest}`;
+      return dedupeLeadingClauseRepeat(out);
+    }
   }
-  return targetText;
+
+  if (targetHasLeading) {
+    return dedupeLeadingClauseRepeat(targetText);
+  }
+
+  if (segmentLeadingPrefix && targetText.trim().length > 0) {
+    return dedupeLeadingClauseRepeat(`${segmentLeadingPrefix}${targetText.trimStart()}`);
+  }
+  return dedupeLeadingClauseRepeat(targetText);
 }
 
 /**
@@ -915,7 +945,7 @@ function applyClauseSectionFromSegment(targetText: string, segmentSource: string
       `$1${segmentSection}`,
     );
   }
-  return out;
+  return dedupeLeadingClauseRepeat(out);
 }
 
 /**
