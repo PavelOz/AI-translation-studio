@@ -479,8 +479,11 @@ function extractNumbersAndDates(text: string): NumberOrDateToken[] {
     phoneSpans.push({ index: match.index, value });
   }
 
-  // 2. Match dates (with optional time) before numbers so "18.11.2025 15:18:02" is one token
-  const dateTimeRegex = /(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?|\d{4}[./-]\d{1,2}[./-]\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?)/g;
+  // 2. Match dates (with optional time) before numbers so "18.11.2025 15:18:02" is one token.
+  // Use backreference so both separators must be the same (avoids "2025/1-8" as one date).
+  // Require (?:^|(?<![/\d])) before and (?![\d/]) after so we don't match dates embedded in
+  // contract numbers (e.g. "32/20/26" or "1/20/26" inside "891321/2026/1-8").
+  const dateTimeRegex = /(?:^|(?<![/\d]))(\d{1,2}([./-])\d{1,2}\2\d{2,4}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?|\d{4}([./-])\d{1,2}\3\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?)(?![\d/])/g;
   const dateSpans: Array<{ index: number; value: string }> = [];
   while ((match = dateTimeRegex.exec(text)) !== null) {
     if (isInsideSpan(match.index, match[0].length, phoneSpans)) continue;
@@ -510,7 +513,8 @@ function extractNumbersAndDates(text: string): NumberOrDateToken[] {
     });
   }
 
-  // Merge consecutive number matches that form a section number (XX.XX.XX) at start of text
+  // Merge consecutive number matches that form a subsection number (X.X.X e.g. 5.1.8, 5.1.12)
+  // so segment and target token counts align (e.g. segment "5.1"+"8"+"5.1" -> "5.1.8"+"5.1" to match target "5.1.12"+"5.1").
   const merged: NumberOrDateToken[] = [];
   let i = 0;
   while (i < results.length) {
@@ -527,7 +531,6 @@ function extractNumbersAndDates(text: string): NumberOrDateToken[] {
       hasNext &&
       /^\d{1,2}\.\d{1,2}$/.test(a.value) &&
       /^\d{1,2}$/.test(results[i + 1].value) &&
-      (a.index === 0 || /^[\s.]*$/.test(text.substring(0, a.index))) &&
       (gap === '.' || gap === ' ' || gap === '' || /^\s+$/.test(gap));
     const sectionValue = canMergeNext ? `${a.value}.${results[i + 1].value}` : null;
     if (sectionValue && /^\d{1,2}\.\d{1,2}\.\d{1,2}$/.test(sectionValue)) {
@@ -541,7 +544,99 @@ function extractNumbersAndDates(text: string): NumberOrDateToken[] {
   results.length = 0;
   results.push(...merged);
 
-  return results.sort((a, b) => a.index - b.index);
+  // Merge two consecutive number tokens separated by a dot to form clause/section ref (e.g. "1" + "." + "1" -> "1.1")
+  // so segment and target token counts align (e.g. "пункте 1.1" / "clause 1.3" and "разделе 10" / "section 18").
+  const clauseMerged: NumberOrDateToken[] = [];
+  i = 0;
+  while (i < results.length) {
+    const a = results[i];
+    if (a.type !== 'number') {
+      clauseMerged.push(a);
+      i += 1;
+      continue;
+    }
+    const hasNext = i + 1 < results.length && results[i + 1].type === 'number';
+    const gapStart = a.index + a.value.length;
+    const gap = hasNext ? text.substring(gapStart, results[i + 1].index) : '';
+    const dotOnly = /^\.\s*$|^\.$/.test(gap);
+    const canMergeClause =
+      hasNext &&
+      dotOnly &&
+      /^\d{1,2}$/.test(a.value) &&
+      /^\d{1,2}$/.test(results[i + 1].value);
+    if (canMergeClause) {
+      clauseMerged.push({ value: `${a.value}.${results[i + 1].value}`, type: 'number', index: a.index });
+      i += 2;
+    } else {
+      clauseMerged.push(a);
+      i += 1;
+    }
+  }
+  results.length = 0;
+  results.push(...clauseMerged);
+
+  // Merge space-separated digit groups that form one amount (e.g. "1 676 502 220,83" -> one token)
+  const spaceMerged: NumberOrDateToken[] = [];
+  i = 0;
+  while (i < results.length) {
+    const a = results[i];
+    if (a.type !== 'number') {
+      spaceMerged.push(a);
+      i += 1;
+      continue;
+    }
+    let j = i;
+    while (j + 1 < results.length && results[j + 1].type === 'number') {
+      const gapStart = results[j].index + results[j].value.length;
+      const gap = text.substring(gapStart, results[j + 1].index);
+      if (!/^\s+$/.test(gap)) break;
+      j += 1;
+    }
+    if (j > i) {
+      const first = results[i];
+      const last = results[j];
+      const span = text.substring(first.index, last.index + last.value.length);
+      const normalized = span.replace(/\s+/g, '').replace(/,(\d+)$/, '.$1');
+      spaceMerged.push({ value: normalized, type: 'number', index: first.index });
+      i = j + 1;
+    } else {
+      spaceMerged.push(a);
+      i += 1;
+    }
+  }
+
+  // Merge comma-separated digit groups (e.g. "1,675,857,278.83" in target -> one token)
+  // so segment and target have the same token count for amount substitution.
+  const amountMerged: NumberOrDateToken[] = [];
+  i = 0;
+  while (i < spaceMerged.length) {
+    const a = spaceMerged[i];
+    if (a.type !== 'number') {
+      amountMerged.push(a);
+      i += 1;
+      continue;
+    }
+    let j = i;
+    while (j + 1 < spaceMerged.length && spaceMerged[j + 1].type === 'number') {
+      const gapStart = spaceMerged[j].index + spaceMerged[j].value.length;
+      const gap = text.substring(gapStart, spaceMerged[j + 1].index);
+      if (!/^,+$/.test(gap)) break;
+      j += 1;
+    }
+    if (j > i) {
+      const first = spaceMerged[i];
+      const last = spaceMerged[j];
+      const span = text.substring(first.index, last.index + last.value.length);
+      const normalized = span.replace(/,/g, '');
+      amountMerged.push({ value: normalized, type: 'number', index: first.index });
+      i = j + 1;
+    } else {
+      amountMerged.push(a);
+      i += 1;
+    }
+  }
+
+  return amountMerged.sort((a, b) => a.index - b.index);
 }
 
 /**
@@ -663,38 +758,58 @@ function formatDateForLocale(dateStr: string, locale: string): string {
   }
 }
 
+/** Month names (EN) to detect date context so we don't add thousands to years (e.g. "10 September 2025" not "2,025") */
+const MONTH_NAME_IN_TARGET = /\b(January|February|March|April|May|June|July|August|September|October|November|December)\b/i;
+/** Numeric date (e.g. 10.09.2025 or 10/09/2025) so year stays "2025" not "2,025" */
+const NUMERIC_DATE_IN_TARGET = /\d{1,2}[./-]\d{1,2}[./-]/;
+/** Year-context hints (e.g. "for 2023 year", "in 2024", "fiscal year 2025") so year stays "2023" not "2,023" */
+const YEAR_CONTEXT_IN_TARGET = /\b(fiscal\s+year|fy|year|года|год)\b/i;
+/** Strong English pattern used in our legal templates: "stipulated for 2023" */
+const STIPULATED_FOR_YEAR = /\bstipulated\s+for\s+\d{4}\b/i;
+
 /**
- * Format number according to target locale conventions
+ * Format number according to target locale conventions.
+ * Optional context.targetSnippet: when the number is a 4-digit integer and the snippet looks like a date
+ * (month name or numeric DD.MM/DD-MM/DD/MM), format without thousands grouping so "2025" stays "2025".
  */
-function formatNumberForLocale(numberStr: string, locale: string): string {
+function formatNumberForLocale(
+  numberStr: string,
+  locale: string,
+  context?: { targetSnippet?: string },
+): string {
   try {
-    // Remove percentage sign if present
     const hasPercent = numberStr.includes('%');
     const numStr = numberStr.replace('%', '').trim();
-    
-    // Parse number (handle both comma and dot as decimal separator)
     const normalizedNumStr = numStr.replace(',', '.');
     const num = parseFloat(normalizedNumStr);
     if (isNaN(num)) {
       return numberStr;
     }
-    
-    // Format according to locale
+    const isInteger = Number.isInteger(num);
+    const snippet = context?.targetSnippet ?? '';
+    const inYearOrDateContext =
+      snippet &&
+      isInteger &&
+      num >= 1000 &&
+      num <= 2999 &&
+      (
+        MONTH_NAME_IN_TARGET.test(snippet) ||
+        NUMERIC_DATE_IN_TARGET.test(snippet) ||
+        YEAR_CONTEXT_IN_TARGET.test(snippet) ||
+        STIPULATED_FOR_YEAR.test(snippet)
+      );
     const formatter = new Intl.NumberFormat(locale, {
       minimumFractionDigits: (normalizedNumStr.includes('.') || normalizedNumStr.includes(',')) ? 2 : 0,
       maximumFractionDigits: 2,
+      useGrouping: inYearOrDateContext ? false : true,
     });
-    
     let formatted = formatter.format(num);
-    
-    // Restore percentage sign if it was there
     if (hasPercent) {
       formatted += '%';
     }
-    
     return formatted;
   } catch {
-    return numberStr; // Return original on error
+    return numberStr;
   }
 }
 
@@ -717,11 +832,129 @@ function replaceLeadingSectionNumber(targetText: string, similarSourceText: stri
 }
 
 /**
+ * Target already has leading clause X.X.X — allow closing guillemot » after the number (e.g. «3.3.3» 50)
+ * so we do not prepend twice.
+ */
+const TARGET_HAS_LEADING_SECTION =
+  /^[\s\uFEFF]*[\u00AB\u201C\u201E\u201F"]?\s*\d{1,2}\.\d{1,2}\.\d{1,2}(?:[.\s\u00BB]+|(?=\s+\S)|$)/;
+
+/**
+ * Extract canonical leading clause prefix «X.X.X. (or same opening quote as source) from segment.
+ * Uses stripped text so {{0}}«3.3.3» … works. Handles «3.3.3» immediately before word (» not matched by old [.\s]+).
+ */
+function leadingClausePrefixFromSegmentSource(segmentSource: string): string | null {
+  if (!segmentSource) return null;
+  const s = (stripFormattingTags(segmentSource) || '').trimStart();
+  if (!s) return null;
+  const m = s.match(
+    /^([\s\uFEFF]*)([\u00AB\u201C\u201E\u201F"]?)\s*(\d{1,2}\.\d{1,2}\.\d{1,2})(?:[.\s\u00BB]+|(?=\s+\S)|$)/,
+  );
+  if (m?.[3]) {
+    const q = m[2] || '\u00AB';
+    return `${q}${m[3]}. `;
+  }
+  const numOnly = s.match(/^\s*(\d{1,2}\.\d{1,2}\.\d{1,2})(?:[.\s\u00BB]+|(?=\s+\S)|$)/);
+  if (numOnly) return `«${numOnly[1]}. `;
+  return null;
+}
+
+/**
+ * If segment source starts with a leading section prefix (e.g. «3.3.3. or 3.3.3. ) and target does not, prepend it.
+ * Exported so pretranslate can apply it with the exact segment.sourceText after TM substitution.
+ * Fallback: if the main regex fails (e.g. encoding), try matching number at start and preserve leading quote from segment.
+ */
+export function ensureLeadingSectionFromSegment(targetText: string, segmentSource: string): string {
+  if (!segmentSource || !targetText) return targetText;
+  const targetHasLeading = targetText.match(TARGET_HAS_LEADING_SECTION);
+  if (targetHasLeading) return targetText;
+
+  const segmentLeadingPrefix = leadingClausePrefixFromSegmentSource(segmentSource);
+  if (segmentLeadingPrefix && targetText.trim().length > 0) {
+    return `${segmentLeadingPrefix}${targetText.trimStart()}`;
+  }
+  return targetText;
+}
+
+/**
+ * Replace clause (X.Y) and section (N) in target with values from segment when segment has "пункте 1.1" / "разделе 10".
+ * When segment has a leading section number (e.g. "«3.3.3. ") and target does not, prepend that full prefix (including «).
+ * Call as post-pass so clause/section are fixed even when token-based substitution ran or was skipped.
+ */
+function applyClauseSectionFromSegment(targetText: string, segmentSource: string): string {
+  const cleanSegment = stripFormattingTags(segmentSource);
+  const segmentLeadingPrefix = leadingClausePrefixFromSegmentSource(segmentSource);
+  const targetHasLeading = targetText.match(TARGET_HAS_LEADING_SECTION);
+  let out = targetText;
+  if (segmentLeadingPrefix && !targetHasLeading && out.trim().length > 0) {
+    out = `${segmentLeadingPrefix}${out.trimStart()}`;
+  }
+  // Clause: "пункте 1.1" or "пункте 1. 1" or "п. 1.1" -> 1.1
+  const clauseMatch = cleanSegment.match(/(?:пункте|п\.)\s*(\d{1,2})\s*[.,]\s*(\d{1,2})/i)
+    || cleanSegment.match(/(?:пункте|п\.)\s*(\d{1,2}[.,]\d{1,2})/i);
+  const segmentClause = clauseMatch
+    ? (clauseMatch[2] != null ? `${clauseMatch[1]}.${clauseMatch[2]}` : clauseMatch[1].replace(',', '.'))
+    : null;
+  // Section: "разделе 10" or "раздел 10"
+  const sectionMatch = cleanSegment.match(/разделе?\s*(\d+)/i);
+  const segmentSection = sectionMatch ? sectionMatch[1] : null;
+
+  const targetClauseMatch = out.match(/clause\s+(\d{1,2}\.\d{1,2})\b/i);
+  const targetSectionMatch = out.match(/section\s+(\d+)\b/i);
+  const targetClause = targetClauseMatch ? targetClauseMatch[1] : null;
+  const targetSection = targetSectionMatch ? targetSectionMatch[1] : null;
+
+  if (segmentClause && targetClause && segmentClause !== targetClause) {
+    out = out.replace(
+      new RegExp(`(clause\\s+)${targetClause.replace(/\./g, '\\.')}\\b`, 'gi'),
+      `$1${segmentClause}`,
+    );
+  }
+  if (segmentSection && targetSection && segmentSection !== targetSection) {
+    out = out.replace(
+      new RegExp(`(section\\s+)${targetSection}\\b`, 'gi'),
+      `$1${segmentSection}`,
+    );
+  }
+  return out;
+}
+
+/**
  * Replace numbers/dates in target text with corresponding values from source segment text.
  * Returns { applied: false } when token counts don't match (caller may try section-number-only fallback).
  */
 /** Match time in already-localized target (e.g. "18 November 2025 14:43:48") */
 const TIME_IN_TARGET = /\d{1,2}:\d{2}(?::\d{2})?/;
+/** Target date phrase "DD Month YYYY" so we can replace with segment date (fixes wrong month from TM) */
+const TARGET_DATE_PHRASE = /\b(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})\b/i;
+/** Russian month names (genitive) -> month number for "29 октября 2025 года" */
+const RU_MONTH_GENITIVE: Record<string, number> = {
+  января: 1, февраля: 2, марта: 3, апреля: 4, мая: 5, июня: 6,
+  июля: 7, августа: 8, сентября: 9, октября: 10, ноября: 11, декабря: 12,
+};
+
+function parseSegmentDateToDDMMYYYY(segmentText: string): string | null {
+  const t = segmentText.trim();
+  const numeric = t.match(/(\d{1,2})[./-](\d{1,2})[./-](\d{4})/);
+  if (numeric) return `${numeric[1].padStart(2, '0')}.${numeric[2].padStart(2, '0')}.${numeric[3]}`;
+  const ru = t.match(/(\d{1,2})\s+(\S+)\s+(\d{4})/);
+  if (ru) {
+    const monthKey = ru[2].toLowerCase().replace(/\.$/, '');
+    const month = RU_MONTH_GENITIVE[monthKey];
+    if (month != null) return `${ru[1].padStart(2, '0')}.${String(month).padStart(2, '0')}.${ru[3]}`;
+  }
+  return null;
+}
+
+function formatDatePhraseForLocale(ddMmYyyy: string, locale: string): string {
+  const [d, m, y] = ddMmYyyy.split('.');
+  const date = new Date(parseInt(y, 10), parseInt(m, 10) - 1, parseInt(d, 10));
+  if (isNaN(date.getTime())) return ddMmYyyy;
+  try {
+    return new Intl.DateTimeFormat(locale, { day: 'numeric', month: 'long', year: 'numeric' }).format(date);
+  } catch {
+    return ddMmYyyy;
+  }
+}
 
 function replaceNumbersAndDates(
   targetText: string,
@@ -729,16 +962,24 @@ function replaceNumbersAndDates(
   sourceSegmentText: string,
   targetLocale: string,
 ): { applied: boolean; result: string } {
-  // Strip formatting tags so extraction sees one date token (e.g. "18.11.2025 14:43:48") not "{{0}}18.11.2025{{/0}}" -> 3 tokens
   const cleanSource = stripFormattingTags(sourceText);
   const cleanSourceSegment = stripFormattingTags(sourceSegmentText);
-  const cleanTarget = stripFormattingTags(targetText);
+  let cleanTarget = stripFormattingTags(targetText);
   const sourceNumbers = extractNumbersAndDates(cleanSource);
   const sourceSegmentNumbers = extractNumbersAndDates(cleanSourceSegment);
+
+  // Replace full date phrase in target with segment date so month is correct (e.g. "29 September 2025" -> "29 October 2025")
+  const targetDateMatch = cleanTarget.match(TARGET_DATE_PHRASE);
+  const segmentDateStr = parseSegmentDateToDDMMYYYY(cleanSourceSegment);
+  if (targetDateMatch && segmentDateStr) {
+    const formatted = formatDatePhraseForLocale(segmentDateStr, targetLocale || 'en');
+    cleanTarget = cleanTarget.replace(TARGET_DATE_PHRASE, formatted);
+  }
+
   const targetNumbers = extractNumbersAndDates(cleanTarget);
 
-  // Special case: both sources have a single date+time token, target is already localized
-  // (e.g. target "18 November 2025 14:43:48" has no numeric date, so token count mismatches)
+  // Special case: both sources have a single date+time token, target is already localized (e.g. "18 November 2025 18:40:47")
+  // Replace the full date+time in target with segment's date+time so day/month come from segment, not TM
   if (
     sourceNumbers.length === 1 &&
     sourceSegmentNumbers.length === 1 &&
@@ -747,66 +988,167 @@ function replaceNumbersAndDates(
     cleanTarget.match(TIME_IN_TARGET)
   ) {
     const segmentDateValue = sourceSegmentNumbers[0].value;
-    const newTimeMatch = segmentDateValue.match(TIME_IN_TARGET);
-    if (newTimeMatch) {
-      // Replace only the time in target so we keep the existing date format (e.g. "18 November 2025")
-      const newTime = newTimeMatch[0];
-      const result = targetText.replace(TIME_IN_TARGET, newTime);
-      return { applied: true, result };
+    const timeMatch = segmentDateValue.match(TIME_IN_TARGET);
+    const dateOnly = (segmentDateValue.trim().split(/\s+(?=\d{1,2}:\d{2})/)[0]) ?? segmentDateValue.trim();
+    const ddMmYyyy = parseSegmentDateToDDMMYYYY(dateOnly);
+    const formattedDate = ddMmYyyy
+      ? formatDatePhraseForLocale(ddMmYyyy, targetLocale || 'en')
+      : formatDateForLocale(dateOnly, targetLocale || 'en');
+    const newDateAndTime = timeMatch ? `${formattedDate} ${timeMatch[0]}` : formattedDate;
+    const targetDateTimePattern = /\b\d{1,2}\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}\s+\d{1,2}:\d{2}(?::\d{2})?/i;
+    if (targetDateTimePattern.test(cleanTarget)) {
+      const r = cleanTarget.replace(targetDateTimePattern, newDateAndTime);
+      return { applied: true, result: applyClauseSectionFromSegment(r, sourceSegmentText) };
     }
-    // No time in segment (date only): replace full target with formatted date
-    const newFormatted = formatDateForLocale(segmentDateValue, targetLocale || 'en');
-    return { applied: true, result: newFormatted };
+    if (timeMatch) {
+      const r = cleanTarget.replace(TIME_IN_TARGET, timeMatch[0]);
+      return { applied: true, result: applyClauseSectionFromSegment(r, sourceSegmentText) };
+    }
+    const r = formatDateForLocale(segmentDateValue, targetLocale || 'en');
+    return { applied: true, result: applyClauseSectionFromSegment(r, sourceSegmentText) };
   }
 
-  const sameCount =
-    sourceNumbers.length === sourceSegmentNumbers.length &&
-    targetNumbers.length === sourceSegmentNumbers.length;
-  if (!sameCount || sourceNumbers.length === 0) {
-    // Different number of tokens or no numbers - do not propagate (caller will skip this segment)
+  // Require only segment and target to have the same token count so we can substitute segment numbers into target.
+  // TM source may have different structure (e.g. different wording) and is not used for the mapping.
+  const sameCount = targetNumbers.length === sourceSegmentNumbers.length && sourceSegmentNumbers.length > 0;
+  if (!sameCount) {
+    // Fallback 1: replace subsection numbers (X.X.Y e.g. 5.1.8, 5.1.12) so "sub-clause 5.1.12" -> "sub-clause 5.1.8"
+    const subsectionPattern = /\d{1,2}\.\d{1,2}\.\d{1,2}/g;
+    const segmentSubsections = cleanSourceSegment.match(subsectionPattern) || [];
+    const targetSubsections = cleanTarget.match(subsectionPattern) || [];
+    if (
+      segmentSubsections.length > 0 &&
+      segmentSubsections.length === targetSubsections.length
+    ) {
+      let fallbackResult = cleanTarget;
+      for (let i = 0; i < targetSubsections.length; i++) {
+        if (targetSubsections[i] !== segmentSubsections[i]) {
+          const re = new RegExp(targetSubsections[i].replace(/\./g, '\\.'), 'g');
+          fallbackResult = fallbackResult.replace(re, segmentSubsections[i]);
+        }
+      }
+      if (fallbackResult !== cleanTarget) {
+        return { applied: true, result: applyClauseSectionFromSegment(fallbackResult, sourceSegmentText) };
+      }
+    }
+    // Fallback 2: replace clause (X.Y) and section (N) when segment has "пункте 1.1" / "разделе 10" and target has "clause 1.3" / "section 18"
+    const segmentClauseMatch = cleanSourceSegment.match(/(?:пункте|п\.)\s*(\d{1,2}[.,]\d{1,2})/i);
+    const segmentSectionMatch = cleanSourceSegment.match(/разделе?\s*(\d+)/i);
+    const targetClauseMatch = cleanTarget.match(/clause\s+(\d{1,2}\.\d{1,2})\b/i);
+    const targetSectionMatch = cleanTarget.match(/section\s+(\d+)\b/i);
+    const segmentClause = segmentClauseMatch ? segmentClauseMatch[1].replace(',', '.') : null;
+    const segmentSection = segmentSectionMatch ? segmentSectionMatch[1] : null;
+    const targetClause = targetClauseMatch ? targetClauseMatch[1] : null;
+    const targetSection = targetSectionMatch ? targetSectionMatch[1] : null;
+    let clauseSectionResult = cleanTarget;
+    if (segmentClause && targetClause && segmentClause !== targetClause) {
+      clauseSectionResult = clauseSectionResult.replace(
+        new RegExp(`(clause\\s+)${targetClause.replace(/\./g, '\\.')}\\b`, 'gi'),
+        `$1${segmentClause}`,
+      );
+    }
+    if (segmentSection && targetSection && segmentSection !== targetSection) {
+      clauseSectionResult = clauseSectionResult.replace(
+        new RegExp(`(section\\s+)${targetSection}\\b`, 'gi'),
+        `$1${segmentSection}`,
+      );
+    }
+    if (clauseSectionResult !== cleanTarget) {
+      return { applied: true, result: applyClauseSectionFromSegment(clauseSectionResult, sourceSegmentText) };
+    }
     return { applied: false, result: targetText };
   }
-  
-  // Replace numbers in target text
-  let result = targetText;
-  let offset = 0;
-  
-  // Sort target numbers by index (descending) to replace from end to start
+
+  let result = cleanTarget;
   const sortedTargetNumbers = [...targetNumbers].sort((a, b) => b.index - a.index);
-  
+
   for (const targetNum of sortedTargetNumbers) {
     const targetIndex = targetNumbers.indexOf(targetNum);
-    
-    if (targetIndex >= 0 && targetIndex < sourceNumbers.length && targetIndex < sourceSegmentNumbers.length) {
-      const segmentValue = sourceSegmentNumbers[targetIndex].value;
-      const sourceType = sourceNumbers[targetIndex].type;
+
+    if (targetIndex >= 0 && targetIndex < sourceSegmentNumbers.length) {
+      const segmentToken = sourceSegmentNumbers[targetIndex];
+      const segmentValue = segmentToken.value;
+      const sourceType = segmentToken.type;
+      const start = targetNum.index;
+      const end = targetNum.index + targetNum.value.length;
 
       if (targetNum.type === 'phone' && sourceType === 'phone') {
-        // Phone: use segment value as-is (no locale formatting to avoid breaking +7 (701) 719-1101)
-        result = result.substring(0, targetNum.index + offset) +
-                 segmentValue +
-                 result.substring(targetNum.index + targetNum.value.length + offset);
-        offset += segmentValue.length - targetNum.value.length;
+        result = result.substring(0, start) + segmentValue + result.substring(end);
       } else if (targetNum.type === 'date' && sourceType === 'date') {
         const formattedDate = formatDateForLocale(segmentValue, targetLocale);
-        result = result.substring(0, targetNum.index + offset) +
-                 formattedDate +
-                 result.substring(targetNum.index + targetNum.value.length + offset);
-        offset += formattedDate.length - targetNum.value.length;
+        result = result.substring(0, start) + formattedDate + result.substring(end);
       } else if (targetNum.type === 'number' && sourceType === 'number') {
-        // Section numbers (XX.XX.XX) must not be formatted - parseFloat would truncate to 11.04
-        const replacement = SECTION_NUMBER_PATTERN.test(segmentValue)
-          ? segmentValue
-          : formatNumberForLocale(segmentValue, targetLocale);
-        result = result.substring(0, targetNum.index + offset) +
-                 replacement +
-                 result.substring(targetNum.index + targetNum.value.length + offset);
-        offset += replacement.length - targetNum.value.length;
+        const targetVal = targetNum.value;
+        const isPlainInteger = (s: string) => /^\d+$/.test(s.replace(/%/g, ''));
+        const targetSnippet = result.substring(Math.max(0, start - 60), end + 60);
+        const replacement =
+          SECTION_NUMBER_PATTERN.test(segmentValue)
+            ? segmentValue
+            : isPlainInteger(segmentValue) && isPlainInteger(targetVal)
+              ? segmentValue
+              : formatNumberForLocale(segmentValue, targetLocale, { targetSnippet });
+        result = result.substring(0, start) + replacement + result.substring(end);
       }
     }
   }
-  
+
+  result = applyClauseSectionFromSegment(result, sourceSegmentText);
   return { applied: true, result };
+}
+
+/**
+ * Return the TM target with numbers/dates from the segment source substituted in when possible.
+ * Tries substitution whenever segment and TM have the same number of number/date tokens (e.g.
+ * amount, tyin, 2027, 12, 20), so a 92% match from a similar clause gets the right figures.
+ */
+export function applyTmMatchWithNumberSubstitution(
+  tmTarget: string,
+  tmSource: string,
+  segmentSource: string,
+  targetLocale: string,
+): { applied: boolean; result: string } {
+  const { applied, result } = replaceNumbersAndDates(tmTarget, tmSource, segmentSource, targetLocale);
+  if (!applied) {
+    // Still try clause/section fix on raw TM target (e.g. "clause 1.3" / "section 18" -> segment "пункте 1.1" / "разделе 10")
+    const clauseSectionFixed = applyClauseSectionFromSegment(tmTarget, segmentSource);
+    if (clauseSectionFixed !== tmTarget && isValidReplacement(tmTarget, clauseSectionFixed, tmSource, segmentSource)) {
+      return { applied: true, result: clauseSectionFixed };
+    }
+    return { applied: false, result: tmTarget };
+  }
+  if (!isValidReplacement(tmTarget, result, tmSource, segmentSource)) {
+    return { applied: false, result: tmTarget };
+  }
+  // Final pass: ensure leading section (e.g. «3.3.3. ) and clause/section from segment are applied
+  const finalResult = applyClauseSectionFromSegment(result, segmentSource);
+  return { applied: true, result: finalResult };
+}
+
+/**
+ * Apply TM match to a segment using backend substitution (numbers, dates, clause/section, leading «X.X.X.).
+ * Used when the user applies a TM suggestion from the panel so the same logic as pretranslate runs.
+ */
+export async function applyTmMatchForSegment(
+  segmentId: string,
+  tmTarget: string,
+  tmSource: string,
+): Promise<{ targetText: string }> {
+  const segment = await getSegment(segmentId);
+  const document = segment.document as { targetLocale: string };
+  if (!document?.targetLocale) {
+    return { targetText: tmTarget };
+  }
+  const substituted = applyTmMatchWithNumberSubstitution(
+    tmTarget,
+    tmSource,
+    segment.sourceText,
+    document.targetLocale,
+  );
+  const targetText = ensureLeadingSectionFromSegment(
+    substituted.applied ? substituted.result : tmTarget,
+    segment.sourceText,
+  );
+  return { targetText };
 }
 
 /**
@@ -819,11 +1161,6 @@ function isValidReplacement(
   originalSource: string,
   newSource: string,
 ): boolean {
-  // If replacement didn't change anything, it's valid
-  if (originalTarget === replacedTarget) {
-    return true;
-  }
-  
   // Check if replacement contains obviously wrong patterns
   // 1. Check for malformed numbers (e.g., "108/11/20010" instead of "11.08.01")
   const malformedNumberPattern = /\d{3,}\/\d{1,2}\/\d{4,}/; // Pattern like "108/11/20010"
@@ -878,8 +1215,67 @@ function isValidReplacement(
   if (simpleNumberPattern.test(originalSource) && complexDatePattern.test(replacedTarget)) {
     return false;
   }
-  
+
+  // 6. Reject subsection number with trailing digits (e.g. "5.1.5.1000" or "5.1.5.1000of" when segment has "5.1.5")
+  const subsectionWithTrailingDigits = /\d{1,2}\.\d{1,2}\.\d{1,2}\.\d+/;
+  if (subsectionWithTrailingDigits.test(replacedTarget) && !subsectionWithTrailingDigits.test(originalTarget)) {
+    return false;
+  }
+
+  // 7. Reject clause number corrupted to decimal (e.g. "5.10" when segment has "5.1" for clause 5.1)
+  const clauseInSegment = newSource.match(/\b(\d{1,2})\.(\d)\b/);
+  if (clauseInSegment) {
+    const [, major, minor] = clauseInSegment;
+    const wrongDecimal = new RegExp(`\\b${major}\\.${minor}\\d+\\b`);
+    if (wrongDecimal.test(replacedTarget) && !wrongDecimal.test(originalTarget)) {
+      return false;
+    }
+  }
+
+  // 8. Reject when segment and TM source have different entity names (e.g. " - ТОО «ЭнергоСтройПроект»" vs " - ABM-Building 2007")
+  const entityNew = extractEntityAfterDash(newSource);
+  const entityOrig = extractEntityAfterDash(originalSource);
+  if (
+    entityNew &&
+    entityOrig &&
+    entityNew.length > 2 &&
+    entityOrig.length > 2 &&
+    !differsOnlyByNumbers(entityNew, entityOrig)
+  ) {
+    return false;
+  }
+
+  // 9. Reject when segment and TM source have different district/location (e.g. "район Алматы" vs "район Sarayshyk")
+  const districtNew = extractDistrictName(newSource);
+  const districtOrig = extractDistrictName(originalSource);
+  if (
+    districtNew &&
+    districtOrig &&
+    districtNew.length > 1 &&
+    districtOrig.length > 1 &&
+    !differsOnlyByNumbers(districtNew, districtOrig)
+  ) {
+    return false;
+  }
+
+  // If we reach here and nothing was rejected, replacement is acceptable
+  if (originalTarget === replacedTarget) {
+    return true;
+  }
+
   return true;
+}
+
+/** Extract the entity part after " - " and before "," (e.g. company name in "1.1.2 «X» - CompanyName, having...") */
+function extractEntityAfterDash(text: string): string | null {
+  const match = text.match(/\s-\s+([^,]+)/);
+  return match ? match[1].trim() : null;
+}
+
+/** Extract district/location name (e.g. "район Алматы" -> "Алматы", "district Sarayshyk" -> "Sarayshyk") */
+function extractDistrictName(text: string): string | null {
+  const match = text.match(/(?:район|district)\s+([^,]+)/i);
+  return match ? match[1].trim() : null;
 }
 
 /**

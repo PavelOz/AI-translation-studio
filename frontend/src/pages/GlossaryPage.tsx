@@ -92,9 +92,40 @@ export default function GlossaryPage() {
     }
   });
 
+  const [isExporting, setIsExporting] = useState(false);
+
   const handleAddEntry = () => {
     setEditingEntry(null);
     setIsEntryModalOpen(true);
+  };
+
+  const handleExport = async () => {
+    if (!sourceLocaleFilter || !targetLocaleFilter) {
+      toast.error('Please set Source and Target language filters to export');
+      return;
+    }
+    setIsExporting(true);
+    try {
+      await glossaryApi.export(sourceLocaleFilter, targetLocaleFilter, projectFilter || undefined);
+      toast.success('Glossary exported');
+    } catch (e: any) {
+      let msg = 'Export failed';
+      const data = e.response?.data;
+      if (data?.message) {
+        msg = data.message;
+      } else if (data instanceof Blob) {
+        try {
+          const text = await data.text();
+          const j = JSON.parse(text);
+          if (j?.message) msg = j.message;
+        } catch {
+          // ignore
+        }
+      }
+      toast.error(msg);
+    } finally {
+      setIsExporting(false);
+    }
   };
 
   const handleEditEntry = (entry: GlossaryEntry) => {
@@ -164,6 +195,14 @@ export default function GlossaryPage() {
               className="btn btn-secondary"
             >
               Import CSV
+            </button>
+            <button
+              onClick={handleExport}
+              className="btn btn-secondary"
+              disabled={isExporting || !sourceLocaleFilter || !targetLocaleFilter}
+              title={!sourceLocaleFilter || !targetLocaleFilter ? 'Set source and target language filters to export' : 'Export glossary as CSV (same format as import)'}
+            >
+              {isExporting ? 'Exporting…' : 'Export CSV'}
             </button>
             <button
               onClick={handleAddEntry}
@@ -477,6 +516,14 @@ export default function GlossaryPage() {
                       className="btn btn-secondary"
                     >
                       Import CSV File
+                    </button>
+                    <button
+                      onClick={handleExport}
+                      className="btn btn-secondary"
+                      disabled={isExporting || !sourceLocaleFilter || !targetLocaleFilter}
+                      title={!sourceLocaleFilter || !targetLocaleFilter ? 'Set source and target language filters to export' : undefined}
+                    >
+                      {isExporting ? 'Exporting…' : 'Export CSV'}
                     </button>
                     <button
                       onClick={handleAddEntry}

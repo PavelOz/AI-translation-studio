@@ -90,6 +90,30 @@ export const glossaryApi = {
     return response.data;
   },
 
+  /** Export glossary as CSV (same format as import: term_source, term_target, notes, forbidden). */
+  export: async (
+    sourceLocale: string,
+    targetLocale: string,
+    projectId?: string,
+  ): Promise<void> => {
+    const params = new URLSearchParams({ sourceLocale, targetLocale });
+    if (projectId) params.set('projectId', projectId);
+    const response = await apiClient.get(`/glossary/export?${params.toString()}`, {
+      responseType: 'blob',
+    });
+    const blob = response.data as Blob;
+    const filename = `glossary-${sourceLocale}-${targetLocale}${projectId ? `-${projectId.slice(0, 8)}` : ''}.csv`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 200);
+  },
+
   getGlossary: async (documentId: string): Promise<Array<{
     id: string;
     sourceTerm: string;

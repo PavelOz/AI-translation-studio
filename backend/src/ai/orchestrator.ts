@@ -783,6 +783,8 @@ ${projectKnowledgeBase}${this.buildNamingConventionsObeyBlock(options.documentDn
         'Examples: "legal term", "past tense", "technical spec", "idiomatic expression", "formal register", "glossary match".',
       ]),
       '',
+      'CRITICAL: Return exactly one JSON object per segment, in the SAME ORDER as the segments below. Use the exact segment_id from each "ID: ..." line. Each target_text must be the translation of that segment\'s Source only—do not reuse text from context or other segments.',
+      '',
       // Previous context (if provided)
       ...(prevContext ? [
         '=== PREVIOUS CONTEXT (FOR REFERENCE ONLY - DO NOT TRANSLATE) ===',
@@ -1054,6 +1056,8 @@ ${projectKnowledgeBase}${this.buildNamingConventionsObeyBlock(options.documentDn
     }
 
     const map = new Map<string, { targetText: string; analysis?: string; expandedTerms?: string[] }>();
+    /** Parsed entries in JSON array order — used for order-based fallback when segment_id is missing/wrong */
+    const orderedParsed: Array<{ targetText: string; analysis?: string; expandedTerms?: string[] }> = [];
     parsed.forEach((entry: any) => {
       // Support both old format (target_mt) and new format (target_text) for backward compatibility
       const targetField = entry.target_text || entry.target_mt;
@@ -1098,7 +1102,9 @@ ${projectKnowledgeBase}${this.buildNamingConventionsObeyBlock(options.documentDn
           }, 'Tag Validation Failed');
         }
         
-        map.set(entry.segment_id, { targetText, analysis, expandedTerms });
+        const value = { targetText, analysis, expandedTerms };
+        map.set(entry.segment_id, value);
+        orderedParsed.push(value);
       }
     });
 
@@ -1107,9 +1113,11 @@ ${projectKnowledgeBase}${this.buildNamingConventionsObeyBlock(options.documentDn
     }
 
     // Validate that translations are actually different from source text
-    return fallbackSegments.map((segment) => {
-      const entry = map.get(segment.segmentId);
-      const targetText = entry?.targetText ?? segment.sourceText;
+    // When segment_id lookup fails but we have one result per segment in order, use position (fixes AI returning wrong/missing segment_ids)
+    const useOrderFallback = orderedParsed.length === fallbackSegments.length;
+    return fallbackSegments.map((segment, i) => {
+      const entry = map.get(segment.segmentId) ?? (useOrderFallback && orderedParsed[i] ? orderedParsed[i] : undefined);
+      let targetText = entry?.targetText ?? segment.sourceText;
       
       // Remove formatting tags for comparison
       const sourceTextClean = segment.sourceText.replace(/\{\{\/?\d+\}\}/g, '').trim();

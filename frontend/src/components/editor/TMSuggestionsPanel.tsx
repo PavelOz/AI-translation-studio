@@ -485,12 +485,18 @@ export default function TMSuggestionsPanel({
       return;
     }
 
-    // Process the match to get repaired target (with numbers fixed)
-    const { repairedTarget } = processTmMatch(
-      sourceText,
-      suggestion.sourceText,
-      suggestion.targetText
-    );
+    // Use backend substitution (numbers, dates, «X.X.X., clause/section) so 90% / meaning matches get correct values
+    let repairedTarget: string;
+    try {
+      const { targetText } = await segmentsApi.applyTmMatch(segmentId, {
+        tmTarget: suggestion.targetText,
+        tmSource: suggestion.sourceText,
+      });
+      repairedTarget = targetText;
+    } catch {
+      const processed = processTmMatch(sourceText, suggestion.sourceText, suggestion.targetText);
+      repairedTarget = processed.repairedTarget;
+    }
 
     // Determine if this is a sentence-level match
     const isSentence = suggestion.entryType === 'sentence';

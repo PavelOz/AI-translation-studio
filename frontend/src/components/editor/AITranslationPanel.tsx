@@ -731,9 +731,6 @@ export default function AITranslationPanel({
   };
 
   const handleApply = async () => {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AITranslationPanel.tsx:733',message:'handleApply called',data:{hasTranslation:!!translation.trim(),translationLength:translation.trim().length,segmentId,translationPreview:translation.trim().substring(0,50)},timestamp:Date.now(),runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
     if (!translation.trim()) {
       toast.error('No translation to apply');
       return;
@@ -745,32 +742,17 @@ export default function AITranslationPanel({
     }
 
     try {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AITranslationPanel.tsx:746',message:'Calling segmentsApi.update',data:{segmentId,targetFinal:translation.trim().substring(0,50),status:'MT'},timestamp:Date.now(),runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
       // Update the segment with the AI translation
       const updateResult = await segmentsApi.update(segmentId, {
         targetFinal: translation.trim(),
         status: 'MT',
       });
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AITranslationPanel.tsx:750',message:'segmentsApi.update completed',data:{segmentId,resultTargetFinal:updateResult.targetFinal?.substring(0,50),resultTargetMt:updateResult.targetMt?.substring(0,50),resultStatus:updateResult.status,hasTargetFinal:!!updateResult.targetFinal,hasTargetMt:!!updateResult.targetMt},timestamp:Date.now(),runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
 
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AITranslationPanel.tsx:752',message:'Calling onApply callback',data:{segmentId,translationText:translation.trim().substring(0,50),hasOnApply:typeof onApply === 'function'},timestamp:Date.now(),runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-      // #endregion
       // Notify parent component to update local state immediately
       onApply(translation.trim());
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AITranslationPanel.tsx:753',message:'onApply callback completed',data:{segmentId},timestamp:Date.now(),runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-      // #endregion
 
       toast.success('AI translation applied to segment');
     } catch (error: any) {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'AITranslationPanel.tsx:755',message:'handleApply error',data:{segmentId,errorMessage:error.message,errorResponse:error.response?.data},timestamp:Date.now(),runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
       const errorMessage = error.response?.data?.message || error.message || 'Failed to apply translation';
       toast.error(errorMessage);
       console.error('Failed to apply AI translation:', error);

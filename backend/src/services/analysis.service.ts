@@ -396,10 +396,6 @@ const extractFrequentTerms = (text: string, mode: 'fast' | 'deep' = 'fast'): str
   // Fast mode: Require 2+ occurrences (traditional frequency threshold)
   const minFrequency = mode === 'deep' ? 1 : 2;
   
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:186',message:'Frequency filtering params',data:{mode,minFrequency,totalPhrases:phraseFrequency.size},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-  // #endregion
-  
   // Filter: return phrases that meet frequency threshold
   const frequentPhrases = Array.from(phraseFrequency.entries())
     .filter(([phrase, count]) => {
@@ -410,9 +406,6 @@ const extractFrequentTerms = (text: string, mode: 'fast' | 'deep' = 'fast'): str
       if (mode === 'deep' && count === 1) {
         const wordCount = phrase.split(/\s+/).length;
         if (wordCount >= 2) {
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:195',message:'Deep mode: Accepting 1-freq phrase',data:{mode,phrase,wordCount,count,isRelevant:isRelevant(phrase)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-          // #endregion
           return isRelevant(phrase);
         }
       }
@@ -640,17 +633,11 @@ const cleanTargetTerm = (targetTerm: string): string => {
         // Try to extract target_mt from first item
         if (parsed[0].target_mt) {
           const extracted = parsed[0].target_mt.trim();
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:352',message:'Cleaned targetTerm from JSON array',data:{originalLength:targetTerm.length,extractedLength:extracted.length,originalPreview:targetTerm.substring(0,50)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'N'})}).catch(()=>{});
-          // #endregion
           return extracted;
         }
       }
     } catch (e) {
       // If JSON parsing fails, return original
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:365',message:'Failed to parse targetTerm as JSON, using original',data:{error:String(e)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'N'})}).catch(()=>{});
-      // #endregion
     }
   }
   
@@ -682,10 +669,6 @@ Term: ${sourceTerm}`;
     translationModel = 'gemini-2.0-flash';
   }
 
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:364',message:'Calling AI for term translation',data:{sourceTerm,sourceTermLength:sourceTerm.length,originalModel:model,translationModel,maxTokens:200},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-  // #endregion
-
   try {
     const response = await provider.callModel({
       prompt: translationPrompt,
@@ -696,10 +679,6 @@ Term: ${sourceTerm}`;
       maxTokens: translationModel.includes('2.5-pro') ? 2000 : (translationModel.includes('2.5-flash') ? 1000 : 200),
       segments: [],
     });
-
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:376',message:'AI translation response received',data:{sourceTerm,rawResponse:response.outputText,rawResponseLength:response.outputText.length,trimmedResponse:response.outputText.trim(),trimmedLength:response.outputText.trim().length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-    // #endregion
 
     let translated = response.outputText.trim();
     
@@ -721,9 +700,6 @@ Term: ${sourceTerm}`;
       }
       if (cleanedTranslation) {
         translated = cleanedTranslation;
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:493',message:'Cleaned THINK: leakage from translation',data:{sourceTerm,originalResponse:response.outputText.substring(0,200),cleanedTranslation:translated},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-        // #endregion
       } else {
         // Fallback: try to extract text after quotes or last meaningful sentence
         const quoteMatch = translated.match(/"([^"]+)"/);
@@ -740,29 +716,14 @@ Term: ${sourceTerm}`;
         const parsed = JSON.parse(translated);
         if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].target_mt) {
           translated = parsed[0].target_mt.trim();
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:391',message:'Extracted target_mt from JSON response',data:{sourceTerm,extractedTranslation:translated},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'M'})}).catch(()=>{});
-          // #endregion
         }
       } catch (e) {
         // If JSON parsing fails, use original response
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:397',message:'JSON parsing failed, using original response',data:{sourceTerm,error:String(e)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'M'})}).catch(()=>{});
-        // #endregion
       }
     }
     
-    // #region agent log
-    const isNotTranslated = translated === sourceTerm || translated.trim() === sourceTerm.trim();
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:381',message:'AI translation result',data:{sourceTerm,translated,isNotTranslated,rawResponse:response.outputText},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
-    // #endregion
-    
     return translated;
   } catch (error: any) {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:390',message:'AI translation failed, using fallback',data:{sourceTerm,error:error.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
-    // #endregion
-    
     logger.warn(
       {
         sourceTerm,
@@ -1018,18 +979,11 @@ const getSampledText = (allSegments: Array<{ sourceText: string; orderIndex: num
   // Find the last occurrence of any annex/table keyword
   for (const keyword of annexKeywords) {
     const lastIndex = fullTextLower.lastIndexOf(keyword);
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:940',message:'Smart Anchor search',data:{keyword,lastIndex,fullTextLength:fullText.length,fullTextSample:fullText.slice(Math.max(0,lastIndex-100),Math.min(fullText.length,lastIndex+100))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
-    // #endregion
     if (lastIndex > anchorIndex) {
       anchorIndex = lastIndex;
       anchorKeyword = keyword;
     }
   }
-  
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:950',message:'Smart Anchor result',data:{anchorIndex,anchorKeyword,found:anchorIndex>=0,fullTextLength:fullText.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
-  // #endregion
   
   let start: string;
   let end: string;
@@ -1046,10 +1000,6 @@ const getSampledText = (allSegments: Array<{ sourceText: string; orderIndex: num
     // Return ONLY endText (Annexes), ignore document start to reduce context crowding
     sampled = end;
     smartSliceUsed = true;
-    
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:970',message:'Extreme Diet executed',data:{anchorIndex,anchorKeyword,startIndex,endIndex,endLength:end.length,sampledLength:sampled.length,fullTextLength:fullText.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
-    // #endregion
     
     logger.info(
       {
@@ -1498,13 +1448,7 @@ const extractFastCandidatesWithNLP = (text: string): Array<{ term: string; count
 };
 
 const selectCandidates = (text: string, mode: 'fast' | 'deep', documentId?: string): string[] => {
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1268',message:'selectCandidates entry',data:{mode,textLength:text.length,hasNewlines:text.includes('\n'),newlineCount:(text.match(/\n/g)||[]).length,textSample:text.slice(0,500)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
-  // #endregion
   console.log('[Stage 2 Debug] Raw Text Sample:', text.slice(0, 500));
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1269',message:'Raw text sample logged to console',data:{textSample:text.slice(0,500)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
-  // #endregion
   
   // 1. Candidate Extraction: Use NLP for Fast Mode, N-grams for Deep Mode
   let allPhrases: Array<{ term: string; count: number }>;
@@ -1530,9 +1474,6 @@ const selectCandidates = (text: string, mode: 'fast' | 'deep', documentId?: stri
   if (mode === 'deep') {
     // Split text into lines to catch Table Rows
     const lines = text.split(/\n+/);
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1280',message:'After split by newlines',data:{totalLines:lines.length,first10Lines:lines.slice(0,10).map((l,i)=>({index:i,length:l.length,trimmedLength:l.trim().length,startsWith:l.trim().substring(0,20),hasContent:l.trim().length>0}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
-    // #endregion
     
     // Helper: Strip formatting tags ({{0}}, {{/0}}, etc.) to get actual content
     const stripFormattingTags = (text: string): string => {
@@ -1544,9 +1485,6 @@ const selectCandidates = (text: string, mode: 'fast' | 'deep', documentId?: stri
     const tableRowCandidates = lines
       .map(line => line.trim())
       .filter((line, index) => {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1294',message:'Filtering line (pre-check)',data:{index,originalLength:line.length,trimmedLength:line.trim().length,isEmpty:line.trim().length===0,lineSample:line.trim().substring(0,60)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H5'})}).catch(()=>{});
-        // #endregion
         if (line.trim().length === 0) return false; // Skip empty lines
         
         // Strip formatting tags before checking content density
@@ -1564,16 +1502,9 @@ const selectCandidates = (text: string, mode: 'fast' | 'deep', documentId?: stri
         // Content Density Check: 13-300 chars (reduced to catch "Очки защитные"=13 chars), at least 2 words (reduced to catch "Каска защитная")
         const isCandidate = length >= 13 && length <= 300 && wordCount >= 2;
         
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1302',message:'Content density check (with tag stripping)',data:{index,originalLength:line.length,cleanLength:length,wordCount,isCandidate,originalSample:line.substring(0,60),cleanSample:cleanLine.substring(0,60),firstChar:cleanLine.substring(0,1),first3Chars:cleanLine.substring(0,3)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H2'})}).catch(()=>{});
-        // #endregion
-        
         return isCandidate;
       })
       .map(line => stripFormattingTags(line)); // Return clean lines without formatting tags
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1296',message:'Table row candidates result',data:{tableRowCount:tableRowCandidates.length,first5Candidates:tableRowCandidates.slice(0,5).map(c=>c.substring(0,80))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'ALL'})}).catch(()=>{});
-    // #endregion
     
     // Clean table row candidates before merging
     const cleanedTableRows = cleanCandidates(tableRowCandidates);
@@ -2113,9 +2044,6 @@ const addExecutionLog = async (
   documentId: string,
   entry: Omit<LogEntry, 'timestamp'>
 ): Promise<void> => {
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1420',message:'addExecutionLog called',data:{documentId,stage:entry.stage,level:entry.level},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-  // #endregion
   try {
     const logEntry: LogEntry = {
       ...entry,
@@ -2124,9 +2052,6 @@ const addExecutionLog = async (
 
     // Check if executionLogs column exists first
     try {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1430',message:'Checking column existence',data:{documentId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
       const columnCheck = await prisma.$queryRawUnsafe<Array<{ column_name: string }>>(`
         SELECT column_name 
         FROM information_schema.columns 
@@ -2134,9 +2059,6 @@ const addExecutionLog = async (
           AND column_name = 'executionLogs'
       `);
       
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1438',message:'Column check result',data:{documentId,columnExists:columnCheck?.length>0,columnCheckLength:columnCheck?.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
       
       if (!columnCheck || columnCheck.length === 0) {
         // Column doesn't exist - log WARNING (not just debug) so it's visible
@@ -2144,9 +2066,6 @@ const addExecutionLog = async (
           { documentId, stage: entry.stage },
           '⚠️ executionLogs column does not exist - logs are NOT being saved! Run migration: ALTER TABLE "DocumentAnalysis" ADD COLUMN IF NOT EXISTS "executionLogs" JSONB;',
         );
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1445',message:'Column does not exist - returning early',data:{documentId,stage:entry.stage},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
         return;
       }
     } catch (checkError: any) {
@@ -2155,24 +2074,14 @@ const addExecutionLog = async (
         { documentId, error: checkError.message },
         'Could not check for executionLogs column - skipping log storage',
       );
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1453',message:'Column check failed',data:{documentId,error:checkError.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
       return;
     }
 
     // Use raw SQL to get current logs (works even if Prisma client is out of sync)
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1462',message:'Fetching DocumentAnalysis record via raw SQL',data:{documentId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-    // #endregion
     const result = await prisma.$queryRawUnsafe<Array<{ executionLogs: any; id: string }>>(
       `SELECT id, "executionLogs" FROM "DocumentAnalysis" WHERE "documentId" = $1`,
       documentId
     );
-
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1468',message:'DocumentAnalysis record check result',data:{documentId,recordExists:!!result?.[0],hasLogs:!!result?.[0]?.executionLogs,currentLogCount:Array.isArray(result?.[0]?.executionLogs)?(result[0].executionLogs as any[]).length:'not-array'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-    // #endregion
 
     let currentLogs: LogEntry[] = [];
     let analysisId: string | null = null;
@@ -2185,9 +2094,6 @@ const addExecutionLog = async (
     } else {
       // Analysis doesn't exist yet - try to create it using raw SQL
       try {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1474',message:'Creating DocumentAnalysis record via raw SQL',data:{documentId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
         const createResult = await prisma.$executeRawUnsafe(`
           INSERT INTO "DocumentAnalysis" ("id", "documentId", "status", "executionLogs", "createdAt", "updatedAt")
           VALUES (gen_random_uuid(), $1, 'RUNNING', '[]'::jsonb, NOW(), NOW())
@@ -2203,18 +2109,12 @@ const addExecutionLog = async (
         if (newResult && newResult[0]) {
           analysisId = newResult[0].id;
         }
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1483',message:'DocumentAnalysis record created or already exists',data:{documentId,analysisId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
       } catch (createError: any) {
         // If creation fails (e.g., document doesn't exist), log and skip
         logger.debug(
           { documentId, stage: entry.stage, error: createError.message },
           'Could not create DocumentAnalysis record for logging - skipping log storage',
         );
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1490',message:'Failed to create DocumentAnalysis record',data:{documentId,error:createError.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
         return;
       }
     }
@@ -2234,9 +2134,6 @@ const addExecutionLog = async (
 
     // Update executionLogs using raw SQL (works even if Prisma client is out of sync)
     try {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1500',message:'Updating executionLogs via raw SQL',data:{documentId,currentCount:currentLogs.length,newCount:trimmedLogs.length,stage:entry.stage},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-      // #endregion
       await prisma.$executeRawUnsafe(
         `UPDATE "DocumentAnalysis" SET "executionLogs" = $1::jsonb, "updatedAt" = NOW() WHERE "documentId" = $2`,
         JSON.stringify(trimmedLogs),
@@ -2247,18 +2144,12 @@ const addExecutionLog = async (
         { documentId, stage: entry.stage, totalLogs: trimmedLogs.length },
         'Added execution log successfully',
       );
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1512',message:'Successfully updated executionLogs',data:{documentId,stage:entry.stage,totalLogs:trimmedLogs.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-      // #endregion
     } catch (updateError: any) {
       // If update fails, log the error but don't throw
       logger.warn(
         { documentId, stage: entry.stage, error: updateError.message },
         'Failed to update executionLogs - record may not exist yet',
       );
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1522',message:'Failed to update executionLogs',data:{documentId,stage:entry.stage,error:updateError.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-      // #endregion
     }
   } catch (error: any) {
     // Don't fail the extraction if logging fails
@@ -2285,9 +2176,6 @@ const executeDeepMode = async (
   samplingDescription?: string,
   domain?: string | null,
 ): Promise<any[]> => {
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2012',message:'executeDeepMode ENTRY',data:{candidatesCount:candidates.length,hasSystemPrompt:!!systemPrompt,systemPromptLength:systemPrompt?.length||0,hasAllSegments:!!allSegments,allSegmentsCount:allSegments?.length||0,hasSamplingDescription:!!samplingDescription,hasDomain:!!domain,textLength:text.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-  // #endregion
   console.log(`[Stage 5] Starting Batch Extraction for ${candidates.length} candidates...`);
 
   // 1. Sort & Slice: Prioritize the Longest Rows (The Annex Data)
@@ -2309,9 +2197,6 @@ const executeDeepMode = async (
   // Get system prompt if not provided
   // Pass provider and model to getSystemPrompt for reasoning model detection
   const finalSystemPrompt = systemPrompt || getSystemPrompt('deep', domain, provider?.name, model);
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2031',message:'executeDeepMode: System prompt check',data:{hasSystemPromptParam:!!systemPrompt,usedFallback:!systemPrompt,finalSystemPromptLength:finalSystemPrompt.length,hasVerbatimInSystem:finalSystemPrompt.includes('VERBATIM')||finalSystemPrompt.includes('verbatim'),hasVerbatimInSystemUpper:finalSystemPrompt.includes('VERBATIM'),hasVerbatimInSystemLower:finalSystemPrompt.includes('verbatim'),systemPromptPreview:finalSystemPrompt.substring(0,200)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-  // #endregion
 
   await addExecutionLog(documentId, {
     stage: 'Stage 5: AI Response & Parsing',
@@ -2346,9 +2231,6 @@ const executeDeepMode = async (
           samplingDescription || 'full text',
           topCandidates.length,
         );
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2054',message:'executeDeepMode: User prompt built',data:{batch:index+1,userPromptLength:userPrompt.length,hasVerbatimInUser:userPrompt.includes('VERBATIM')||userPrompt.includes('verbatim'),chunkSize:chunk.length,textLength:text.length,userPromptPreview:userPrompt.substring(0,300)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
 
         logger.info(
           {
@@ -2374,9 +2256,6 @@ const executeDeepMode = async (
         });
 
         // Call AI with proper extraction prompt (includes verbatim verification)
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2089',message:'executeDeepMode: Before AI call',data:{batch:index+1,userPromptLength:userPrompt.length,systemPromptLength:finalSystemPrompt.length,totalPromptLength:userPrompt.length+finalSystemPrompt.length,model,maxTokens:maxResponseTokens,chunkSize:chunk.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-        // #endregion
         // Ensure temperature is explicitly 0.0 for DeepSeek (especially reasoning models)
         const chunkFinalTemperature = 0.0;
         
@@ -2421,9 +2300,6 @@ const executeDeepMode = async (
 
         // Log raw length to ensure it's working
         console.log(`[Stage 5] Batch ${index + 1}/${chunks.length} Response Length: ${chunkResponseText.length} chars`);
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2127',message:'executeDeepMode: AI response received',data:{batch:index+1,responseLength:chunkResponseText.length,responsePreview:chunkResponseText.substring(0,500),responseFirst500:chunkResponseText.substring(0,500),hasJsonArray:chunkResponseText.includes('['),hasJsonObject:chunkResponseText.includes('{')},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-        // #endregion
 
         // Parse - handle response wrapped in JSON object with outputText field
         let terms: any[] = [];
@@ -2460,9 +2336,6 @@ const executeDeepMode = async (
             // Step 4: Try parseJsonArray function (handles incomplete JSON)
             terms = parseJsonArray(jsonContent, documentId);
           }
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2162',message:'executeDeepMode: Terms parsed',data:{batch:index+1,termsCount:terms.length,termsSample:terms.slice(0,3).map(t=>({sourceTerm:t.sourceTerm||t.term,hasSourceTerm:!!(t.sourceTerm||t.term),hasTargetTerm:!!t.targetTerm}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-          // #endregion
         } catch (parseError: any) {
           logger.error(
             {
@@ -2549,9 +2422,6 @@ export const extractGlossary = async (
     `UPDATE "DocumentAnalysis" SET "executionLogs" = '[]'::jsonb WHERE "documentId" = $1`,
     documentId
   ).catch(() => {}); // Ignore if analysis doesn't exist yet
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:583',message:'extractGlossary entry',data:{documentId,mode},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-  // #endregion
   await updateProgress(documentId, 'fetching', 5, 'Fetching document segments...', true);
   
   // Get document with all segments (we need to separate confirmed from others)
@@ -2680,9 +2550,6 @@ export const extractGlossary = async (
   }));
   const sourceTextForAI = getSampledText(allSegments, mode, documentId);
   
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:902',message:'Text sampling completed',data:{mode,sourceTextLength:sourceTextForAI.length,allSegmentsCount:allSegments.length,hasAnnexes:sourceTextForAI.slice(-500).toLowerCase().includes('annex') || sourceTextForAI.slice(-500).toLowerCase().includes('приложение') || sourceTextForAI.slice(-500).toLowerCase().includes('таблица')},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-  // #endregion
   
   if (!sourceTextForAI.trim() && confirmedTermsMap.size === 0) {
     logger.warn({ documentId }, 'No source text found in document');
@@ -2900,9 +2767,6 @@ export const extractGlossary = async (
   // For backward compatibility, keep promptCandidates for single-batch mode (fast mode)
   const promptCandidates = mode === 'deep' ? topCandidates : sortedCandidates.slice(0, 200);
   
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2047',message:'VIP Line: Candidate sorting and selection',data:{totalCandidates:termsToSendToAI.length,longestCandidateLength:sortedCandidates[0]?.length||0,shortestCandidateLength:sortedCandidates[sortedCandidates.length-1]?.length||0,first5Lengths:sortedCandidates.slice(0,5).map(c=>c.length),last5Lengths:sortedCandidates.slice(-5).map(c=>c.length),promptCandidatesCount:promptCandidates.length,chunksCount:chunks.length,willUseParallelProcessing:mode === 'deep' && chunks.length > 0,first5PromptCandidates:promptCandidates.slice(0,5).map(c=>({length:c.length,sample:c.substring(0,60)})),last5PromptCandidates:promptCandidates.slice(-5).map(c=>({length:c.length,sample:c.substring(0,60)}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H1'})}).catch(()=>{});
-  // #endregion
   
   // Debug log: Verify we're sending the right candidates (Golden Ticket table rows)
   logger.info(
@@ -3263,9 +3127,6 @@ Return a JSON array of terms that pass ALL checks above.`;
         );
         
         // Call executeDeepMode with proper extraction prompt (includes verbatim verification)
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2939',message:'Before executeDeepMode call',data:{attempt,topCandidatesCount:topCandidates.length,hasSystemPrompt:!!systemPrompt,systemPromptLength:systemPrompt?.length||0,hasAllSegments:!!allSegments,allSegmentsCount:allSegments?.length||0,sourceTextLength:sourceTextForAI.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
         const allParsedTerms = await executeDeepMode(
           sourceTextForAI,
           topCandidates,
@@ -3278,9 +3139,6 @@ Return a JSON array of terms that pass ALL checks above.`;
           samplingDescription,
           domain,
         );
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2951',message:'After executeDeepMode call',data:{attempt,allParsedTermsCount:allParsedTerms.length,termsSample:allParsedTerms.slice(0,3).map(t=>({sourceTerm:t.sourceTerm||t.term,hasSourceTerm:!!(t.sourceTerm||t.term)}))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
         
         // Create a merged response object
         responseText = JSON.stringify(allParsedTerms);
@@ -3317,9 +3175,6 @@ Return a JSON array of terms that pass ALL checks above.`;
       // Calculate approximate token count (rough estimate: 1 token ≈ 4 chars)
       const estimatedPromptTokens = Math.ceil((userPrompt.length + systemPrompt.length) / 4);
       
-      // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:815',message:'Before AI call for glossary (single batch)',data:{model,promptLength:userPrompt.length,systemPromptLength:systemPrompt.length,estimatedPromptTokens,requestedMaxTokens:maxResponseTokens},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
-      // #endregion
       
       logger.info(
         {
@@ -3362,9 +3217,6 @@ Return a JSON array of terms that pass ALL checks above.`;
         );
       }
       
-      // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1327',message:'Before AI call (single batch)',data:{mode,timeoutSeconds,termsToSendToAICount:termsToSendToAI.length,sourceTextLength:sourceTextForAI.length,estimatedPromptTokens,maxResponseTokens,providerName:provider?.name,providerType:typeof provider,hasProvider:!!provider,hasCallModel:!!provider?.callModel,model,hasModel:!!model},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-      // #endregion
       
       // Validate provider and model before making call
       if (!provider) {
@@ -3503,9 +3355,6 @@ Return a JSON array of terms that pass ALL checks above.`;
         if (heartbeatInterval) clearInterval(heartbeatInterval); // Stop heartbeat on error
         const aiCallDuration = Date.now() - aiCallStartTime;
         
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1503',message:'First AI call error caught',data:{attempt,maxRetries,errorMessage:error?.message,errorName:error?.name,errorStack:error?.stack,errorCode:error?.code,errorCause:error?.cause,aiCallDuration,providerName:provider?.name,model},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-        // #endregion
         
         // Stage 5: Enhanced crash logging
         const isTimeout = error.message?.includes('timeout') || 
@@ -3580,9 +3429,6 @@ Return a JSON array of terms that pass ALL checks above.`;
         responseText = aiResponse.text || aiResponse.response || aiResponse.outputText || JSON.stringify(aiResponse);
         responseText = responseText.trim();
       
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1477',message:'AI response received',data:{mode,responseTextLength:responseText.length,responsePreview:responseText.substring(0,500),usage:aiResponse.usage},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-      // #endregion
       
       // Check if response was truncated
       const wasTruncated = aiResponse.finishReason === 'length' || 
@@ -3604,9 +3450,6 @@ Return a JSON array of terms that pass ALL checks above.`;
       }
 
       // Log after AI call: raw response
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:910',message:'After AI call for glossary',data:{responseLength:responseText.length,usage:aiResponse.usage,thoughtsTokenCount:aiResponse.usage?.thoughtsTokenCount,actualOutputTokens:aiResponse.usage?.candidatesTokenCount,requestedMaxTokens:provider.name === 'openai' ? 16384 : 8192,wasTruncated},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'I'})}).catch(()=>{});
-        // #endregion
         
         logger.info(
           {
@@ -3755,9 +3598,6 @@ Return a JSON array of terms that pass ALL checks above.`;
       },
     });
 
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1018',message:'Parsed JSON array from AI',data:{parsedArrayLength,responseLength:responseText.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
-    // #endregion
 
     await updateProgress(documentId, 'parsing_glossary', 46, `Parsed ${parsedArrayLength} items, validating...`, true);
 
@@ -3828,9 +3668,6 @@ Return a JSON array of terms that pass ALL checks above.`;
       ? document.segments.map(s => s.sourceText).join(' ').toLowerCase()
       : sourceTextForAI.toLowerCase();
     
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1660',message:'Before verbatim safety net',data:{mode,parsedArrayLength,fullSourceTextLength:fullSourceText.length,sourceTextForAILength:sourceTextForAI.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-    // #endregion
     
     aiTerms = parsed
       .map((item: any, index: number) => {
@@ -3903,9 +3740,6 @@ Return a JSON array of terms that pass ALL checks above.`;
         if (!foundExact && !foundWordBoundary && !foundPartial) {
           hallucinationCount++;
           
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1725',message:'VERBATIM SAFETY NET: Dropping term',data:{mode,term,normalizedTerm,index,foundExact,foundWordBoundary,foundPartial,termLength:term.length,wordCount:term.split(' ').length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-          // #endregion
           
           logger.warn(
             {
@@ -3932,11 +3766,8 @@ Return a JSON array of terms that pass ALL checks above.`;
         // Note: targetTerm from AI response is optional - waterfall lookup will handle translation
         const suggestedTargetTerm = item.targetTerm ? String(item.targetTerm).trim() : undefined;
         
-        // #region agent log
         if (suggestedTargetTerm) {
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1024',message:'Parsed targetTerm from AI response',data:{term,suggestedTargetTerm,suggestedTargetTermLength:suggestedTargetTerm.length,rawTargetTerm:item.targetTerm,rawTargetTermLength:String(item.targetTerm).length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
         }
-        // #endregion
         
         return { term, frequency, suggestedTargetTerm };
       })
@@ -4013,9 +3844,6 @@ Return a JSON array of terms that pass ALL checks above.`;
       );
     }
 
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1028',message:'After validation',data:{parsedArrayLength,validCount:aiTerms.length,invalidCount},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
-    // #endregion
 
     // Stage 5: Log validation results (including verbatim safety net)
     const expectedMinTerms = mode === 'deep' ? 80 : 20;
@@ -4075,9 +3903,6 @@ Return a JSON array of terms that pass ALL checks above.`;
     // Log after parsing: first 3 items
     console.log('Parsed Terms (First 3):', JSON.stringify(aiTerms.slice(0, 3), null, 2));
 
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2055',message:'Parsed AI response for glossary terms',data:{parsedArrayLength,aiTermsCount:aiTerms.length,sampleTerms:aiTerms.slice(0,10).map(t=>({sourceTerm:t.term.substring(0,60),frequency:t.frequency})),hasInstrumentalCase:aiTerms.some(t=>t.term.includes('ым')||t.term.includes('ом')||t.term.includes('ем')||t.term.includes('ами')),instrumentalCaseTerms:aiTerms.filter(t=>t.term.includes('ым')||t.term.includes('ом')||t.term.includes('ем')||t.term.includes('ами')).slice(0,5).map(t=>t.term)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})}).catch(()=>{});
-      // #endregion
       
       logger.info(
         {
@@ -4167,18 +3992,9 @@ Return a JSON array of terms that pass ALL checks above.`;
     ? document.segments.map(s => s.sourceText).join(' ').toLowerCase()
     : sourceTextForAI.toLowerCase();
   
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1975',message:'Checking multi-pass condition',data:{mode,aiTermsLength:aiTerms.length,targetTerms:100,termsToSendToAILength:termsToSendToAI.length,condition1:mode === 'deep',condition2:aiTerms.length < 100,condition3:termsToSendToAI.length > aiTerms.length * 2,willTrigger:mode === 'deep' && aiTerms.length < 100 && termsToSendToAI.length > aiTerms.length * 2},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-  // #endregion
   
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1979',message:'Multi-pass check',data:{mode,aiTermsLength:aiTerms.length,targetTerms:100,termsToSendToAILength:termsToSendToAI?.length || 0,conditionCheck:mode === 'deep' && aiTerms.length < 100 && (termsToSendToAI?.length || 0) > aiTerms.length * 2},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-  // #endregion
   
   if (mode === 'deep' && aiTerms.length < 100 && termsToSendToAI && termsToSendToAI.length > aiTerms.length * 2) {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1984',message:'Multi-pass triggered',data:{mode,aiTermsLength:aiTerms.length,targetTerms:100,termsToSendToAILength:termsToSendToAI.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-    // #endregion
     
     logger.info(
       {
@@ -4196,23 +4012,14 @@ Return a JSON array of terms that pass ALL checks above.`;
     // Get remaining candidates (exclude already extracted terms)
     const remainingCandidates = termsToSendToAI.filter(term => !extractedTermsSet.has(term.toLowerCase()));
     
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2008',message:'Multi-pass setup',data:{mode,aiTermsLength:aiTerms.length,targetTerms:100,remainingCandidatesLength:remainingCandidates.length,extractedTermsSetSize:extractedTermsSet.size},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-    // #endregion
     
     // Make additional passes until we reach 100 terms or run out of candidates
     let passNumber = 2;
     const maxPasses = 5; // Limit to 5 passes to avoid infinite loops
     const targetTerms = 100;
     
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2014',message:'Before while loop',data:{mode,aiTermsLength:aiTerms.length,targetTerms,remainingCandidatesLength:remainingCandidates.length,passNumber,maxPasses,willEnterLoop:aiTerms.length < targetTerms && remainingCandidates.length > 0 && passNumber <= maxPasses},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-    // #endregion
     
     while (aiTerms.length < targetTerms && remainingCandidates.length > 0 && passNumber <= maxPasses) {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2020',message:'Inside while loop',data:{mode,passNumber,aiTermsLength:aiTerms.length,targetTerms,remainingCandidatesLength:remainingCandidates.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-      // #endregion
       // Take next batch of candidates (200 per pass)
       const batchSize = 200;
       const batchCandidates = remainingCandidates.slice(0, batchSize);
@@ -4266,9 +4073,6 @@ ${batchCandidates.join('\n')}
           true,
         );
         
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2070',message:'Before additional pass AI call',data:{passNumber,providerName:provider?.name,providerType:typeof provider,hasProvider:!!provider,hasCallModel:!!provider?.callModel,model,hasModel:!!model,maxResponseTokens,batchCandidatesLength:batchCandidates.length,additionalPassPromptLength:additionalPassPrompt.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
         
         if (!provider) {
           logger.error(
@@ -4347,9 +4151,6 @@ ${batchCandidates.join('\n')}
         try {
           parsedAdditional = parseJsonArray(cleanedAdditional, documentId);
         } catch (parseError: any) {
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2283',message:'Multi-pass JSON parse failed, continuing',data:{passNumber,errorMessage:parseError?.message,responsePreview:additionalResponseText.substring(0,500),responseLength:additionalResponseText.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-          // #endregion
           logger.warn(
             {
               documentId,
@@ -4365,9 +4166,6 @@ ${batchCandidates.join('\n')}
           continue;
         }
         
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2115',message:'Additional pass response parsed',data:{passNumber,responseLength:additionalResponseText.length,parsedCount:parsedAdditional.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
         
         // Filter out duplicates and apply verbatim safety net
         const newTerms = parsedAdditional
@@ -4439,9 +4237,6 @@ ${batchCandidates.join('\n')}
           break;
         }
       } catch (error: any) {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2205',message:'Multi-pass error caught',data:{passNumber,errorMessage:error?.message,errorName:error?.name,errorStack:error?.stack,errorCode:error?.code,errorCause:error?.cause,currentTerms:aiTerms.length,providerName:provider?.name,model},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
         
         logger.warn(
           {
@@ -4512,9 +4307,6 @@ ${batchCandidates.join('\n')}
   };
   
   for (const { term: sourceTerm, frequency, suggestedTargetTerm } of aiTerms) {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1211',message:'Processing term from AI',data:{sourceTerm,frequency,hasSuggestedTargetTerm:!!suggestedTargetTerm,suggestedTargetTerm},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
-    // #endregion
     // Check for cancellation during processing
     if (isAnalysisCancelled(documentId)) {
       throw new Error('Analysis cancelled by user');
@@ -4569,10 +4361,7 @@ ${batchCandidates.join('\n')}
           }
         }
         
-        // #region agent log
         const isNotTranslated = targetTerm.trim() === sourceTerm.trim();
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1193',message:'Found in Global Glossary',data:{sourceTerm,targetTerm,targetTermLength:targetTerm.length,isNotTranslated,wasCleaned},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
         
         // If term is not translated (targetTerm === sourceTerm), translate it with AI
         // But first check if the term is already in the target language (e.g., English terms when target is English)
@@ -4590,16 +4379,10 @@ ${batchCandidates.join('\n')}
             (targetIsRussian && hasCyrillic);
           
           if (isAlreadyInTargetLanguage) {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1252',message:'Term already in target language, skipping translation',data:{sourceTerm,targetTerm:globalEntry.targetTerm,sourceLocale:document.sourceLocale,targetLocale:document.targetLocale,hasCyrillic,hasLatin},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
-            // #endregion
             logger.debug({ documentId, sourceTerm, targetTerm }, 'Term already in target language, skipping translation');
           } else {
             logger.debug({ documentId, sourceTerm }, 'Term found in Global Glossary but not translated, translating with AI');
             
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1260',message:'Translating untranslated term from Global Glossary',data:{sourceTerm,originalTargetTerm:globalEntry.targetTerm},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
-            // #endregion
             
             try {
               targetTerm = await translateTermWithAI(
@@ -4659,10 +4442,7 @@ ${batchCandidates.join('\n')}
       });
 
       if (projectEntry) {
-        // #region agent log
         const isNotTranslated = projectEntry.targetTerm.trim() === sourceTerm.trim();
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1272',message:'Found in Project Glossary',data:{sourceTerm,targetTerm:projectEntry.targetTerm,targetTermLength:projectEntry.targetTerm.length,isNotTranslated},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
-        // #endregion
 
         // If term is not translated (targetTerm === sourceTerm), translate it with AI
         // But first check if the term is already in the target language
@@ -4681,16 +4461,10 @@ ${batchCandidates.join('\n')}
             (targetIsRussian && hasCyrillic);
           
           if (isAlreadyInTargetLanguage) {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1305',message:'Term already in target language, skipping translation',data:{sourceTerm,targetTerm:projectEntry.targetTerm,sourceLocale:document.sourceLocale,targetLocale:document.targetLocale,hasCyrillic,hasLatin},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
-            // #endregion
             logger.debug({ documentId, sourceTerm, targetTerm }, 'Term already in target language, skipping translation');
           } else {
             logger.debug({ documentId, sourceTerm }, 'Term found in Project Glossary but not translated, translating with AI');
             
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1313',message:'Translating untranslated term from Project Glossary',data:{sourceTerm,originalTargetTerm:projectEntry.targetTerm},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
-            // #endregion
             
             try {
               targetTerm = await translateTermWithAI(
@@ -4747,14 +4521,8 @@ ${batchCandidates.join('\n')}
       
       // Check if AI already provided a translation in the extraction response
       if (suggestedTargetTerm && suggestedTargetTerm.trim() !== sourceTerm.trim() && suggestedTargetTerm.trim().length > 0) {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1289',message:'Using suggestedTargetTerm from AI response',data:{sourceTerm,suggestedTargetTerm,isNotTranslated:suggestedTargetTerm.trim()===sourceTerm.trim()},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
-        // #endregion
         targetTerm = suggestedTargetTerm.trim();
       } else {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1294',message:'Before AI translation (no suggestedTargetTerm)',data:{sourceTerm,sourceTermLength:sourceTerm.length,hasSuggestedTargetTerm:!!suggestedTargetTerm,suggestedTargetTerm},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
         
         targetTerm = await translateTermWithAI(
           sourceTerm,
@@ -4765,16 +4533,10 @@ ${batchCandidates.join('\n')}
         );
       }
 
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1242',message:'After AI translation',data:{sourceTerm,targetTerm,targetTermLength:targetTerm.length,isTruncated:targetTerm.length<sourceTerm.length*0.5},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
 
       // Validate translation before saving
       const isNotTranslated = targetTerm.trim() === sourceTerm.trim();
       if (isNotTranslated) {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1310',message:'WARNING: targetTerm equals sourceTerm, skipping DB save',data:{sourceTerm,targetTerm,sourceLocale:document.sourceLocale,targetLocale:document.targetLocale},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
-        // #endregion
         
         logger.warn(
           {
@@ -4811,9 +4573,6 @@ ${batchCandidates.join('\n')}
       
       // CRITICAL FIX: Filter out verbs and sentence fragments before adding to finalTerms
       if (isVerbOrFragment(sourceTerm, targetTerm)) {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2700',message:'REJECTED: Verb or sentence fragment detected',data:{sourceTerm,targetTerm,reason:'Contains verb or is sentence fragment'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-        // #endregion
         logger.warn(
           { documentId, sourceTerm, targetTerm },
           'REJECTED term: Contains verb or is sentence fragment (post-processing filter)',
@@ -4821,9 +4580,6 @@ ${batchCandidates.join('\n')}
         continue; // Skip this term
       }
       
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1375',message:'Adding successfully translated term to finalTerms',data:{sourceTerm,targetTerm,source:'AI'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'K'})}).catch(()=>{});
-      // #endregion
 
       translationSources.ai++;
       finalTerms.push({
@@ -5175,9 +4931,6 @@ ${batchCandidates.join('\n')}
       // CRITICAL: Do NOT automatically create/update GlossaryEntry for terms that already existed in document glossary
       // This prevents automatic promotion to global glossary on repeated analysis runs
       // Only create GlossaryEntry for NEW terms (not existing ones being updated from CANDIDATE to APPROVED)
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1897',message:'Skipping automatic GlossaryEntry creation for existing document glossary term being updated',data:{sourceTerm:term.sourceTerm,source:term.source,existingEntryId:existingEntry.id,termStatus:term.status},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'O'})}).catch(()=>{});
-      // #endregion
       logger.debug(
         { documentId, sourceTerm: term.sourceTerm, existingEntryId: existingEntry.id, termStatus: term.status },
         'Skipping automatic GlossaryEntry creation/update for existing document glossary term (preventing auto-promotion on repeated analysis)',
@@ -5256,9 +5009,6 @@ ${batchCandidates.join('\n')}
         );
       }
     } else if (term.status === 'APPROVED' && (term.source === 'GLOBAL' || term.source === 'AI')) {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1923',message:'Skipping automatic GlossaryEntry creation for GLOBAL/AI term on repeated analysis',data:{sourceTerm:term.sourceTerm,source:term.source,termStatus:term.status},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'O'})}).catch(()=>{});
-      // #endregion
       logger.debug(
         { documentId, sourceTerm: term.sourceTerm, source: term.source, termStatus: term.status },
         'Skipping automatic GlossaryEntry creation for GLOBAL/AI term (preventing auto-promotion on repeated analysis)',
@@ -5437,9 +5187,6 @@ ${batchCandidates.join('\n')}
     'Glossary extraction completed with incremental non-destructive approach',
   );
 
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:1870',message:'Final glossary extraction summary',data:{totalSegments,aiTermsCount:aiTerms.length,finalTermsCount:finalCount,createdCount,updatedCount,sampleTerms:finalTerms.slice(0,10).map(t=>({sourceTerm:t.sourceTerm.substring(0,50),targetTerm:t.targetTerm.substring(0,50)})),hasInstrumentalCase:finalTerms.some(t=>t.sourceTerm.includes('ым')||t.sourceTerm.includes('ом')||t.sourceTerm.includes('ем')),hasFragments:finalTerms.some(t=>t.sourceTerm.length<10&&(t.sourceTerm.includes('of')||t.sourceTerm.includes('by')||t.sourceTerm.includes('the')))},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'J'})}).catch(()=>{});
-  // #endregion
 
   return { count: finalCount };
 };
@@ -7034,9 +6781,6 @@ Analyze this text and extract all formatting and style rules. Return a JSON arra
     // Validate and normalize rules
     extractedRules = parsed
       .map((item: any, index: number) => {
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2062',message:'Processing style rule item',data:{index,itemKeys:Object.keys(item),hasRuleType:!!item.ruleType,hasPattern:!!item.pattern,hasSelector:!!item.selector,hasProperties:!!item.properties},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
         
         if (!item || typeof item !== 'object') {
           logger.debug({ documentId, index, item }, 'Skipping invalid item (not an object)');
@@ -7047,15 +6791,9 @@ Analyze this text and extract all formatting and style rules. Return a JSON arra
         let ruleType = String(item.ruleType || item.element_name || item.type || '').trim();
         let pattern = String(item.pattern || '').trim();
         
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2074',message:'After initial extraction',data:{ruleType,pattern,hasSelector:!!item.selector,hasProperties:!!item.properties,hasRuleName:!!item.rule_name,hasTextTransform:!!item.text_transform},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-        // #endregion
         
         // Handle format with rule_name and individual style fields (font_weight, text_transform, text_align) - NEW FIX
         if ((!ruleType || !pattern) && (item.rule_name || item.text_transform || item.font_weight || item.text_align)) {
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2080',message:'Detected rule_name/individual style fields format',data:{ruleName:item.rule_name,textTransform:item.text_transform,fontWeight:item.font_weight,textAlign:item.text_align},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-          // #endregion
           
           const styleParts: string[] = [];
           
@@ -7097,16 +6835,10 @@ Analyze this text and extract all formatting and style rules. Return a JSON arra
             ruleType = 'other';
           }
           
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2120',message:'After rule_name format conversion',data:{ruleType,pattern,patternLength:pattern.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-          // #endregion
         }
         
         // Handle CSS-like format (selector + properties) - NEW FIX
         if ((!ruleType || !pattern) && item.selector && item.properties && typeof item.properties === 'object') {
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2078',message:'Detected selector/properties format',data:{selector:item.selector,propertiesKeys:Object.keys(item.properties)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-          // #endregion
           
           const props = item.properties;
           const styleParts: string[] = [];
@@ -7148,9 +6880,6 @@ Analyze this text and extract all formatting and style rules. Return a JSON arra
             ruleType = 'other';
           }
           
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2110',message:'After CSS format conversion',data:{ruleType,pattern,patternLength:pattern.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-          // #endregion
         }
         
         // If pattern is missing but we have styles object, try to extract from it
@@ -7225,9 +6954,6 @@ Analyze this text and extract all formatting and style rules. Return a JSON arra
           }
         }
         
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2250',message:'Final validation check',data:{ruleType,pattern,hasRuleType:!!ruleType,hasPattern:!!pattern,willBeFiltered:!ruleType||!pattern},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
         
         if (!ruleType || !pattern) {
           logger.debug(
@@ -7237,9 +6963,6 @@ Analyze this text and extract all formatting and style rules. Return a JSON arra
           return null;
         }
         
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:2150',message:'Returning valid rule',data:{ruleType,pattern,description:!!description,examplesCount:examples?.length||0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
         
         return { ruleType, pattern, description, examples };
       })
@@ -8296,9 +8019,6 @@ export const getStageMonitoringData = async (documentId: string) => {
     // Try to get executionLogs separately using raw query (won't fail if column doesn't exist)
     let executionLogs: LogEntry[] = [];
     try {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:6108',message:'getStageMonitoringData: Checking column for log retrieval',data:{documentId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-      // #endregion
       // Check if column exists first
       const columnExists = await prisma.$queryRaw<Array<{ column_name: string }>>`
         SELECT column_name 
@@ -8307,48 +8027,30 @@ export const getStageMonitoringData = async (documentId: string) => {
           AND column_name = 'executionLogs'
       `;
       
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:6117',message:'getStageMonitoringData: Column check result',data:{documentId,columnExists:columnExists?.length>0,columnCheckLength:columnExists?.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-      // #endregion
       
       if (columnExists && columnExists.length > 0) {
         // Column exists, try to get logs
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:6123',message:'getStageMonitoringData: Querying logs from database',data:{documentId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-        // #endregion
         const result = await prisma.$queryRawUnsafe<Array<{ executionLogs: any }>>(
           `SELECT "executionLogs" FROM "DocumentAnalysis" WHERE "documentId" = $1`,
           documentId
         );
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:6129',message:'getStageMonitoringData: Query result',data:{documentId,resultExists:!!result,resultLength:result?.length,hasExecutionLogs:!!result?.[0]?.executionLogs,executionLogsType:typeof result?.[0]?.executionLogs,isArray:Array.isArray(result?.[0]?.executionLogs),logCount:Array.isArray(result?.[0]?.executionLogs)?(result[0].executionLogs as any[]).length:'not-array'},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-        // #endregion
         if (result && result[0]?.executionLogs) {
           executionLogs = (result[0].executionLogs as LogEntry[]) || [];
           logger.debug(
             { documentId, logCount: executionLogs.length },
             'Retrieved execution logs from database',
           );
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:6137',message:'getStageMonitoringData: Logs retrieved successfully',data:{documentId,logCount:executionLogs.length,stages:executionLogs.map((l:any)=>l.stage)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-          // #endregion
         } else {
           logger.debug(
             { documentId },
             'No execution logs found in database (field is null or empty)',
           );
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:6145',message:'getStageMonitoringData: No logs found in result',data:{documentId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-          // #endregion
         }
       } else {
         logger.warn(
           { documentId },
           'executionLogs column does not exist - cannot retrieve logs',
         );
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:6153',message:'getStageMonitoringData: Column does not exist',data:{documentId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-        // #endregion
       }
     } catch (logError: any) {
       // Field doesn't exist or query failed - that's okay, just use empty array
@@ -8357,9 +8059,6 @@ export const getStageMonitoringData = async (documentId: string) => {
         'executionLogs field not available (migration may not be run yet)',
       );
       executionLogs = [];
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:6163',message:'getStageMonitoringData: Error retrieving logs',data:{documentId,error:logError.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-      // #endregion
     }
 
     if (!analysis) {
@@ -9056,9 +8755,6 @@ export const updateDocumentGlossaryEntry = async (
         );
       } else if (data.status === 'CANDIDATE') {
         // Setting to CANDIDATE: move from global to project scope if needed
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'analysis.service.ts:7895',message:'Setting status to CANDIDATE',data:{entryId,glossaryEntryId:glossaryEntry.id,currentProjectId:glossaryEntry.projectId,documentProjectId:document.projectId},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-        // #endregion
         if (glossaryEntry.projectId === null) {
           // If setting to CANDIDATE and entry is in global scope, move to project scope
           updateData.projectId = document.projectId; // Move to project scope

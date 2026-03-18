@@ -123,20 +123,11 @@ export default function StageMonitoringDashboard() {
 
   // Filter logs by stage
   const getLogsForStage = (stageName: string): LogEntry[] => {
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'StageMonitoringDashboard.tsx:125',message:'getLogsForStage called',data:{stageName,hasMonitoringData:!!monitoringData,hasLogs:!!monitoringData?.logs,logCount:monitoringData?.logs?.length||0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-    // #endregion
     if (!monitoringData?.logs) {
       console.debug('[StageMonitoringDashboard] No logs in monitoringData', { monitoringData });
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'StageMonitoringDashboard.tsx:128',message:'No logs in monitoringData',data:{stageName,monitoringDataStatus:monitoringData?.status},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-      // #endregion
       return [];
     }
     const filtered = monitoringData.logs.filter(log => log.stage === stageName);
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'StageMonitoringDashboard.tsx:133',message:'Log filtering result',data:{stageName,totalLogs:monitoringData.logs.length,matchingLogs:filtered.length,allStageNames:[...new Set(monitoringData.logs.map(l => l.stage))],sampleLogStages:monitoringData.logs.slice(0,5).map(l=>l.stage)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-    // #endregion
     console.debug(`[StageMonitoringDashboard] Filtering logs for "${stageName}":`, {
       totalLogs: monitoringData.logs.length,
       matchingLogs: filtered.length,

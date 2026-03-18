@@ -57,12 +57,6 @@ function mapPrismaToApi(entry: PrismaGlossaryEntry): {
     apiStatus = 'CANDIDATE';
   }
   
-  // #region agent log
-  if (entry.targetTerm && entry.targetTerm.length < 20) {
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'glossary.service.ts:61',message:'Reading targetTerm from DB',data:{id:entry.id,sourceTerm:entry.sourceTerm,targetTerm:entry.targetTerm,targetTermLength:entry.targetTerm.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'H'})}).catch(()=>{});
-  }
-  // #endregion
-  
   return {
     id: entry.id,
     projectId: entry.projectId || undefined,
@@ -188,16 +182,10 @@ export const upsertGlossaryEntry = async (data: {
   // Only include these fields if they're provided
   if (sourceTerm !== undefined) {
     prismaData.sourceTerm = sourceTerm.trim();
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'glossary.service.ts:177',message:'Saving sourceTerm to DB',data:{original:sourceTerm,trimmed:sourceTerm.trim(),originalLength:sourceTerm.length,trimmedLength:sourceTerm.trim().length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-    // #endregion
   }
   if (targetTerm !== undefined) {
     const trimmedTargetTerm = targetTerm.trim();
     prismaData.targetTerm = trimmedTargetTerm;
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'glossary.service.ts:180',message:'Saving targetTerm to DB',data:{original:targetTerm,trimmed:trimmedTargetTerm,originalLength:targetTerm.length,trimmedLength:trimmedTargetTerm.length,isTruncated:trimmedTargetTerm.length<targetTerm.length*0.9},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'F'})}).catch(()=>{});
-    // #endregion
   }
   // Add sourceLocale and targetLocale (required for new entries)
   // For new entries, these must be provided (validated above)
@@ -517,6 +505,52 @@ function parseCsvRow(row: string, delimiter: string = ','): string[] {
   columns.push(current.trim());
   return columns;
 }
+
+/** Escape a value for CSV (quote and escape " as "") so import format is compatible */
+function escapeCsvCell(value: string): string {
+  if (value.includes(',') || value.includes('"') || value.includes('\n') || value.includes('\r')) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
+}
+
+/**
+ * Export glossary entries as CSV in the same format as import (term_source, term_target, notes, forbidden).
+ */
+export const exportGlossaryCsv = async (
+  projectId: string | undefined,
+  sourceLocale: string,
+  targetLocale: string,
+): Promise<{ csv: string; filename: string }> => {
+  const whereClause: any = {};
+  if (projectId) whereClause.projectId = projectId;
+  if (sourceLocale) whereClause.sourceLocale = sourceLocale;
+  if (targetLocale) whereClause.targetLocale = targetLocale;
+
+  const entries = await prisma.glossaryEntry.findMany({
+    where: Object.keys(whereClause).length > 0 ? whereClause : undefined,
+    orderBy: { sourceTerm: 'asc' },
+    select: { sourceTerm: true, targetTerm: true, notes: true, isForbidden: true },
+  });
+
+  const header = ['term_source', 'term_target', 'notes', 'forbidden'];
+  const delimiter = ',';
+  const rows = [
+    header.join(delimiter),
+    ...entries.map((e) =>
+      [
+        escapeCsvCell(e.sourceTerm ?? ''),
+        escapeCsvCell(e.targetTerm ?? ''),
+        escapeCsvCell(e.notes ?? ''),
+        e.isForbidden ? 'true' : 'false',
+      ].join(delimiter),
+    ),
+  ];
+  const csvContent = rows.join('\r\n');
+  const filename = `glossary-${sourceLocale}-${targetLocale}${projectId ? `-${projectId.slice(0, 8)}` : ''}.csv`;
+  const csv = '\uFEFF' + csvContent;
+  return { csv, filename };
+};
 
 export const importGlossaryCsv = async (
   buffer: Buffer, 

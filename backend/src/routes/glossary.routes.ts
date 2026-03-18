@@ -3,7 +3,7 @@ import multer from 'multer';
 import { z } from 'zod';
 import { asyncHandler } from '../utils/asyncHandler';
 import { requireAuth } from '../utils/authMiddleware';
-import { listGlossaryEntries, upsertGlossaryEntry, getGlossaryEntry, deleteGlossaryEntry, deleteManyGlossaryEntries, importGlossaryCsv } from '../services/glossary.service';
+import { listGlossaryEntries, upsertGlossaryEntry, getGlossaryEntry, deleteGlossaryEntry, deleteManyGlossaryEntries, importGlossaryCsv, exportGlossaryCsv } from '../services/glossary.service';
 import { findRelevantGlossaryEntries } from '../services/glossary-search.service';
 import { getGlossaryEmbeddingStats } from '../services/vector-search.service';
 import { ApiError } from '../utils/apiError';
@@ -109,6 +109,22 @@ glossaryRoutes.post(
       payload.targetLocale
     );
     res.status(201).json(result);
+  }),
+);
+
+glossaryRoutes.get(
+  '/export',
+  asyncHandler(async (req, res) => {
+    const projectId = (req.query.projectId as string) || undefined;
+    const sourceLocale = (req.query.sourceLocale as string) || '';
+    const targetLocale = (req.query.targetLocale as string) || '';
+    if (!sourceLocale || !targetLocale) {
+      throw ApiError.badRequest('sourceLocale and targetLocale are required for export');
+    }
+    const { csv, filename } = await exportGlossaryCsv(projectId, sourceLocale, targetLocale);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(csv);
   }),
 );
 

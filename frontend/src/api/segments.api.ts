@@ -78,6 +78,18 @@ export const segmentsApi = {
     return response.data;
   },
 
+  /** Apply TM match with backend number/subsection substitution (same logic as pretranslate). */
+  applyTmMatch: async (
+    segmentId: string,
+    params: { tmTarget: string; tmSource: string },
+  ): Promise<{ targetText: string }> => {
+    const response = await apiClient.post<{ targetText: string }>(
+      `/segments/${segmentId}/apply-tm-match`,
+      params,
+    );
+    return response.data;
+  },
+
   update: async (segmentId: string, data: UpdateSegmentRequest): Promise<Segment> => {
     const response = await apiClient.patch<Segment>(`/segments/${segmentId}`, data);
     return response.data;

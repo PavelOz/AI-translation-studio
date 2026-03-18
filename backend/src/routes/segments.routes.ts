@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { asyncHandler } from '../utils/asyncHandler';
 import { requireAuth } from '../utils/authMiddleware';
 import { logger } from '../utils/logger';
-import { getDocumentSegments, updateSegment, getSegment, bulkUpdateSegments, searchSegments } from '../services/segment.service';
+import { getDocumentSegments, updateSegment, getSegment, bulkUpdateSegments, searchSegments, applyTmMatchForSegment } from '../services/segment.service';
 import { runSegmentMachineTranslation, runSegmentMachineTranslationWithCritic, getSegmentDebugInfo } from '../services/ai.service';
 import { getSegmentMetrics, runSegmentQualityCheck } from '../services/quality.service';
 import type { GlossaryMode } from '../types/glossary';
@@ -141,6 +141,21 @@ segmentRoutes.get(
   asyncHandler(async (req, res) => {
     const segment = await getSegment(req.params.segmentId);
     res.json(segment);
+  }),
+);
+
+const applyTmMatchSchema = z.object({
+  tmTarget: z.string(),
+  tmSource: z.string(),
+});
+
+segmentRoutes.post(
+  '/:segmentId/apply-tm-match',
+  asyncHandler(async (req, res) => {
+    const { segmentId } = req.params;
+    const body = applyTmMatchSchema.parse(req.body);
+    const { targetText } = await applyTmMatchForSegment(segmentId, body.tmTarget, body.tmSource);
+    res.json({ targetText });
   }),
 );
 

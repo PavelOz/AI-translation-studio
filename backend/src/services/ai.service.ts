@@ -4,7 +4,7 @@ import { AIOrchestrator, type OrchestratorGlossaryEntry, type OrchestratorSegmen
 import { QAEngine } from '../ai/qaEngine';
 import { searchTranslationMemory } from './tm.service';
 import { ApiError } from '../utils/apiError';
-import { getSegmentWithDocument } from './segment.service';
+import { getSegmentWithDocument, applyTmMatchWithNumberSubstitution, ensureLeadingSectionFromSegment } from './segment.service';
 import { listProviders as listAvailableProviders, getProvider } from '../ai/providers/registry';
 import { logger } from '../utils/logger';
 import { matchesWithVariations } from '../utils/stemming';
@@ -320,6 +320,7 @@ export type TranslationMetadata = {
     targetText: string;
     fuzzyScore: number;
     searchMethod: 'fuzzy' | 'vector' | 'hybrid';
+    numbersAdjusted?: boolean;
   };
   tmExamples?: Array<{
     sourceText: string;
@@ -1303,24 +1304,36 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
     });
     const bestMatch = tmMatches[0];
     if (bestMatch) {
-      translationText = bestMatch.targetText;
-      fuzzyScore = bestMatch.fuzzyScore;
-      bestTmEntryId = bestMatch.id;
-      
-      // Add metadata for TM direct match
-      metadata.push({
-        stage: 'tm-direct',
-        priority: 1,
-        source: 'tm-direct',
-        tmDirectMatch: {
-          id: bestMatch.id,
-          sourceText: bestMatch.sourceText,
-          targetText: bestMatch.targetText,
-          fuzzyScore: bestMatch.fuzzyScore,
-          searchMethod: bestMatch.searchMethod || 'fuzzy',
-        },
-        message: `Using direct TM match (${bestMatch.fuzzyScore}% similarity)`,
-      });
+      const substituted = applyTmMatchWithNumberSubstitution(
+        bestMatch.targetText,
+        bestMatch.sourceText,
+        segment.sourceText,
+        segment.document.targetLocale,
+      );
+      // Use TM only when substitution succeeded, or when it's a 100% match (exact). For <100% matches,
+      // do not apply the raw target—it may be a different clause (e.g. 90% similar but wrong semantics).
+      const useTm = substituted.applied || bestMatch.fuzzyScore === 100;
+      if (useTm) {
+        translationText = substituted.applied ? substituted.result : bestMatch.targetText;
+        fuzzyScore = bestMatch.fuzzyScore;
+        bestTmEntryId = bestMatch.id;
+        metadata.push({
+          stage: 'tm-direct',
+          priority: 1,
+          source: 'tm-direct',
+          tmDirectMatch: {
+            id: bestMatch.id,
+            sourceText: bestMatch.sourceText,
+            targetText: bestMatch.targetText,
+            fuzzyScore: bestMatch.fuzzyScore,
+            searchMethod: bestMatch.searchMethod || 'fuzzy',
+            numbersAdjusted: substituted.applied,
+          },
+          message: substituted.applied
+            ? `Using direct TM match (${bestMatch.fuzzyScore}% similarity) with numbers/dates adjusted`
+            : `Using direct TM match (${bestMatch.fuzzyScore}% similarity)`,
+        });
+      }
     }
   }
 
@@ -1563,7 +1576,6 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
         document: document ? {
           name: document.name,
         } : undefined,
-        // #region agent log
         sourceLocale: segment.document.sourceLocale, // Pass explicit source locale from document
         targetLocale: segment.document.targetLocale, // Pass explicit target locale from document
         temperature: context.settings?.temperature ?? getDefaultTemperature(context.settings?.provider),
@@ -1580,6 +1592,8 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
 
   if (!translationText) {
     translationText = segment.sourceText;
+  } else {
+    translationText = ensureLeadingSectionFromSegment(translationText, segment.sourceText);
   }
   if (translationText && documentDnaPayload?.abbreviationLogic) {
     translationText = applyTotalCyrillicBan(translationText, documentDnaPayload.abbreviationLogic as Record<string, unknown>, segment.document.targetLocale);
@@ -1818,7 +1832,6 @@ export const runSegmentMachineTranslationWithCritic = async (
         clusterSummary: documentWithSummary.clusterSummary ?? undefined,
       } : undefined,
       documentDna: documentDnaPayload,
-      // #region agent log
       sourceLocale: segment.document.sourceLocale, // Pass explicit source locale from document
       targetLocale: segment.document.targetLocale, // Pass explicit target locale from document
       temperature: options?.temperature ?? context.settings?.temperature ?? getDefaultTemperature(context.settings?.provider),
@@ -1838,6 +1851,8 @@ export const runSegmentMachineTranslationWithCritic = async (
 
   if (!translationText) {
     translationText = segment.sourceText;
+  } else {
+    translationText = ensureLeadingSectionFromSegment(translationText, segment.sourceText);
   }
 
   const updatedSegment = await prisma.segment.update({
@@ -2450,9 +2465,7 @@ export const pretranslateDocument = async (
   }
 
   // Filter segments based on options
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:1965',message:'Pretranslate: Starting segment filtering',data:{documentId,totalSegments:document.segments.length,options:{rewriteConfirmed:options?.rewriteConfirmed,rewriteNonConfirmed:options?.rewriteNonConfirmed,applyAiToLowMatches:options?.applyAiToLowMatches,applyAiToEmptyOnly:options?.applyAiToEmptyOnly}},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-  // #endregion
+  const excludedByEligibility: { segmentIndex: number; segmentId: string; isEmpty: boolean; isConfirmed: boolean; reason: string }[] = [];
   const eligibleSegments = document.segments.filter((segment) => {
     const isEmpty = !segment.targetFinal && !segment.targetMt;
     const isConfirmed = segment.status === 'CONFIRMED';
@@ -2473,12 +2486,17 @@ export const pretranslateDocument = async (
       return true;
     }
 
-    // Otherwise exclude
+    // Otherwise exclude – record for debug
+    const reason = isConfirmed ? 'confirmed_rewrite_disabled' : 'has_target_rewrite_non_confirmed_disabled';
+    excludedByEligibility.push({
+      segmentIndex: segment.segmentIndex,
+      segmentId: segment.id,
+      isEmpty,
+      isConfirmed,
+      reason,
+    });
     return false;
   });
-  // #region agent log
-  fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:1988',message:'Pretranslate: Segment filtering complete',data:{documentId,eligibleCount:eligibleSegments.length,totalCount:document.segments.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-  // #endregion
 
   // Declare variables outside try block so they're accessible in catch
   // Smaller batch size = more frequent saves = better preservation on cancellation
@@ -2594,9 +2612,6 @@ export const pretranslateDocument = async (
         currentPhase: 'tm_matching',
       });
       addLogMessage(documentId, `🚀 Starting Pass 1: Scanning ${eligibleSegments.length} segments for 100% TM matches...`);
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2073',message:'Pretranslate: Starting TM matching loop',data:{documentId,eligibleCount:eligibleSegments.length,queuedForAICount:queuedForAI.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
       for (let i = 0; i < eligibleSegments.length; i += 1) {
       const segment = eligibleSegments[i];
       
@@ -2613,10 +2628,7 @@ export const pretranslateDocument = async (
 
       // Check for cancellation AFTER updating progress but BEFORE processing
       // This ensures we save any pending updates before stopping
-      // #region agent log
       const cancelledBeforeProcessing = isCancelled(documentId);
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2090',message:'Pretranslate: Cancellation check before processing',data:{documentId,segmentIndex:i,segmentId:segment.id,cancelled:cancelledBeforeProcessing,pendingUpdatesCount:pendingUpdates.length,responseLogCount:responseLog.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
       if (cancelledBeforeProcessing) {
         // Save any pending updates before cancelling
         if (pendingUpdates.length > 0) {
@@ -2624,9 +2636,6 @@ export const pretranslateDocument = async (
           pendingUpdates = [];
         }
         // Don't throw immediately - break out of loop to process queued segments
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2096',message:'Pretranslate: Cancellation detected, breaking loop to process queued',data:{documentId,segmentIndex:i,queuedForAICount:queuedForAI.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
         break; // Exit loop to allow processing of queued segments
       }
 
@@ -2641,17 +2650,21 @@ export const pretranslateDocument = async (
       });
 
       const perfectMatch = tmMatches[0];
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2109',message:'Pretranslate: TM match result',data:{documentId,segmentIndex:i,segmentId:segment.id,hasPerfectMatch:!!(perfectMatch&&perfectMatch.fuzzyScore===100),tmMatchesCount:tmMatches.length,topScore:tmMatches[0]?.fuzzyScore},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-      // #endregion
       if (perfectMatch && perfectMatch.fuzzyScore === 100) {
-        // Add to pending updates
+        const substituted = applyTmMatchWithNumberSubstitution(
+          perfectMatch.targetText,
+          perfectMatch.sourceText,
+          segment.sourceText,
+          document.targetLocale,
+        );
+        const rawTarget = substituted.applied ? substituted.result : perfectMatch.targetText;
+        const targetToApply = ensureLeadingSectionFromSegment(rawTarget, segment.sourceText);
         pendingUpdates.push(
           prisma.segment.update({
             where: { id: segment.id },
             data: {
-              targetMt: perfectMatch.targetText,
-              targetFinal: perfectMatch.targetText,
+              targetMt: targetToApply,
+              targetFinal: targetToApply,
               fuzzyScore: 100,
               bestTmEntryId: perfectMatch.id && perfectMatch.id !== 'linked-' && !perfectMatch.id.startsWith('linked-') ? perfectMatch.id : null,
               status: 'MT',
@@ -2661,7 +2674,7 @@ export const pretranslateDocument = async (
         const result = {
           segmentId: segment.id,
           method: 'tm' as const,
-          targetMt: perfectMatch.targetText,
+          targetMt: targetToApply,
           fuzzyScore: 100,
         };
         responseLog.push(result);
@@ -2674,13 +2687,7 @@ export const pretranslateDocument = async (
         // Save updates immediately to preserve progress on cancellation
         // Save in small batches to balance performance and safety
         if (pendingUpdates.length >= SAVE_BATCH_SIZE) {
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2135',message:'Pretranslate: Saving batch of TM updates',data:{documentId,pendingUpdatesCount:pendingUpdates.length,responseLogCount:responseLog.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-          // #endregion
           await prisma.$transaction(pendingUpdates);
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2137',message:'Pretranslate: Batch saved successfully',data:{documentId,savedCount:pendingUpdates.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-          // #endregion
           pendingUpdates = [];
           // Update progress only after successful save so UI/export never show a count higher than what's in DB
           const currentTmCount = responseLog.filter((r) => r.method === 'tm').length;
@@ -2694,11 +2701,8 @@ export const pretranslateDocument = async (
             await prisma.$transaction(pendingUpdates);
             pendingUpdates = [];
           }
-          // Don't throw immediately - break out of loop to process queued segments
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2167',message:'Pretranslate: Cancellation detected after save, breaking loop',data:{documentId,segmentIndex:i,queuedForAICount:queuedForAI.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-          // #endregion
-          break; // Exit loop to allow processing of queued segments
+        // Don't throw immediately - break out of loop to process queued segments
+        break; // Exit loop to allow processing of queued segments
         }
 
         // Update progress at end of loop only when nothing is left pending (so count reflects what's actually saved)
@@ -2707,23 +2711,78 @@ export const pretranslateDocument = async (
           updateProgress(documentId, { tmApplied: currentTmCount, currentSegment: responseLog.length });
         }
       } else {
-        // No 100% match - check if we should queue for AI
-        const hasLowMatch = tmMatches.length > 0 && tmMatches[0].fuzzyScore < 100;
-        const hasNoMatch = tmMatches.length === 0;
-        
-        const shouldApplyAI =
-          (options?.applyAiToLowMatches && (hasLowMatch || hasNoMatch)) || // Apply to < 100% matches OR empty segments
-          (options?.applyAiToEmptyOnly && hasNoMatch); // Apply only to empty segments (no matches)
-
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2159',message:'Pretranslate: AI queue decision',data:{documentId,segmentIndex:i,segmentId:segment.id,hasLowMatch,hasNoMatch,shouldApplyAI,applyAiToLowMatches:options?.applyAiToLowMatches,applyAiToEmptyOnly:options?.applyAiToEmptyOnly,queuedForAICount:queuedForAI.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})}).catch(()=>{});
-        // #endregion
-        if (shouldApplyAI) {
-          const neighbors = {
-            previous: i > 0 ? eligibleSegments[i - 1] : undefined,
-            next: i < eligibleSegments.length - 1 ? eligibleSegments[i + 1] : undefined,
-          };
-          queuedForAI.push({ segment, previous: neighbors.previous, next: neighbors.next });
+        // No 100% match - try high fuzzy (90%+) with number substitution so "94% differs only by numbers" gets correct target
+        let usedHighFuzzySubstitution = false;
+        const highFuzzyMatches = await searchTranslationMemory({
+          sourceText: segment.sourceText,
+          sourceLocale: document.sourceLocale,
+          targetLocale: document.targetLocale,
+          projectId: document.projectId,
+          limit: 1,
+          minScore: 90,
+        });
+        const highMatch = highFuzzyMatches[0];
+        if (highMatch && highMatch.fuzzyScore >= 90) {
+          const substituted = applyTmMatchWithNumberSubstitution(
+            highMatch.targetText,
+            highMatch.sourceText,
+            segment.sourceText,
+            document.targetLocale,
+          );
+          if (substituted.applied) {
+            const targetToApply = ensureLeadingSectionFromSegment(substituted.result, segment.sourceText);
+            pendingUpdates.push(
+              prisma.segment.update({
+                where: { id: segment.id },
+                data: {
+                  targetMt: targetToApply,
+                  targetFinal: targetToApply,
+                  fuzzyScore: highMatch.fuzzyScore,
+                  bestTmEntryId: highMatch.id && highMatch.id !== 'linked-' && !String(highMatch.id).startsWith('linked-') ? highMatch.id : null,
+                  status: 'MT',
+                },
+              }),
+            );
+            responseLog.push({ segmentId: segment.id, method: 'tm' as const, targetMt: targetToApply, fuzzyScore: highMatch.fuzzyScore });
+            addResult(documentId, { segmentId: segment.id, method: 'tm' as const, targetMt: targetToApply, fuzzyScore: highMatch.fuzzyScore });
+            usedHighFuzzySubstitution = true;
+            if (responseLog.filter((r) => r.method === 'tm').length % 10 === 0 || i === 0 || i === eligibleSegments.length - 1) {
+              addLogMessage(documentId, `✅ Applied ${highMatch.fuzzyScore}% TM match (numbers adjusted) to Segment #${i + 1}`);
+            }
+            if (pendingUpdates.length >= SAVE_BATCH_SIZE) {
+              await prisma.$transaction(pendingUpdates);
+              pendingUpdates = [];
+              const currentTmCount = responseLog.filter((r) => r.method === 'tm').length;
+              updateProgress(documentId, { tmApplied: currentTmCount, currentSegment: responseLog.length });
+            }
+            if (pendingUpdates.length === 0) {
+              const currentTmCount = responseLog.filter((r) => r.method === 'tm').length;
+              updateProgress(documentId, { tmApplied: currentTmCount, currentSegment: responseLog.length });
+            }
+            if (isCancelled(documentId)) {
+              if (pendingUpdates.length > 0) {
+                await prisma.$transaction(pendingUpdates);
+                pendingUpdates = [];
+              }
+              break;
+            }
+          }
+        }
+        if (!usedHighFuzzySubstitution) {
+          // No 100% and no high-fuzzy+substitution - check if we should queue for AI
+          const hasLowMatch = tmMatches.length > 0 && tmMatches[0].fuzzyScore < 100;
+          const hasNoMatch = tmMatches.length === 0;
+          // applyAiToEmptyOnly: queue when segment is still empty after TM (no 100% or 90%+ applied) = no match or low match only
+          const shouldApplyAI =
+            (options?.applyAiToLowMatches && (hasLowMatch || hasNoMatch)) ||
+            (options?.applyAiToEmptyOnly && (hasNoMatch || hasLowMatch));
+          if (shouldApplyAI) {
+            const neighbors = {
+              previous: i > 0 ? eligibleSegments[i - 1] : undefined,
+              next: i < eligibleSegments.length - 1 ? eligibleSegments[i + 1] : undefined,
+            };
+            queuedForAI.push({ segment, previous: neighbors.previous, next: neighbors.next });
+          }
         }
       }
     }
@@ -2769,9 +2828,6 @@ export const pretranslateDocument = async (
     // Final check for cancellation before starting AI translation
     // If cancelled but we have queued segments, process them first before stopping
     const wasCancelled = isCancelled(documentId);
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2213',message:'Pretranslate: After loop cancellation check',data:{documentId,wasCancelled,queuedForAICount:queuedForAI.length,hasQueuedSegments:queuedForAI.length>0},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
     // Only throw if cancelled AND no segments to process
     if (wasCancelled && queuedForAI.length === 0) {
       throw new Error('Pretranslation cancelled by user');
@@ -2780,9 +2836,6 @@ export const pretranslateDocument = async (
     // Step 2: Apply AI translations if requested
     // Allow AI translation if we have either project settings OR overrides provided
     // hasAiConfig is already declared above (line 2328), reuse it
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2226',message:'Pretranslate: AI translation check',data:{documentId,queuedForAICount:queuedForAI.length,hasAiConfig:!!hasAiConfig,hasContextSettings:!!context.settings,hasOverrideProvider:!!options?.provider,hasOverrideModel:!!options?.model,effectiveProvider:aiConfig.provider,effectiveModel:aiConfig.model},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-    // #endregion
     if (queuedForAI.length > 0 && hasAiConfig) {
       const useCritic = options?.useCritic ?? false;
       if (useCritic) {
@@ -2801,9 +2854,6 @@ export const pretranslateDocument = async (
         aiApplied: currentAiCount, // Show current count (0 at start, will update as segments complete)
         currentSegment: tmCount, // Total completed so far (TM only at this point)
       });
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2231',message:'Pretranslate: Entering AI translation section',data:{documentId,useCritic,queuedForAICount:queuedForAI.length,wasCancelled},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'E'})}).catch(()=>{});
-      // #endregion
       
       if (useCritic) {
         // Process segments concurrently with critic AI (faster with controlled concurrency)
@@ -2836,10 +2886,6 @@ export const pretranslateDocument = async (
             addLogMessage(documentId, `⏸️ Cancellation detected, skipping Segment #${segmentIndex}`);
             return null; // Skip this segment
           }
-          
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2257',message:'Pretranslate: Starting translateSegmentWithRetry',data:{documentId,segmentId:entry.segment.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-          // #endregion
           
           for (let attempt = 0; attempt < retries; attempt++) {
             // Check cancellation before each attempt
@@ -2923,23 +2969,17 @@ export const pretranslateDocument = async (
                   glossaryMode,
                 },
               );
-              
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2319',message:'Pretranslate: translateWithCritic result',data:{documentId,segmentId:entry.segment.id,hasResult:!!aiResult,hasTargetText:!!aiResult?.targetText,confidence:aiResult?.confidence},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-              // #endregion
+
+              let targetText = aiResult?.targetText ?? entry.segment.sourceText;
 
               return {
                 segmentId: entry.segment.id,
-                targetText: aiResult?.targetText ?? entry.segment.sourceText,
+                targetText,
                 confidence: aiResult?.confidence,
                 fullPrompt: aiResult?.fullPrompt,
                 analysis: aiResult?.analysis,
               };
             } catch (error: any) {
-              // #region agent log
-              fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2326',message:'Pretranslate: translateSegmentWithRetry error caught',data:{documentId,segmentId:entry.segment.id,attempt,retries,errorMessage:error?.message,errorStatus:error?.status,isRateLimit:error?.status===429||error?.response?.status===429},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-              // #endregion
-              
               // Check if it's a rate limit error (429)
               const isRateLimit = error?.status === 429 || 
                                   error?.response?.status === 429 ||
@@ -2967,9 +3007,6 @@ export const pretranslateDocument = async (
               throw error;
             }
           }
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2352',message:'Pretranslate: translateSegmentWithRetry all retries exhausted, returning null',data:{documentId,segmentId:entry.segment.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-          // #endregion
           return null; // All retries exhausted
         };
 
@@ -2987,7 +3024,10 @@ export const pretranslateDocument = async (
                 return null; // Cancelled or failed
               }
 
-              const targetText = result.targetText;
+              let targetText = result.targetText ?? entry.segment.sourceText;
+              if (result.targetText?.trim()) {
+                targetText = ensureLeadingSectionFromSegment(result.targetText, entry.segment.sourceText);
+              }
               // Add to pending updates (thread-safe - each promise adds to array)
               pendingUpdates.push(
                 prisma.segment.update({
@@ -3061,10 +3101,7 @@ export const pretranslateDocument = async (
         const results = await Promise.all(promises);
         
         // Check for cancellation after all promises complete
-        // #region agent log
         const cancelledAfterCritic = isCancelled(documentId);
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2428',message:'Pretranslate: Cancellation check after critic promises',data:{documentId,cancelledAfterCritic,resultsCount:results.length,successfulCount:results.filter(r=>r!==null).length,pendingUpdatesCount:pendingUpdates.length,responseLogCount:responseLog.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-        // #endregion
         
         // CRITICAL: Save any pending updates (whether cancelled or not, save what we have)
         // This ensures all completed translations are preserved even if cancellation occurred
@@ -3093,9 +3130,6 @@ export const pretranslateDocument = async (
           }, 'Pretranslation cancelled - stopping AI translation (critic mode), all completed translations saved');
           addLogMessage(documentId, `⏸️ Cancellation detected. All completed translations (${responseLog.filter((r) => r.method === 'ai').length} segments) have been saved.`);
           // Don't throw - exit gracefully to allow saving what was processed
-          // #region agent log
-          fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2443',message:'Pretranslate: Cancelled after critic, exiting gracefully',data:{documentId,responseLogCount:responseLog.length,aiApplied:responseLog.filter(r=>r.method==='ai').length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-          // #endregion
           // Exit the if block - don't throw, let the code continue to final counts
         }
 
@@ -3327,6 +3361,9 @@ export const pretranslateDocument = async (
           batch.forEach((entry) => {
             const aiResult = resultMap.get(entry.segment.id);
             let targetText = aiResult?.targetText ?? entry.segment.sourceText;
+            if (aiResult?.targetText?.trim()) {
+              targetText = ensureLeadingSectionFromSegment(aiResult.targetText, entry.segment.sourceText);
+            }
             targetText = applyTotalCyrillicBan(targetText, documentDnaPretranslate?.abbreviationLogic as Record<string, unknown> | null | undefined, document.targetLocale);
             targetText = deduplicateFullFormDash(targetText, documentDnaPretranslate?.abbreviationLogic as Record<string, unknown> | null | undefined);
             // Add to pending updates
@@ -3406,10 +3443,6 @@ export const pretranslateDocument = async (
     });
     
     if (emptySegments.length > 0) {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2635',message:'Pretranslate: Resetting empty segments to NEW status',data:{documentId,emptySegmentsCount:emptySegments.length,emptySegmentIds:emptySegments.map(s=>s.id).slice(0,5)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-      // #endregion
-      
       await prisma.segment.updateMany({
         where: {
           id: { in: emptySegments.map(s => s.id) },
@@ -3426,10 +3459,6 @@ export const pretranslateDocument = async (
 
     const tmApplied = responseLog.filter((r) => r.method === 'tm').length;
     const aiApplied = responseLog.filter((r) => r.method === 'ai').length;
-
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2665',message:'Pretranslate: Final counts calculated',data:{documentId,tmApplied,aiApplied,responseLogCount:responseLog.length,responseLogMethods:responseLog.map(r=>r.method)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
-    // #endregion
 
     // Check if cancelled after processing
     if (isCancelled(documentId)) {
@@ -3530,15 +3559,9 @@ export const pretranslateDocument = async (
     };
   } catch (error: any) {
     // Updates are already saved incrementally, but ensure any remaining pending updates are saved
-    // #region agent log
-    fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2625',message:'Pretranslate: Error caught',data:{documentId,errorMessage:error?.message,isCancelled:error?.message==='Pretranslation cancelled by user'||isCancelled(documentId),pendingUpdatesCount:pendingUpdates.length,responseLogCount:responseLog.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-    // #endregion
     if (pendingUpdates.length > 0) {
       try {
         await prisma.$transaction(pendingUpdates);
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2629',message:'Pretranslate: Final updates saved in catch',data:{documentId,savedCount:pendingUpdates.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})}).catch(()=>{});
-        // #endregion
         pendingUpdates = [];
       } catch (txError) {
         console.error('Error saving final updates after cancellation:', txError);
@@ -3548,9 +3571,6 @@ export const pretranslateDocument = async (
     if (error.message === 'Pretranslation cancelled by user' || isCancelled(documentId)) {
       const tmApplied = responseLog.filter((r) => r.method === 'tm').length;
       const aiApplied = responseLog.filter((r) => r.method === 'ai').length;
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/7f529324-455d-4ca1-81c1-cbc867a5b6ab',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ai.service.ts:2716',message:'Pretranslate: Cancellation final counts in catch',data:{documentId,tmApplied,aiApplied,responseLogCount:responseLog.length,responseLogMethods:responseLog.map(r=>r.method)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})}).catch(()=>{});
-      // #endregion
       // Update progress with saved counts BEFORE cancelling to preserve counts
       updateProgress(documentId, {
         tmApplied,
@@ -3855,6 +3875,9 @@ export const patchTranslate = async (
       batch.forEach((entry) => {
         const aiResult = resultMap.get(entry.segment.id);
         let targetText = aiResult?.targetText ?? entry.segment.sourceText;
+        if (aiResult?.targetText?.trim()) {
+          targetText = ensureLeadingSectionFromSegment(aiResult.targetText, entry.segment.sourceText);
+        }
         targetText = applyTotalCyrillicBan(targetText, documentDnaPretranslate?.abbreviationLogic as Record<string, unknown> | null | undefined, document.targetLocale);
         targetText = deduplicateFullFormDash(targetText, documentDnaPretranslate?.abbreviationLogic as Record<string, unknown> | null | undefined);
         pendingUpdates.push(
