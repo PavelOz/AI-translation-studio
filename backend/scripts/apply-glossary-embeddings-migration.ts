@@ -26,6 +26,19 @@ async function main() {
     console.log('✓ Added embedding columns\n');
 
     console.log('Step 3: Creating HNSW index for vector search...');
+    // Some older migrations may have created the column as `vector` (no dimensions).
+    // HNSW indexes with vector_cosine_ops require a dimensioned type like vector(1536).
+    console.log('  - Ensuring vector dimensions (vector(1536))...');
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE "GlossaryEntry"
+      ALTER COLUMN "sourceEmbedding" TYPE vector(1536)
+      USING "sourceEmbedding"::vector(1536);
+    `);
+    // Prisma may have created a BTREE index with the same name via @@index([sourceEmbedding]).
+    // A BTREE index on a pgvector column is not usable and can fail on updates with:
+    // "index row size ... exceeds btree version ...".
+    console.log('  - Dropping any existing index with the same name...');
+    await prisma.$executeRawUnsafe(`DROP INDEX IF EXISTS "GlossaryEntry_sourceEmbedding_idx";`);
     await prisma.$executeRawUnsafe(`
       CREATE INDEX IF NOT EXISTS "GlossaryEntry_sourceEmbedding_idx" 
       ON "GlossaryEntry" 

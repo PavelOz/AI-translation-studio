@@ -193,6 +193,39 @@ export const glossaryApi = {
     return response.data;
   },
 
+  /** Start generating embeddings for glossary entries that don't have them. Optional projectId to limit to one project. */
+  startEmbeddingGeneration: async (projectId?: string): Promise<{ progressId: string }> => {
+    const response = await apiClient.post<{ progressId: string }>('/glossary/embeddings/generate', {
+      projectId: projectId || undefined,
+      batchSize: 50,
+    });
+    return response.data;
+  },
+
+  /** Get progress of a glossary embedding generation job. */
+  getEmbeddingProgress: async (progressId: string): Promise<{
+    total: number;
+    processed: number;
+    succeeded: number;
+    failed: number;
+    status: 'idle' | 'running' | 'completed' | 'cancelled' | 'error';
+    error?: string;
+    startedAt?: string;
+    completedAt?: string;
+  }> => {
+    const response = await apiClient.get<{
+      total: number;
+      processed: number;
+      succeeded: number;
+      failed: number;
+      status: 'idle' | 'running' | 'completed' | 'cancelled' | 'error';
+      error?: string;
+      startedAt?: string;
+      completedAt?: string;
+    }>(`/glossary/embeddings/progress/${encodeURIComponent(progressId)}`);
+    return response.data;
+  },
+
   translateTerm: async (
     term: string,
     lang?: string,

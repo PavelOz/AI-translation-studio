@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import Layout from '../components/Layout';
 import { glossaryApi } from '../api/glossary.api';
@@ -93,6 +93,15 @@ export default function GlossaryPage() {
   });
 
   const [isExporting, setIsExporting] = useState(false);
+  const [embeddingProgressId, setEmbeddingProgressId] = useState<string | null>(null);
+  const [embeddingProgress, setEmbeddingProgress] = useState<{
+    total: number;
+    processed: number;
+    succeeded: number;
+    failed: number;
+    status: string;
+    error?: string;
+  } | null>(null);
 
   const handleAddEntry = () => {
     setEditingEntry(null);
@@ -180,6 +189,45 @@ export default function GlossaryPage() {
     setEditingEntry(null);
   };
 
+  const handleGenerateEmbeddings = async () => {
+    try {
+      const { progressId } = await glossaryApi.startEmbeddingGeneration(projectFilter || undefined);
+      setEmbeddingProgressId(progressId);
+      setEmbeddingProgress({ total: 0, processed: 0, succeeded: 0, failed: 0, status: 'running' });
+    } catch (e: any) {
+      const msg = e.response?.data?.message ?? e.message ?? 'Failed to start embedding generation';
+      toast.error(msg);
+    }
+  };
+
+  // Poll embedding progress when we have an active progressId
+  useEffect(() => {
+    if (!embeddingProgressId || !embeddingProgress || embeddingProgress.status !== 'running') return;
+    const interval = setInterval(async () => {
+      try {
+        const p = await glossaryApi.getEmbeddingProgress(embeddingProgressId);
+        setEmbeddingProgress({
+          total: p.total,
+          processed: p.processed,
+          succeeded: p.succeeded,
+          failed: p.failed,
+          status: p.status,
+          error: p.error,
+        });
+        if (p.status === 'completed' || p.status === 'cancelled' || p.status === 'error') {
+          setEmbeddingProgressId(null);
+          queryClient.invalidateQueries({ queryKey: ['glossary-embedding-stats'] });
+          queryClient.invalidateQueries({ queryKey: ['glossary'] });
+          if (p.status === 'completed') toast.success(`Embeddings generated: ${p.succeeded} succeeded${p.failed > 0 ? `, ${p.failed} failed` : ''}`);
+          if (p.status === 'error' && p.error) toast.error(p.error);
+        }
+      } catch {
+        // ignore poll errors
+      }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [embeddingProgressId, queryClient]);
+
   // Get unique locales from entries
   const sourceLocales = Array.from(new Set(glossaryEntries.map(e => e.sourceLocale))).sort();
   const targetLocales = Array.from(new Set(glossaryEntries.map(e => e.targetLocale))).sort();
@@ -239,13 +287,46 @@ export default function GlossaryPage() {
               </div>
             </div>
             {embeddingStats.withoutEmbedding > 0 && (
-              <div className="mt-4 text-sm text-gray-600">
-                <p>
-                  💡 To generate embeddings for existing entries, run:{' '}
-                  <code className="bg-gray-100 px-2 py-1 rounded text-xs">
-                    npx ts-node backend/scripts/generate-glossary-embeddings.ts
-                  </code>
-                </p>
+              <div className="mt-4 flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleGenerateEmbeddings}
+                  disabled={!!embeddingProgressId}
+                  className="btn btn-primary"
+                >
+                  {embeddingProgressId ? 'Generating…' : 'Generate embeddings'}
+                </button>
+                {embeddingProgress && embeddingProgress.status === 'running' && (
+                  <span className="text-sm text-gray-700">
+                    <span className="font-medium">Generating</span>
+                    {typeof embeddingProgress.total === 'number' && embeddingProgress.total > 0 && (
+                      <>
+                        {' '}
+                        (
+                        {Math.min(
+                          100,
+                          Math.round((embeddingProgress.processed / embeddingProgress.total) * 100),
+                        )}
+                        %)
+                      </>
+                    )}
+                    {' — '}
+                    <span className="font-mono">
+                      Processed {embeddingProgress.processed}/{embeddingProgress.total}
+                    </span>
+                    {' — '}
+                    <span className="text-green-700">Succeeded {embeddingProgress.succeeded}</span>
+                    {' — '}
+                    <span className={embeddingProgress.failed > 0 ? 'text-red-700' : 'text-gray-600'}>
+                      Failed {embeddingProgress.failed}
+                    </span>
+                  </span>
+                )}
+                {embeddingProgress && embeddingProgress.status === 'error' && embeddingProgress.error && (
+                  <span className="text-sm text-red-700">
+                    Error: {embeddingProgress.error}
+                  </span>
+                )}
               </div>
             )}
           </div>

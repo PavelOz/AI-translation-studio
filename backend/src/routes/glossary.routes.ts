@@ -6,6 +6,11 @@ import { requireAuth } from '../utils/authMiddleware';
 import { listGlossaryEntries, upsertGlossaryEntry, getGlossaryEntry, deleteGlossaryEntry, deleteManyGlossaryEntries, importGlossaryCsv, exportGlossaryCsv } from '../services/glossary.service';
 import { findRelevantGlossaryEntries } from '../services/glossary-search.service';
 import { getGlossaryEmbeddingStats } from '../services/vector-search.service';
+import {
+  generateEmbeddingsForExistingGlossaryEntries,
+  getEmbeddingGenerationProgress,
+  getActiveProgressIds,
+} from '../services/embedding-generation.service';
 import { ApiError } from '../utils/apiError';
 
 const contextRulesSchema = z.object({
@@ -78,6 +83,40 @@ glossaryRoutes.get(
       req.query.projectId as string | undefined,
     );
     res.json(stats);
+  }),
+);
+
+const generateEmbeddingsSchema = z.object({
+  projectId: z.string().uuid().optional(),
+  batchSize: z.number().min(1).max(200).optional(),
+});
+
+glossaryRoutes.post(
+  '/embeddings/generate',
+  asyncHandler(async (req, res) => {
+    const payload = generateEmbeddingsSchema.safeParse(req.body || {});
+    const { projectId, batchSize } = payload.success ? payload.data : {};
+    const activeIds = getActiveProgressIds();
+    const hasGlossaryJob = activeIds.some((id) => id.startsWith('glossary-embedding-gen-'));
+    if (hasGlossaryJob) {
+      throw ApiError.conflict('A glossary embedding generation is already running.');
+    }
+    const progressId = await generateEmbeddingsForExistingGlossaryEntries({
+      projectId,
+      batchSize: batchSize ?? 50,
+    });
+    res.status(202).json({ progressId });
+  }),
+);
+
+glossaryRoutes.get(
+  '/embeddings/progress/:progressId',
+  asyncHandler(async (req, res) => {
+    const progress = getEmbeddingGenerationProgress(req.params.progressId);
+    if (!progress) {
+      throw ApiError.notFound('Progress not found');
+    }
+    res.json(progress);
   }),
 );
 

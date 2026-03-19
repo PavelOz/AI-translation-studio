@@ -10,6 +10,7 @@ import { logger } from '../utils/logger';
 import { matchesWithVariations } from '../utils/stemming';
 import { generateEmbedding } from './embedding.service';
 import { searchGlossaryByVector } from './vector-search.service';
+import { validateAndRepairGlossaryCompliance } from './glossary-validator.service';
 import { env } from '../utils/env';
 import type { GlossaryMode } from '../types/glossary';
 import type { ContextRules } from './glossary.service';
@@ -554,9 +555,20 @@ const filterGlossaryByContext = (glossary: OrchestratorGlossaryEntry[], context:
   return glossary.filter(entry => matchesContext(entry, context));
 };
 
+type GlossaryEntryRaw = {
+  id: string;
+  sourceTerm: string;
+  targetTerm: string;
+  sourceLocale: string;
+  targetLocale: string;
+  isForbidden: boolean;
+  notes: string | null;
+  contextRules: any;
+};
+
 /**
- * Get relevant glossary entries using vector search + strict filtering
- * Hybrid approach: Vector search finds top candidates, then strict filtering ensures only matching terms
+ * Get relevant glossary entries: exact match against full glossary first, then vector enrichment.
+ * Ensures terms that literally appear in the source are never missed (recall fix).
  */
 const getRelevantGlossaryEntries = async (
   sourceText: string,
@@ -569,75 +581,98 @@ const getRelevantGlossaryEntries = async (
     return [];
   }
 
-  let vectorCandidates: Array<{
-    id: string;
-    sourceTerm: string;
-    targetTerm: string;
-    sourceLocale: string;
-    targetLocale: string;
-    isForbidden: boolean;
-    notes: string | null;
-    contextRules: any;
-  }> = [];
+  // Step 1 — Exact match against full glossary (mandatory): project + global, no take limit
+  const allEntries = await prisma.glossaryEntry.findMany({
+    where: {
+      OR: [{ projectId }, { projectId: null }],
+      sourceLocale,
+      targetLocale,
+    },
+    select: {
+      id: true,
+      sourceTerm: true,
+      targetTerm: true,
+      sourceLocale: true,
+      targetLocale: true,
+      isForbidden: true,
+      notes: true,
+      contextRules: true,
+    },
+  });
 
-  // Step 1: Vector Retrieval - Find top 50 most relevant terms
+  const directionFilteredRaw = allEntries.filter(
+    (e) => mapGlossaryEntries([e], sourceLocale, targetLocale).length > 0,
+  );
+  const mappedForExact = mapGlossaryEntries(
+    directionFilteredRaw,
+    sourceLocale,
+    targetLocale,
+  );
+  const exactMatchesOrchestrator = filterGlossaryBySourceText(
+    mappedForExact,
+    sourceText,
+    sourceLocale,
+  );
+  const exactMatchIndices = new Set<number>();
+  exactMatchesOrchestrator.forEach((oe) => {
+    const i = mappedForExact.findIndex(
+      (m) => m.term === oe.term && m.translation === oe.translation,
+    );
+    if (i >= 0) exactMatchIndices.add(i);
+  });
+  const exactMatchesRaw: GlossaryEntryRaw[] = directionFilteredRaw.filter((_, i) =>
+    exactMatchIndices.has(i),
+  );
+
+  const exactMatchCount = exactMatchesRaw.length;
+
+  // Step 2 — Vector enrichment (optional): merge by id, never remove exact matches
+  let vectorEnrichmentRaw: GlossaryEntryRaw[] = [];
   try {
     if (env.openAiApiKey) {
       const queryEmbedding = await generateEmbedding(sourceText, true);
-      
       const vectorResults = await searchGlossaryByVector(queryEmbedding, {
         projectId,
         sourceLocale,
         targetLocale,
-        limit: 50, // Top 50 candidates
-        minSimilarity: 0.6, // Lower threshold to get more candidates for filtering
+        limit: 50,
+        minSimilarity: 0.6,
       });
-
-      // Fetch full entry data including notes and contextRules
-      // Preserve order from vector search (most relevant first)
       if (vectorResults.length > 0) {
-        const vectorIds = vectorResults.map(r => r.id);
+        const vectorIds = vectorResults.map((r) => r.id);
         const fullEntries = await prisma.glossaryEntry.findMany({
           where: { id: { in: vectorIds } },
-            select: {
-              id: true,
-              sourceTerm: true,
-              targetTerm: true,
-              sourceLocale: true,
-              targetLocale: true,
-              isForbidden: true,
-              notes: true,
-            },
+          select: {
+            id: true,
+            sourceTerm: true,
+            targetTerm: true,
+            sourceLocale: true,
+            targetLocale: true,
+            isForbidden: true,
+            notes: true,
+            contextRules: true,
+          },
         });
-        
-        // Preserve order from vector search results (most relevant first)
-        const entriesMap = new Map(fullEntries.map(e => [e.id, e]));
-        vectorCandidates = vectorIds
-          .map(id => entriesMap.get(id))
-          .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined);
+        const entriesMap = new Map(fullEntries.map((e) => [e.id, e]));
+        vectorEnrichmentRaw = vectorIds
+          .map((id) => entriesMap.get(id))
+          .filter((entry): entry is GlossaryEntryRaw => entry !== undefined);
       }
-
-      logger.debug({
-        sourceText: sourceText.substring(0, 50),
-        vectorResultsCount: vectorResults.length,
-        candidatesCount: vectorCandidates.length,
-      }, 'Vector search found glossary candidates');
     }
   } catch (error: any) {
     logger.warn(
-      {
-        error: error.message,
-        sourceText: sourceText.substring(0, 50),
-      },
-      'Vector search failed for glossary, falling back to traditional search',
+      { error: error.message, sourceText: sourceText.substring(0, 50) },
+      'Vector search failed for glossary (enrichment), using exact matches only',
     );
-    // Fallback handled below
   }
 
-  // Fallback: If vector search returned no results or failed, use traditional search
-  if (vectorCandidates.length === 0) {
-    logger.debug('No vector candidates found, using fallback: traditional search with take: 200');
-    const fallbackEntries = await prisma.glossaryEntry.findMany({
+  const vectorEnrichmentCount = vectorEnrichmentRaw.length;
+
+  // Step 4 — Fallback only if both exact and vector returned zero
+  let mergedRaw: GlossaryEntryRaw[];
+  if (exactMatchCount === 0 && vectorEnrichmentCount === 0) {
+    logger.debug('No exact or vector glossary matches, using fallback: take 200');
+    mergedRaw = await prisma.glossaryEntry.findMany({
       where: { OR: [{ projectId }, { projectId: null }] },
       orderBy: { createdAt: 'desc' },
       take: 200,
@@ -649,34 +684,38 @@ const getRelevantGlossaryEntries = async (
         targetLocale: true,
         isForbidden: true,
         notes: true,
+        contextRules: true,
       },
     });
-    vectorCandidates = fallbackEntries;
+  } else {
+    const mergedById = new Map<string, GlossaryEntryRaw>();
+    for (const e of exactMatchesRaw) mergedById.set(e.id, e);
+    for (const e of vectorEnrichmentRaw) if (!mergedById.has(e.id)) mergedById.set(e.id, e);
+    mergedRaw = Array.from(mergedById.values());
   }
 
-  // Step 2: Apply direction filtering and context filtering
-  const directionFiltered = mapGlossaryEntries(
-    vectorCandidates,
-    sourceLocale,
-    targetLocale,
-  );
+  const mergedCount = mergedRaw.length;
 
+  // Step 3 — Apply existing filters on merged set
+  const directionFiltered = mapGlossaryEntries(mergedRaw, sourceLocale, targetLocale);
   const contextFiltered = filterGlossaryByContext(directionFiltered, documentContext);
-
-  // Step 3: Strict filtering by source text (with stemming)
   const finalFiltered = filterGlossaryBySourceText(
     contextFiltered,
     sourceText,
     sourceLocale,
   );
 
-  logger.debug({
-    sourceText: sourceText.substring(0, 50),
-    vectorCandidatesCount: vectorCandidates.length,
-    directionFilteredCount: directionFiltered.length,
-    contextFilteredCount: contextFiltered.length,
-    finalFilteredCount: finalFiltered.length,
-  }, 'Glossary filtering pipeline results');
+  logger.debug(
+    {
+      sourceText: sourceText.substring(0, 50),
+      exactMatchCount,
+      vectorEnrichmentCount,
+      mergedCount,
+      contextFilteredCount: contextFiltered.length,
+      finalFilteredCount: finalFiltered.length,
+    },
+    'Glossary filtering pipeline results (exact-first)',
+  );
 
   return finalFiltered;
 };
@@ -734,11 +773,45 @@ const buildAiContext = async (
   }> = [];
 
   if (sourceText && sourceText.trim() && documentSourceLocale && documentTargetLocale) {
-    // RAG Architecture: Use vector search to find most relevant terms
+    // Step 1 — Exact match against full glossary (mandatory): project + global entries
+    const allEntries = await prisma.glossaryEntry.findMany({
+      where: {
+        OR: [{ projectId }, { projectId: null }],
+        sourceLocale: documentSourceLocale,
+        targetLocale: documentTargetLocale,
+      },
+      select: {
+        id: true,
+        sourceTerm: true,
+        targetTerm: true,
+        sourceLocale: true,
+        targetLocale: true,
+        isForbidden: true,
+        notes: true,
+      },
+    });
+
+    const exactMatched = filterGlossaryBySourceText(
+      allEntries.map((e) => ({
+        id: e.id,
+        term: e.sourceTerm,
+        translation: e.targetTerm,
+        forbidden: e.isForbidden,
+        notes: e.notes,
+      })) as unknown as OrchestratorGlossaryEntry[],
+      sourceText,
+      documentSourceLocale,
+    ) as unknown as Array<OrchestratorGlossaryEntry & { id: string }>;
+
+    const exactMatchIds = new Set(exactMatched.map((m) => m.id));
+    const exactMatchesRaw = allEntries.filter((e) => exactMatchIds.has(e.id));
+
+    // Step 2 — Vector enrichment (optional): merge by id, never remove exact matches
+    let vectorEnrichmentRaw: typeof allEntries = [];
     try {
       if (env.openAiApiKey) {
         const queryEmbedding = await generateEmbedding(sourceText, true);
-        
+
         const vectorResults = await searchGlossaryByVector(queryEmbedding, {
           projectId,
           sourceLocale: documentSourceLocale,
@@ -747,14 +820,10 @@ const buildAiContext = async (
           minSimilarity: 0.6, // Lower threshold to get more candidates for filtering
         });
 
-        // Fetch full entry data including notes and contextRules
-        // Preserve order from vector search (most relevant first)
         if (vectorResults.length > 0) {
-          const vectorIds = vectorResults.map(r => r.id);
+          const vectorIds = vectorResults.map((r) => r.id);
           const fullEntries = await prisma.glossaryEntry.findMany({
-            where: { 
-              id: { in: vectorIds },
-            },
+            where: { id: { in: vectorIds } },
             select: {
               id: true,
               sourceTerm: true,
@@ -765,19 +834,12 @@ const buildAiContext = async (
               notes: true,
             },
           });
-          
-          // Preserve order from vector search results (most relevant first)
-          const entriesMap = new Map(fullEntries.map(e => [e.id, e]));
-          glossaryEntries = vectorIds
-            .map(id => entriesMap.get(id))
-            .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined)
-            .map(({ id, status, ...rest }) => rest); // Remove id and status fields to match expected type
 
-          logger.debug({
-            sourceText: sourceText.substring(0, 50),
-            vectorResultsCount: vectorResults.length,
-            candidatesCount: glossaryEntries.length,
-          }, 'Vector search found glossary candidates for context');
+          // Preserve order from vector search results (most relevant first)
+          const entriesMap = new Map(fullEntries.map((e) => [e.id, e]));
+          vectorEnrichmentRaw = vectorIds
+            .map((id) => entriesMap.get(id))
+            .filter((entry): entry is NonNullable<typeof entry> => entry !== undefined);
         }
       }
     } catch (error: any) {
@@ -786,16 +848,67 @@ const buildAiContext = async (
           error: error.message,
           sourceText: sourceText.substring(0, 50),
         },
-        'Vector search failed for glossary in buildAiContext, falling back to traditional search',
+        'Vector search failed for glossary in buildAiContext (enrichment), continuing with exact matches only',
       );
       // Fallback handled below
     }
+
+    const mergedById = new Map<string, (typeof allEntries)[number]>();
+    for (const e of exactMatchesRaw) mergedById.set(e.id, e);
+    for (const e of vectorEnrichmentRaw) if (!mergedById.has(e.id)) mergedById.set(e.id, e);
+    const mergedRaw = Array.from(mergedById.values());
+
+    let finalCountBeforeFilter: number;
+    let finalFilteredCount: number;
+
+    // Step 3 — Fallback only if both exact and vector are empty
+    if (exactMatchesRaw.length === 0 && vectorEnrichmentRaw.length === 0) {
+      logger.debug('Using fallback: traditional search with take: 200');
+      const fallbackRaw = await prisma.glossaryEntry.findMany({
+        where: {
+          OR: [{ projectId }, { projectId: null }],
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 200,
+        select: { sourceTerm: true, targetTerm: true, sourceLocale: true, targetLocale: true, isForbidden: true, notes: true },
+      });
+      glossaryEntries = fallbackRaw.map((e) => ({ ...e, contextRules: undefined }));
+      finalCountBeforeFilter = 0;
+      finalFilteredCount = glossaryEntries.length;
+    } else {
+      // Step 4 — Filter merged set so only entries that appear in source text are included (vector-only can leak otherwise)
+      const mergedAsOrchestrator = mergedRaw.map((e) => ({
+        id: e.id,
+        term: e.sourceTerm,
+        translation: e.targetTerm,
+        forbidden: e.isForbidden,
+        notes: e.notes,
+      }));
+      const filteredOrchestrator = filterGlossaryBySourceText(
+        mergedAsOrchestrator as unknown as OrchestratorGlossaryEntry[],
+        sourceText,
+        documentSourceLocale,
+      );
+      const filteredIds = new Set((filteredOrchestrator as unknown as Array<{ id: string }>).map((x) => x.id));
+      const filteredRaw = mergedRaw.filter((e) => filteredIds.has(e.id));
+      glossaryEntries = filteredRaw.map(({ id, ...rest }) => ({ ...rest, contextRules: undefined }));
+      finalCountBeforeFilter = mergedRaw.length;
+      finalFilteredCount = glossaryEntries.length;
+    }
+
+    logger.debug({
+      sourceText: sourceText.substring(0, 50),
+      exactMatchCount: exactMatchesRaw.length,
+      vectorEnrichmentCount: vectorEnrichmentRaw.length,
+      finalCount: finalCountBeforeFilter,
+      finalFilteredCount,
+    }, 'Glossary retrieval (exact-first) in buildAiContext');
   }
 
   // Fallback: If vector search returned no results or sourceText not provided, use traditional search
   if (glossaryEntries.length === 0) {
     logger.debug('Using fallback: traditional search with take: 200');
-    glossaryEntries = await prisma.glossaryEntry.findMany({
+    const fallbackRaw = await prisma.glossaryEntry.findMany({
       where: { 
         OR: [{ projectId }, { projectId: null }],
       },
@@ -803,6 +916,7 @@ const buildAiContext = async (
       take: 200,
       select: { sourceTerm: true, targetTerm: true, sourceLocale: true, targetLocale: true, isForbidden: true, notes: true },
     });
+    glossaryEntries = fallbackRaw.map((e) => ({ ...e, contextRules: undefined }));
   }
 
   if (!project) {
@@ -1291,6 +1405,7 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
   let aiResult: { targetText: string; provider: string; model: string; confidence: number; usage?: any; fullPrompt?: string; analysis?: string } | null = null;
   const metadata: TranslationMetadata[] = [];
   let documentDnaPayload: Awaited<ReturnType<typeof getDocumentDna>> | null = null;
+  let filteredGlossary: OrchestratorGlossaryEntry[] = [];
 
   // Priority 1: Check for direct TM match (≥70%)
   if (tmAllowed) {
@@ -1487,7 +1602,8 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
       documentName: segment.document.name,
       documentType: undefined,
     };
-    const filteredGlossary = await getRelevantGlossaryEntries(
+    // Keep glossary entries available for downstream validation/repair before DB write.
+    filteredGlossary = await getRelevantGlossaryEntries(
       segment.sourceText,
       segment.document.sourceLocale,
       segment.document.targetLocale,
@@ -1495,13 +1611,7 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
       documentContext,
     );
 
-    // Fetch document with name field
-    const document = await prisma.document.findUnique({
-      where: { id: segment.document.id },
-      select: {
-        name: true,
-      },
-    });
+    // (document.name is already available on segment.document)
 
     // First Mention Only: load document DNA and already-expanded terms from previous segments.
     // Normalize DNA so abbreviationLogic entries are always { longForm, shortForm } for replacement and longForm→shortForm pairs.
@@ -1573,9 +1683,7 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
         guidelines: context.guidelines,
         tmExamples, // Pass examples for RAG
         project: context.projectMeta,
-        document: document ? {
-          name: document.name,
-        } : undefined,
+        document: { name: segment.document.name },
         sourceLocale: segment.document.sourceLocale, // Pass explicit source locale from document
         targetLocale: segment.document.targetLocale, // Pass explicit target locale from document
         temperature: context.settings?.temperature ?? getDefaultTemperature(context.settings?.provider),
@@ -1600,12 +1708,78 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
     translationText = deduplicateFullFormDash(translationText, documentDnaPayload.abbreviationLogic as Record<string, unknown>);
   }
 
+  // Validate glossary compliance and attempt one-shot repair (single-segment path only)
+  let glossaryFlagged = false;
+  if (aiResult && filteredGlossary && filteredGlossary.length > 0) {
+    if (segmentId === '0125c6a1-9ed5-4905-95b3-0ba43e7b1b0a') {
+      logger.debug(
+        {
+          segmentId,
+          glossaryEntriesCount: filteredGlossary.length,
+          glossaryEntries: filteredGlossary.map((e) => ({
+            term: e.term,
+            translation: e.translation,
+            forbidden: e.forbidden ?? false,
+          })),
+        },
+        'DEBUG validateAndRepairGlossaryCompliance: glossaryEntries passed in',
+      );
+    }
+    const compliance = await validateAndRepairGlossaryCompliance({
+      translatedText: translationText,
+      sourceText: segment.sourceText,
+      glossaryEntries: filteredGlossary,
+      sourceLocale: segment.document.sourceLocale,
+      targetLocale: segment.document.targetLocale,
+      segmentId,
+      repairFn: async (prompt: string) => {
+        const repairResult = await orchestrator.translateSingleSegment(
+          {
+            segmentId,
+            sourceText: prompt,
+            previousText: null,
+            nextText: null,
+            documentName: segment.document.name ?? undefined,
+          },
+          {
+            provider: context.settings?.provider,
+            model: context.settings?.model,
+            apiKey: context.apiKey,
+            yandexFolderId: context.yandexFolderId,
+            glossary: filteredGlossary,
+            guidelines: context.guidelines,
+            project: context.projectMeta,
+            sourceLocale: segment.document.sourceLocale,
+            targetLocale: segment.document.targetLocale,
+            temperature: context.settings?.temperature ?? getDefaultTemperature(context.settings?.provider),
+            maxTokens: context.settings?.maxTokens ?? 1024,
+            glossaryMode,
+            documentDna: documentDnaPayload ?? undefined,
+          },
+        );
+        return repairResult.targetText || '';
+      },
+    });
+
+    glossaryFlagged = compliance.flagForReview;
+    if (compliance.wasRepaired && compliance.finalText && compliance.finalText.trim()) {
+      translationText = compliance.finalText;
+      // Re-apply post-processing to maintain required formatting constraints
+      translationText = ensureLeadingSectionFromSegment(translationText, segment.sourceText);
+      if (translationText && documentDnaPayload?.abbreviationLogic) {
+        translationText = applyTotalCyrillicBan(translationText, documentDnaPayload.abbreviationLogic as Record<string, unknown>, segment.document.targetLocale);
+        translationText = deduplicateFullFormDash(translationText, documentDnaPayload.abbreviationLogic as Record<string, unknown>);
+      }
+    }
+  }
+
   const updatedSegment = await prisma.segment.update({
     where: { id: segmentId },
     data: {
       targetMt: translationText,
       fuzzyScore,
       bestTmEntryId,
+      glossaryFlagged,
       status: 'MT',
       ...(aiResult && {
         mtFullPrompt: aiResult.fullPrompt ?? undefined,

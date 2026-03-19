@@ -100,7 +100,6 @@ model Document {
   segments           Segment[]
 
   @@index([clusterId])
-  @@index([documentEmbedding])
   @@index([profileId])
 }
 
@@ -114,6 +113,7 @@ model Segment {
   status             SegmentStatus          @default(NEW)
   fuzzyScore         Int?
   bestTmEntryId      String?
+  glossaryFlagged    Boolean                @default(false)
   confirmedById      String?
   confirmedAt        DateTime?
   timeSpentSeconds   Int?
@@ -199,8 +199,6 @@ model GlossaryEntry {
   embeddingUpdatedAt DateTime?
   status             GlossaryStatus         @default(PREFERRED)
   project            Project?               @relation(fields: [projectId], references: [id], onDelete: Cascade, onUpdate: NoAction)
-
-  @@index([sourceEmbedding])
 }
 
 model AIRequest {
