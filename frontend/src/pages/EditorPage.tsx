@@ -9,6 +9,7 @@ import EditorToolbar from '../components/editor/EditorToolbar';
 import SidebarTabs from '../components/editor/SidebarTabs';
 import GlossaryReviewTable from '../components/Glossary/GlossaryReviewTable';
 import type { Segment, SegmentStatus } from '../api/segments.api';
+import { getSegmentTmDisplayScore } from '../utils/segmentTm';
 import type { GlossaryMode } from '../types/glossary';
 import { getLanguageName } from '../utils/languages';
 
@@ -825,6 +826,8 @@ export default function EditorPage() {
                       segmentId={activeSegment.id}
                       sourceText={activeSegment.sourceText}
                       targetText={activeSegment.targetFinal || activeSegment.targetMt || ''}
+                      appliedBestTmEntryId={activeSegment.bestTmEntryId}
+                      appliedTmScore={getSegmentTmDisplayScore(activeSegment)}
                       glossaryMode={glossaryMode}
                       onGlossaryModeChange={setGlossaryMode}
                       onApplyTM={handleApplyTM}

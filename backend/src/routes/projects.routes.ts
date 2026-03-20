@@ -14,6 +14,13 @@ import {
   removeProjectMember,
   getProjectMembers,
 } from '../services/project.service';
+import { getProjectDna, upsertProjectDna } from '../services/analysis.service';
+import { validateDocumentDnaPayload, validateDnaForCycles } from '../services/dnaValidation';
+import { validateDnaContract, formatValidationReport } from '../services/validate-dna';
+import { getTranslationDirection } from '../services/dnaPrompts';
+import { normalizeDocumentDnaPayload, sanitizeDocumentDnaPayloadForPut } from '../services/dnaSchema';
+import { prisma } from '../db/prisma';
+import { logger } from '../utils/logger';
 import { listDocuments } from '../services/document.service';
 import { importDocumentFile } from '../services/file.service';
 import { ApiError } from '../utils/apiError';
@@ -64,6 +71,22 @@ const projectUploadSchema = z.object({
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
 
+/** Same shape as document DNA; optional project defaults merged under document DNA at runtime. */
+const projectDnaSchema = z.object({
+  technicalSchema: z.record(z.string(), z.unknown()).nullable().optional(),
+  namingConventions: z.record(z.string(), z.unknown()).nullable().optional(),
+  abbreviationLogic: z.record(z.string(), z.unknown()).nullable().optional(),
+  entityGroups: z.record(z.string(), z.unknown()).nullable().optional(),
+}).refine(
+  (data) => {
+    if (data.abbreviationLogic && typeof data.abbreviationLogic === 'object') {
+      return !Object.keys(data.abbreviationLogic).some((k) => k === '' || /^\s+$/.test(k));
+    }
+    return true;
+  },
+  { message: 'abbreviationLogic must not have empty or whitespace-only keys' },
+);
+
 export const projectRoutes = Router();
 
 projectRoutes.use(requireAuth);
@@ -95,6 +118,107 @@ projectRoutes.post(
       createdById: req.user!.userId,
     });
     res.status(201).json(project);
+  }),
+);
+
+projectRoutes.get(
+  '/:projectId/dna',
+  asyncHandler(async (req, res) => {
+    await getProject(req.params.projectId);
+    const dna = await getProjectDna(req.params.projectId);
+    res.json(dna);
+  }),
+);
+
+projectRoutes.get(
+  '/:projectId/dna/validate',
+  asyncHandler(async (req, res) => {
+    await getProject(req.params.projectId);
+    const dna = await getProjectDna(req.params.projectId);
+    const result = validateDocumentDnaPayload(dna ?? null);
+    const abbreviationCount =
+      dna?.abbreviationLogic && typeof dna.abbreviationLogic === 'object'
+        ? Object.keys(dna.abbreviationLogic).length
+        : 0;
+    const project = await prisma.project.findUnique({
+      where: { id: req.params.projectId },
+      select: { sourceLocale: true, targetLocales: true },
+    });
+    let contractValidation = null;
+    if (project?.sourceLocale && project.targetLocales?.length) {
+      const direction = getTranslationDirection(project.sourceLocale, project.targetLocales[0]);
+      contractValidation = validateDnaContract(dna ?? null, direction);
+    }
+    res.json({
+      valid: result.valid,
+      errors: result.errors,
+      abbreviationCount,
+      contractValidation: contractValidation
+        ? {
+            status: contractValidation.status,
+            issues: contractValidation.issues,
+            suggestions: contractValidation.suggestions,
+            report: formatValidationReport(contractValidation),
+          }
+        : null,
+    });
+  }),
+);
+
+projectRoutes.put(
+  '/:projectId/dna',
+  asyncHandler(async (req, res) => {
+    const projectId = req.params.projectId;
+    await getProject(projectId);
+    const parsed = projectDnaSchema.safeParse(req.body);
+    if (!parsed.success) {
+      const issues = parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`);
+      res.status(400).json({ error: 'Invalid Project DNA payload', details: issues });
+      return;
+    }
+    const sanitized = sanitizeDocumentDnaPayloadForPut(parsed.data as Record<string, unknown>);
+    let normalized: ReturnType<typeof normalizeDocumentDnaPayload>;
+    try {
+      normalized = normalizeDocumentDnaPayload(sanitized);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      res.status(400).json({ error: 'Invalid Project DNA structure', details: [msg] });
+      return;
+    }
+    const cycleCheck = validateDnaForCycles(normalized);
+    if (!cycleCheck.valid) {
+      res.status(400).json({ error: 'Project DNA recursion risk', details: cycleCheck.errors });
+      return;
+    }
+    try {
+      const project = await prisma.project.findUnique({
+        where: { id: projectId },
+        select: { sourceLocale: true, targetLocales: true },
+      });
+      if (project?.sourceLocale && project.targetLocales?.length) {
+        const direction = getTranslationDirection(project.sourceLocale, project.targetLocales[0]);
+        const contractValidation = validateDnaContract(normalized, direction);
+        if (contractValidation.status === 'ERROR') {
+          const errorMessages = contractValidation.issues.filter((i) => i.type === 'error').map((i) => i.message);
+          res.status(400).json({
+            error: 'Project DNA validation failed',
+            details: errorMessages,
+            report: formatValidationReport(contractValidation),
+          });
+          return;
+        }
+        if (contractValidation.status === 'WARNING') {
+          logger.warn({ projectId, validation: contractValidation }, 'Project DNA validation warnings');
+        }
+      }
+    } catch (validationErr: unknown) {
+      logger.error(
+        { projectId, error: validationErr instanceof Error ? validationErr.message : String(validationErr) },
+        'Project DNA contract validation error',
+      );
+    }
+    const updated = await upsertProjectDna(projectId, normalized);
+    res.json(updated);
   }),
 );
 

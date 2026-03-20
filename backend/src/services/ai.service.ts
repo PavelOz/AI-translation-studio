@@ -14,7 +14,8 @@ import { validateAndRepairGlossaryCompliance } from './glossary-validator.servic
 import { env } from '../utils/env';
 import type { GlossaryMode } from '../types/glossary';
 import type { ContextRules } from './glossary.service';
-import { getDocumentGlossaryForSegment, getDocumentStyleRules, getDocumentDna } from './analysis.service';
+import { getDocumentGlossaryForSegment, getDocumentStyleRules, getEffectiveDocumentDna, getProjectDna } from './analysis.service';
+import { mergeDna, prismaDnaRowToPayload } from './dnaMerge';
 import { applyTotalCyrillicBan, deduplicateFullFormDash } from './translation.service';
 import { validateDocumentDnaPayload, validateDnaForCycles } from './dnaValidation';
 import { validateDnaContract } from './validate-dna';
@@ -25,6 +26,23 @@ import pLimit from 'p-limit';
 
 const orchestrator = new AIOrchestrator();
 const qaEngine = new QAEngine();
+
+/** Project defaults + document row from Prisma include, normalized when possible (orchestrator / post-process). */
+async function effectiveDnaForPrismaInclude(
+  projectId: string,
+  documentDna: {
+    technicalSchema: unknown;
+    namingConventions: unknown;
+    abbreviationLogic: unknown;
+    entityGroups: unknown;
+  } | null | undefined,
+) {
+  const raw = prismaDnaRowToPayload(documentDna ?? null);
+  const projectDna = await getProjectDna(projectId);
+  const merged = mergeDna(projectDna, raw);
+  if (!merged) return null;
+  return normalizeDocumentDnaPayloadOrNull(merged) ?? merged;
+}
 
 // Cancellation tokens for batch translation jobs (keyed by documentId)
 const batchTranslationCancellationTokens = new Map<string, boolean>();
@@ -1458,14 +1476,9 @@ export const generateSegmentSuggestions = async (documentId: string): Promise<Se
       'Stage 2: Document context fetched for translation',
     );
 
-    const documentDnaPayload = documentWithSummary?.documentDna
-      ? {
-          technicalSchema: documentWithSummary.documentDna.technicalSchema as Record<string, unknown> | null | undefined,
-          namingConventions: documentWithSummary.documentDna.namingConventions as Record<string, unknown> | null | undefined,
-          abbreviationLogic: documentWithSummary.documentDna.abbreviationLogic as Record<string, unknown> | null | undefined,
-          entityGroups: documentWithSummary.documentDna.entityGroups as Record<string, unknown> | null | undefined,
-        }
-      : undefined;
+    const documentDnaPayload = documentWithSummary
+      ? await effectiveDnaForPrismaInclude(document.projectId, documentWithSummary.documentDna)
+      : null;
 
     const aiResults = await orchestrator.translateSegments({
       provider: context.settings?.provider,
@@ -1556,7 +1569,7 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
   let bestTmEntryId: string | null = null;
   let aiResult: { targetText: string; provider: string; model: string; confidence: number; usage?: any; fullPrompt?: string; analysis?: string } | null = null;
   const metadata: TranslationMetadata[] = [];
-  let documentDnaPayload: Awaited<ReturnType<typeof getDocumentDna>> | null = null;
+  let documentDnaPayload: Awaited<ReturnType<typeof getEffectiveDocumentDna>> | null = null;
   let filteredGlossary: OrchestratorGlossaryEntry[] = [];
 
   // Priority 1: Check for direct TM match (≥70%)
@@ -1767,7 +1780,7 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
 
     // First Mention Only: load document DNA and already-expanded terms from previous segments.
     // Normalize DNA so abbreviationLogic entries are always { longForm, shortForm } for replacement and longForm→shortForm pairs.
-    const rawDna = await getDocumentDna(segment.document.id);
+    const rawDna = await getEffectiveDocumentDna(segment.document.id);
     documentDnaPayload = (rawDna && normalizeDocumentDnaPayloadOrNull(rawDna)) ?? rawDna ?? null;
     let introducedAbbreviations: string[] = [];
     if (documentDnaPayload?.abbreviationLogic && typeof documentDnaPayload.abbreviationLogic === 'object') {
@@ -2146,14 +2159,9 @@ export const runSegmentMachineTranslationWithCritic = async (
     },
   });
 
-  const documentDnaPayload = documentWithSummary?.documentDna
-    ? {
-        technicalSchema: documentWithSummary.documentDna.technicalSchema as Record<string, unknown> | null | undefined,
-        namingConventions: documentWithSummary.documentDna.namingConventions as Record<string, unknown> | null | undefined,
-        abbreviationLogic: documentWithSummary.documentDna.abbreviationLogic as Record<string, unknown> | null | undefined,
-        entityGroups: documentWithSummary.documentDna.entityGroups as Record<string, unknown> | null | undefined,
-      }
-    : undefined;
+  const documentDnaPayload = documentWithSummary
+    ? await effectiveDnaForPrismaInclude(segment.document.projectId, documentWithSummary.documentDna)
+    : null;
 
   const aiResult = await orchestrator.translateWithCritic(
     buildOrchestratorSegment(segment, previous, next, segment.document.name),
@@ -2171,7 +2179,7 @@ export const runSegmentMachineTranslationWithCritic = async (
         summary: documentWithSummary.summary ?? undefined,
         clusterSummary: documentWithSummary.clusterSummary ?? undefined,
       } : undefined,
-      documentDna: documentDnaPayload,
+      documentDna: documentDnaPayload ?? undefined,
       sourceLocale: segment.document.sourceLocale, // Pass explicit source locale from document
       targetLocale: segment.document.targetLocale, // Pass explicit target locale from document
       temperature: options?.temperature ?? context.settings?.temperature ?? getDefaultTemperature(context.settings?.provider),
@@ -2609,14 +2617,10 @@ export const runDocumentMachineTranslation = async (
         },
       });
 
-      const documentDnaPayloadBatch = documentWithSummary?.documentDna
-        ? {
-            technicalSchema: documentWithSummary.documentDna.technicalSchema as Record<string, unknown> | null | undefined,
-            namingConventions: documentWithSummary.documentDna.namingConventions as Record<string, unknown> | null | undefined,
-            abbreviationLogic: documentWithSummary.documentDna.abbreviationLogic as Record<string, unknown> | null | undefined,
-            entityGroups: documentWithSummary.documentDna.entityGroups as Record<string, unknown> | null | undefined,
-          }
-        : undefined;
+      const documentDnaPayloadBatch = await effectiveDnaForPrismaInclude(
+        document.projectId,
+        documentWithSummary?.documentDna ?? null,
+      );
 
       const documentStyleRules = await getDocumentStyleRules(document.id);
       const documentGlossaryMap = new Map<string, { sourceTerm: string; targetTerm: string; status: string; occurrenceCount: number }>();
@@ -2686,7 +2690,7 @@ export const runDocumentMachineTranslation = async (
             summary: documentWithSummary.summary ?? undefined,
             clusterSummary: documentWithSummary.clusterSummary ?? undefined,
           } : undefined,
-          documentDna: documentDnaPayloadBatch,
+          documentDna: documentDnaPayloadBatch ?? undefined,
           glossary: filteredGlossary,
           guidelines: context.guidelines,
           tmExamples: batchExamples,
@@ -3259,14 +3263,10 @@ export const pretranslateDocument = async (
                 },
               });
 
-              const documentDnaSingle = documentWithSummary?.documentDna
-                ? {
-                    technicalSchema: documentWithSummary.documentDna.technicalSchema as Record<string, unknown> | null | undefined,
-                    namingConventions: documentWithSummary.documentDna.namingConventions as Record<string, unknown> | null | undefined,
-                    abbreviationLogic: documentWithSummary.documentDna.abbreviationLogic as Record<string, unknown> | null | undefined,
-                    entityGroups: documentWithSummary.documentDna.entityGroups as Record<string, unknown> | null | undefined,
-                  }
-                : undefined;
+              const documentDnaSingle = await effectiveDnaForPrismaInclude(
+                document.projectId,
+                documentWithSummary?.documentDna ?? null,
+              );
 
               const orchestratorSegment = buildOrchestratorSegment(
                 entry.segment,
@@ -3289,7 +3289,7 @@ export const pretranslateDocument = async (
                     summary: documentWithSummary.summary ?? undefined,
                     clusterSummary: documentWithSummary.clusterSummary ?? undefined,
                   } : undefined,
-                  documentDna: documentDnaSingle,
+                  documentDna: documentDnaSingle ?? undefined,
                   project: context.projectMeta,
                   sourceLocale: document.sourceLocale,
                   targetLocale: document.targetLocale,
@@ -3482,7 +3482,7 @@ export const pretranslateDocument = async (
         /** Segment Context Filter: session expandedTerms is cleared so each run starts fresh; orchestrator updates it after each batch. */
         orchestrator.clearSessionState(document.id);
         let introducedAbbreviations: string[] = [];
-        const dnaForValidation = await getDocumentDna(document.id);
+        const dnaForValidation = await getEffectiveDocumentDna(document.id);
         const dnaValidation = validateDocumentDnaPayload(dnaForValidation ?? null);
         const cycleCheck = validateDnaForCycles(dnaForValidation ?? null);
         
@@ -3589,16 +3589,11 @@ export const pretranslateDocument = async (
             },
           });
 
-          // Normalize DNA so abbreviationLogic is always { longForm, shortForm }; required for applyTotalCyrillicBan and longForm→shortForm replacement.
-          const rawDnaPayload = documentWithSummary?.documentDna
-            ? {
-                technicalSchema: documentWithSummary.documentDna.technicalSchema as Record<string, unknown> | null | undefined,
-                namingConventions: documentWithSummary.documentDna.namingConventions as Record<string, unknown> | null | undefined,
-                abbreviationLogic: documentWithSummary.documentDna.abbreviationLogic as Record<string, unknown> | null | undefined,
-                entityGroups: documentWithSummary.documentDna.entityGroups as Record<string, unknown> | null | undefined,
-              }
-            : undefined;
-          const documentDnaPretranslate = rawDnaPayload ? (normalizeDocumentDnaPayloadOrNull(rawDnaPayload) ?? rawDnaPayload) : undefined;
+          // Effective DNA (project defaults + document row) — same as single-segment translation path.
+          const documentDnaPretranslate = await effectiveDnaForPrismaInclude(
+            document.projectId,
+            documentWithSummary?.documentDna ?? null,
+          );
 
           // Stage 2: Fetch document-specific context from Analyst Stage
           const documentStyleRules = await getDocumentStyleRules(document.id);
@@ -3658,7 +3653,7 @@ export const pretranslateDocument = async (
               summary: documentWithSummary.summary ?? undefined,
               clusterSummary: documentWithSummary.clusterSummary ?? undefined,
             } : undefined,
-            documentDna: documentDnaPretranslate,
+            documentDna: documentDnaPretranslate ?? undefined,
             segments: orchestratorSegments,
             glossary: filteredGlossary,
             guidelines: context.guidelines,
@@ -4016,7 +4011,7 @@ export const patchTranslate = async (
   const segmentByIndex = new Map(neighborSegments.map((s) => [s.segmentIndex, s]));
 
   const firstAffectedIndex = minIndex;
-  const documentDna = await getDocumentDna(documentId);
+  const documentDna = await getEffectiveDocumentDna(documentId);
   // Consistency: DNA snapshot is frozen for the entire patch run. Normalize once and use only this snapshot in the loop (no refetch).
   const frozenDna = normalizeDocumentDnaPayloadOrNull(documentDna) ?? documentDna ?? null;
   const cycleCheck = validateDnaForCycles(frozenDna);
@@ -4203,7 +4198,7 @@ export const patchTranslate = async (
         document: documentWithSummary
           ? { name: documentWithSummary.name, summary: documentWithSummary.summary ?? undefined, clusterSummary: documentWithSummary.clusterSummary ?? undefined }
           : undefined,
-        documentDna: documentDnaPretranslate,
+        documentDna: documentDnaPretranslate ?? undefined,
         segments: orchestratorSegments,
         glossary: filteredGlossary,
         guidelines: context.guidelines,

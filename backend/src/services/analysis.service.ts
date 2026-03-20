@@ -20,6 +20,8 @@ import {
 import { upsertGlossaryEntry } from './glossary.service';
 import { stripFormattingTags } from '../utils/segmentation';
 import { normalizeDocumentDnaPayload } from './dnaSchema';
+import { mergeDna } from './dnaMerge';
+import type { ValidationHints } from '../ai/types';
 import { Prisma } from '@prisma/client';
 // @ts-ignore - compromise doesn't have TypeScript types
 import nlp from 'compromise';
@@ -5242,6 +5244,7 @@ export type DocumentDnaPayload = {
   namingConventions?: Record<string, unknown> | null;
   abbreviationLogic?: Record<string, unknown> | null;
   entityGroups?: Record<string, unknown> | null;
+  validationHints?: ValidationHints;
 };
 
 /**
@@ -5780,6 +5783,76 @@ export const getDocumentDna = async (documentId: string): Promise<DocumentDnaPay
     abbreviationLogic: row.abbreviationLogic as Record<string, unknown> | null | undefined,
     entityGroups: row.entityGroups as Record<string, unknown> | null | undefined,
   };
+};
+
+/**
+ * Project DNA defaults (optional). Same JSON shape as document DNA; not merged into GET /documents/:id/dna.
+ */
+export const getProjectDna = async (projectId: string): Promise<DocumentDnaPayload | null> => {
+  const row = await prisma.projectDna.findUnique({
+    where: { projectId },
+    select: {
+      technicalSchema: true,
+      namingConventions: true,
+      abbreviationLogic: true,
+      entityGroups: true,
+    },
+  });
+  if (!row) return null;
+  return {
+    technicalSchema: row.technicalSchema as Record<string, unknown> | null | undefined,
+    namingConventions: row.namingConventions as Record<string, unknown> | null | undefined,
+    abbreviationLogic: row.abbreviationLogic as Record<string, unknown> | null | undefined,
+    entityGroups: row.entityGroups as Record<string, unknown> | null | undefined,
+  };
+};
+
+/**
+ * Upsert project DNA defaults (project settings).
+ */
+export const upsertProjectDna = async (
+  projectId: string,
+  payload: DocumentDnaPayload,
+): Promise<DocumentDnaPayload> => {
+  const toJson = (v: Record<string, unknown> | null | undefined): Prisma.InputJsonValue | undefined =>
+    v === undefined ? undefined : v === null ? Prisma.JsonNull : (v as Prisma.InputJsonValue);
+
+  await prisma.projectDna.upsert({
+    where: { projectId },
+    create: {
+      projectId,
+      technicalSchema: toJson(payload.technicalSchema ?? undefined),
+      namingConventions: toJson(payload.namingConventions ?? undefined),
+      abbreviationLogic: toJson(payload.abbreviationLogic ?? undefined),
+      entityGroups: toJson(payload.entityGroups ?? undefined),
+    },
+    update: {
+      technicalSchema: toJson(payload.technicalSchema ?? undefined),
+      namingConventions: toJson(payload.namingConventions ?? undefined),
+      abbreviationLogic: toJson(payload.abbreviationLogic ?? undefined),
+      entityGroups: toJson(payload.entityGroups ?? undefined),
+      updatedAt: new Date(),
+    },
+  });
+  const updated = await getProjectDna(projectId);
+  return updated ?? payload;
+};
+
+/**
+ * Effective DNA for LLM / validation: merge(projectDefaults, documentLayer).
+ */
+export const getEffectiveDocumentDna = async (documentId: string): Promise<DocumentDnaPayload | null> => {
+  const doc = await prisma.document.findUnique({
+    where: { id: documentId },
+    select: { projectId: true },
+  });
+  if (!doc) return null;
+  const [projectLayer, documentLayer] = await Promise.all([
+    getProjectDna(doc.projectId),
+    getDocumentDna(documentId),
+  ]);
+  const merged = mergeDna(projectLayer, documentLayer);
+  return merged;
 };
 
 /** Max characters of document text to send to glossary extraction LLM. */

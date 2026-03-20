@@ -7,6 +7,7 @@ import { documentsApi } from '../api/documents.api';
 import TMImportModal from '../components/TMImportModal';
 import ProjectAISettingsModal from '../components/ProjectAISettingsModal';
 import ProjectGuidelinesModal from '../components/ProjectGuidelinesModal';
+import ProjectDnaModal from '../components/ProjectDnaModal';
 import { getLanguageName } from '../utils/languages';
 import toast from 'react-hot-toast';
 
@@ -28,6 +29,7 @@ export default function ProjectDetailPage() {
   const [isTmModalOpen, setIsTmModalOpen] = useState(false);
   const [isAISettingsModalOpen, setIsAISettingsModalOpen] = useState(false);
   const [isGuidelinesModalOpen, setIsGuidelinesModalOpen] = useState(false);
+  const [isProjectDnaModalOpen, setIsProjectDnaModalOpen] = useState(false);
   const [segmentationMode, setSegmentationMode] = useState<'paragraphs' | 'sentences'>('paragraphs');
   const [sortBy, setSortBy] = useState<'name' | 'size' | 'importTime'>('importTime');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
@@ -222,6 +224,22 @@ export default function ProjectDetailPage() {
           <p className="text-sm text-gray-600 mb-4">
             View and manage translation rules that are automatically applied to all AI translations in this project.
             Rules saved from chat conversations appear here.
+          </p>
+        </div>
+
+        <div className="card">
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="text-xl font-semibold">Project DNA</h2>
+            <button
+              onClick={() => setIsProjectDnaModalOpen(true)}
+              className="btn btn-primary"
+            >
+              Edit defaults
+            </button>
+          </div>
+          <p className="text-sm text-gray-600 mb-4">
+            Shared abbreviation logic, naming conventions, and schema defaults for all documents. Per-document DNA
+            overrides these when present. Used for AI prompts and validation as merged “effective” DNA.
           </p>
         </div>
 
@@ -520,6 +538,12 @@ export default function ProjectDetailPage() {
             <ProjectGuidelinesModal
               isOpen={isGuidelinesModalOpen}
               onClose={() => setIsGuidelinesModalOpen(false)}
+              projectId={projectId!}
+            />
+
+            <ProjectDnaModal
+              isOpen={isProjectDnaModalOpen}
+              onClose={() => setIsProjectDnaModalOpen(false)}
               projectId={projectId!}
             />
           </div>

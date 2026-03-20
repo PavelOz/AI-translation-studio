@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
+import { useQuery } from 'react-query';
 import { tmApi } from '../../api/tm.api';
 import type { TmSearchResult } from '../../api/tm.api';
 import { segmentsApi } from '../../api/segments.api';
@@ -13,7 +14,15 @@ interface TMSuggestionsPanelProps {
   projectId?: string;
   segmentId: string;
   currentTargetText?: string; // Current target text of the segment to check if empty
+  /** Segment.bestTmEntryId — exact TM row used by pretranslate / direct TM (pinned above scatter-gather). */
+  appliedBestTmEntryId?: string | null;
+  /** Display score (e.g. 90), same as segment header TM: %. */
+  appliedTmScore?: number | null;
   onApply: (targetText: string) => void;
+}
+
+function isPersistedTmEntryId(id?: string | null): id is string {
+  return !!id && !id.startsWith('linked-');
 }
 
 // TM Search Profiles: Preset configurations for different translation scenarios
@@ -55,6 +64,8 @@ export default function TMSuggestionsPanel({
   projectId,
   segmentId,
   currentTargetText,
+  appliedBestTmEntryId,
+  appliedTmScore,
   onApply,
 }: TMSuggestionsPanelProps) {
   const [suggestions, setSuggestions] = useState<TmSearchResult[]>([]);
@@ -281,6 +292,42 @@ export default function TMSuggestionsPanel({
       autoAppliedRef.current = null;
     }
   }, [segmentId]);
+
+  const {
+    data: appliedEntry,
+    isLoading: appliedEntryLoading,
+    isError: appliedEntryError,
+  } = useQuery(
+    ['tm-applied-entry', appliedBestTmEntryId],
+    () => tmApi.getEntry(appliedBestTmEntryId!),
+    {
+      enabled: isPersistedTmEntryId(appliedBestTmEntryId),
+      staleTime: 60_000,
+    },
+  );
+
+  const filteredSuggestions = useMemo(
+    () =>
+      appliedBestTmEntryId
+        ? suggestions.filter((s) => s.id !== appliedBestTmEntryId)
+        : suggestions,
+    [suggestions, appliedBestTmEntryId],
+  );
+
+  const appliedAsSuggestion: TmSearchResult | null = useMemo(() => {
+    if (!isPersistedTmEntryId(appliedBestTmEntryId) || !appliedEntry) return null;
+    const scope: TmSearchResult['scope'] =
+      appliedEntry.projectId && appliedEntry.projectId === projectId ? 'project' : 'global';
+    const score =
+      typeof appliedTmScore === 'number' && !Number.isNaN(appliedTmScore) ? appliedTmScore : 0;
+    return {
+      ...appliedEntry,
+      fuzzyScore: score,
+      scope,
+      searchMethod: 'fuzzy',
+      entryType: undefined,
+    };
+  }, [appliedBestTmEntryId, appliedEntry, appliedTmScore, projectId]);
 
   // Track previous values to detect if only settings changed (not sourceText)
   const prevSettingsRef = useRef({ minScore, vectorSimilarity, mode, useVectorSearch });
@@ -869,6 +916,65 @@ export default function TMSuggestionsPanel({
         </div>
       </div>
 
+      {/* Pinned: exact TM row stored on segment (pretranslate uses searchTranslationMemory; Tools uses scatter-gather). */}
+      {appliedBestTmEntryId && (
+        <div className="mb-3 rounded-lg border-2 border-amber-400 bg-amber-50/80 p-3 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <div>
+              <h4 className="text-sm font-bold text-amber-950">Applied TM match</h4>
+              <p className="text-[11px] text-amber-900/90 mt-0.5 max-w-xl">
+                Same entry as <code className="bg-amber-100 px-1 rounded">bestTmEntryId</code> on this segment
+                {typeof appliedTmScore === 'number' && !Number.isNaN(appliedTmScore) ? <> (segment header TM: {appliedTmScore}%)</> : null}.
+                The list below uses scatter-gather + your TM profile, so order and % can differ.
+              </p>
+            </div>
+            {typeof appliedTmScore === 'number' && !Number.isNaN(appliedTmScore) && (
+              <span className={`text-lg font-bold ${getScoreColor(appliedTmScore)}`}>{appliedTmScore}%</span>
+            )}
+          </div>
+
+          {!isPersistedTmEntryId(appliedBestTmEntryId) ? (
+            <p className="text-xs text-amber-900">
+              This ID references a <strong>linked TMX</strong> hit (not stored as a normal DB row). Open Translation
+              Memory / linked files to inspect. Scatter-gather results below are still from the database search.
+            </p>
+          ) : appliedEntryLoading ? (
+            <p className="text-xs text-amber-800">Loading TM entry…</p>
+          ) : appliedEntryError ? (
+            <p className="text-xs text-red-700">
+              Could not load this TM entry (it may have been deleted). ID: {appliedBestTmEntryId}
+            </p>
+          ) : appliedAsSuggestion ? (
+            <>
+              <div className="mb-2">
+                <div className="text-xs text-gray-600 mb-1 font-medium">TM source:</div>
+                <div className="text-sm text-gray-800 bg-white p-2 rounded border border-amber-200 whitespace-pre-wrap">
+                  {stripFormattingMarkers(appliedAsSuggestion.sourceText)}
+                </div>
+              </div>
+              <div className="mb-2">
+                <div className="text-xs text-gray-600 mb-1 font-medium">TM target:</div>
+                <div className="text-sm font-medium text-gray-900 bg-white p-2 rounded border border-amber-200 whitespace-pre-wrap">
+                  {stripFormattingMarkers(appliedAsSuggestion.targetText)}
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs px-2 py-0.5 rounded border font-medium bg-green-100 text-green-900 border-green-300">
+                  [TEXT MATCH — applied]
+                </span>
+                <button
+                  type="button"
+                  className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-sm font-medium rounded-md"
+                  onClick={() => handleApply(appliedAsSuggestion)}
+                >
+                  Insert (with repair)
+                </button>
+              </div>
+            </>
+          ) : null}
+        </div>
+      )}
+
       {/* Search Status */}
       {isLoading && (
         <div className="bg-blue-50 border border-blue-200 rounded p-2 mb-3">
@@ -906,10 +1012,12 @@ export default function TMSuggestionsPanel({
         </div>
       )}
 
-          {!isLoading && suggestions.length === 0 && (
+          {!isLoading && filteredSuggestions.length === 0 && (
         <div className="text-sm text-gray-500 text-center py-4">
-          No suggestions found
-          {projectId && (
+          {appliedBestTmEntryId
+            ? 'No additional scatter-gather matches (the applied TM row is shown above).'
+            : 'No suggestions found'}
+          {!appliedBestTmEntryId && projectId && (
             <div className="text-xs text-gray-400 mt-1">
               Searching in project and global TM
             </div>
@@ -917,12 +1025,15 @@ export default function TMSuggestionsPanel({
         </div>
       )}
 
-      {!isLoading && suggestions.length > 0 && (
+      {!isLoading && filteredSuggestions.length > 0 && (
         <div className="space-y-3">
           <div className="text-xs text-gray-500 mb-2">
-            Found {suggestions.length} match{suggestions.length !== 1 ? 'es' : ''}
+            Found {filteredSuggestions.length} more match{filteredSuggestions.length !== 1 ? 'es' : ''}
+            {appliedBestTmEntryId &&
+              suggestions.some((s) => s.id === appliedBestTmEntryId) &&
+              ' (applied match de-duplicated above)'}
           </div>
-          {suggestions.map((suggestion, index) => {
+          {filteredSuggestions.map((suggestion, index) => {
             const isPerfectMatch = suggestion.fuzzyScore === 100;
             const isSentence = suggestion.entryType === 'sentence';
             const isParagraph = suggestion.entryType === 'paragraph' || !suggestion.entryType; // Default to paragraph if null/undefined

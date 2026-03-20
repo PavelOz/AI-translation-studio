@@ -43,6 +43,7 @@ model Project {
   reports       Report[]
   tmEntries     TranslationMemoryEntry[]
   tmFiles       TranslationMemoryFile[]
+  projectDna    ProjectDna?
 }
 
 model ProjectMember {
@@ -336,6 +337,21 @@ model DocumentDna {
   document           Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
   @@index([documentId])
+}
+
+// Project-level DNA defaults merged under document DNA for runtime (GET document DNA stays document-only).
+model ProjectDna {
+  id                  String   @id @default(uuid())
+  projectId           String   @unique
+  technicalSchema    Json?
+  namingConventions  Json?
+  abbreviationLogic  Json?
+  entityGroups       Json?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  project             Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
 }
 
 enum UserRole {

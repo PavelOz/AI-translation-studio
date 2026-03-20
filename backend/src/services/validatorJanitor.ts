@@ -4,7 +4,7 @@
  */
 
 import { prisma } from '../db/prisma';
-import { getDocumentDna } from './analysis.service';
+import { getEffectiveDocumentDna } from './analysis.service';
 import { normalizeDocumentDnaPayloadOrNull } from './dnaSchema';
 import {
   runJanitorCleaner,
@@ -55,11 +55,11 @@ const SPOT_CHECK_SIZE = 500;
 export function getValidationConfig(
   sourceLocale: string,
   targetLocale: string,
-  dna?: { namingConventions?: Record<string, unknown> } | null,
+  dna?: { namingConventions?: Record<string, unknown> | null } | null,
 ): ValidationConfig {
   const src = (sourceLocale || '').toLowerCase().split(/[-_]/)[0];
   const tgt = (targetLocale || '').toLowerCase().split(/[-_]/)[0];
-  const fromConfig = dna?.namingConventions as Record<string, unknown> | undefined;
+  const fromConfig = (dna?.namingConventions ?? undefined) as Record<string, unknown> | undefined;
   const forbiddenScripts =
     (fromConfig?.forbiddenScripts as string[] | undefined) ??
     (tgt === 'en' || tgt === 'eng' ? ['cyrillic'] : src === 'en' || src === 'eng' ? ['latin'] : ['cyrillic']);
@@ -179,7 +179,7 @@ export async function runValidatorJanitor(
     throw new Error(`Document not found: ${documentId}`);
   }
 
-  const rawDna = await getDocumentDna(documentId);
+  const rawDna = await getEffectiveDocumentDna(documentId);
   const dna = normalizeDocumentDnaPayloadOrNull(rawDna) ?? rawDna;
   const config = getValidationConfig(doc.sourceLocale ?? '', doc.targetLocale ?? '', dna);
 

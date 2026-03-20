@@ -22,6 +22,9 @@ export interface SidebarTabsProps {
   segmentId: string;
   sourceText: string;
   targetText: string;
+  /** TM row that was applied for this segment (pretranslate / direct TM); panel pins it above scatter-gather. */
+  appliedBestTmEntryId?: string | null;
+  appliedTmScore?: number | null;
   glossaryMode: GlossaryMode;
   onGlossaryModeChange: (mode: GlossaryMode) => void;
   onApplyTM: (targetText: string) => void;
@@ -91,6 +94,8 @@ export default function SidebarTabs(props: SidebarTabsProps) {
     segmentId,
     sourceText,
     targetText,
+    appliedBestTmEntryId,
+    appliedTmScore,
     glossaryMode,
     onGlossaryModeChange,
     onApplyTM,
@@ -158,6 +163,8 @@ export default function SidebarTabs(props: SidebarTabsProps) {
               projectId={projectId}
               segmentId={segmentId}
               currentTargetText={targetText}
+              appliedBestTmEntryId={appliedBestTmEntryId}
+              appliedTmScore={appliedTmScore}
               onApply={onApplyTM}
             />
           </>

@@ -128,6 +128,12 @@ export const tmApi = {
     const response = await apiClient.get('/tm/embedding-stats', { params });
     return response.data;
   },
+
+  /** Single TM row — used to show the exact match linked from a segment (`bestTmEntryId`). */
+  getEntry: async (entryId: string): Promise<TranslationMemoryEntry> => {
+    const response = await apiClient.get<TranslationMemoryEntry>(`/tm/entries/${entryId}`);
+    return response.data;
+  },
 };
 
 

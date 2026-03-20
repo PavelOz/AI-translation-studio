@@ -10,7 +10,7 @@
  */
 
 import { prisma } from '../db/prisma';
-import { getDocumentDna } from './analysis.service';
+import { getEffectiveDocumentDna } from './analysis.service';
 import { normalizeDocumentDnaPayloadOrNull } from './dnaSchema';
 import { logger } from '../utils/logger';
 import type { DocumentDnaPayload, ValidationHints } from '../ai/types';
@@ -266,7 +266,7 @@ export class UniversalJanitor {
     this.targetLocale = document.targetLocale;
 
     // Загружаем DNA
-    const dna = await getDocumentDna(documentId);
+    const dna = await getEffectiveDocumentDna(documentId);
     const normalizedDna = normalizeDocumentDnaPayloadOrNull(dna);
 
     if (!normalizedDna?.abbreviationLogic) {
@@ -274,7 +274,8 @@ export class UniversalJanitor {
     } else {
       // Строим индекс терминов
       this.dnaIndex.build(normalizedDna.abbreviationLogic);
-      this.validationHints = normalizedDna.validationHints || null;
+      // validationHints are on raw payload; normalized shape may omit them
+      this.validationHints = dna?.validationHints ?? null;
     }
 
     // Проверяем все сегменты

@@ -1,4 +1,5 @@
 import apiClient from './client';
+import type { DocumentDnaPayload } from './analysis.api';
 
 export type ProjectStatus = 'PLANNING' | 'IN_PROGRESS' | 'COMPLETED' | 'ON_HOLD';
 
@@ -82,6 +83,17 @@ export const projectsApi = {
 
   removeMember: async (projectId: string, userId: string): Promise<void> => {
     await apiClient.delete(`/projects/${projectId}/members/${userId}`);
+  },
+
+  /** Project-level DNA defaults (merged under each document’s DNA for AI / validation). */
+  getProjectDna: async (projectId: string): Promise<DocumentDnaPayload | null> => {
+    const response = await apiClient.get<DocumentDnaPayload | null>(`/projects/${projectId}/dna`);
+    return response.data;
+  },
+
+  updateProjectDna: async (projectId: string, payload: DocumentDnaPayload): Promise<DocumentDnaPayload> => {
+    const response = await apiClient.put<DocumentDnaPayload>(`/projects/${projectId}/dna`, payload);
+    return response.data;
   },
 };
 
