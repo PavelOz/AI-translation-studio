@@ -503,6 +503,9 @@ export default function PretranslateModal({
                   <p className="text-xs text-gray-500 mt-1">
                     Skip Translation Memory matching and send all eligible segments directly to AI translation. Segment selection is still controlled by the options below (empty segments, non-confirmed, etc.).
                   </p>
+                  <p className="text-xs text-blue-600 mt-1">
+                    Use this to test list-aware grouping: lead-in lines (e.g. ending with &quot;:&quot;) and following list items (e.g. ending with &quot;;&quot;) are sent to AI as one unit for better consistency. When TM is enabled, segments with high TM matches (e.g. 90%) never go to AI, so list grouping does not apply.
+                  </p>
                 </label>
               </div>
             </div>

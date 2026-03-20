@@ -566,6 +566,50 @@ type GlossaryEntryRaw = {
   contextRules: any;
 };
 
+/** Cyrillic block used to detect non-Latin DNA values (we only inject Latin target terms into glossary). */
+const CYRILLIC_REGEX = /[\u0400-\u04FF]/;
+
+/**
+ * Get the target (e.g. English) string from a DNA abbreviationLogic value for glossary injection.
+ * Prefers shortForm, then longForm/value; returns null if the result would be Cyrillic (we want Latin only).
+ */
+function getDnaTargetForGlossary(v: unknown): string | null {
+  if (v == null) return null;
+  if (typeof v === 'string') {
+    const t = v.trim();
+    return t && !CYRILLIC_REGEX.test(t) ? t : null;
+  }
+  if (typeof v === 'object' && v !== null) {
+    const o = v as Record<string, unknown>;
+    if (typeof o.shortForm === 'string' && o.shortForm.trim()) return o.shortForm.trim();
+    const str = typeof o.longForm === 'string' ? o.longForm : typeof o.value === 'string' ? o.value : null;
+    if (str && str.trim() && !CYRILLIC_REGEX.test(str.trim())) return str.trim();
+  }
+  return null;
+}
+
+/**
+ * Build glossary entries from Document DNA abbreviationLogic for keys that appear in the segment source.
+ * Ensures the model receives explicit required terms (e.g. "РГП «Госэкспертиза»" → "RSE \"Gosexpertiza\"")
+ * so DNA terms are not ignored when the model translates freely.
+ */
+function getGlossaryEntriesFromDnaInSource(
+  sourceText: string,
+  abbreviationLogic: Record<string, unknown> | null | undefined,
+): OrchestratorGlossaryEntry[] {
+  if (!sourceText || !abbreviationLogic || typeof abbreviationLogic !== 'object') return [];
+  const cleaned = stripFormattingTags(sourceText);
+  const entries: OrchestratorGlossaryEntry[] = [];
+  for (const [key, value] of Object.entries(abbreviationLogic)) {
+    if (!key || !key.trim()) continue;
+    if (cleaned.indexOf(key) === -1) continue;
+    const target = getDnaTargetForGlossary(value);
+    if (!target) continue;
+    entries.push({ term: key, translation: target, forbidden: false });
+  }
+  return entries;
+}
+
 /**
  * Get relevant glossary entries: exact match against full glossary first, then vector enrichment.
  * Ensures terms that literally appear in the source are never missed (recall fix).
@@ -1054,6 +1098,114 @@ const buildOrchestratorSegment = (
   nextText: next?.sourceText,
   documentName: documentName ?? undefined,
 });
+
+/** Max segments per translation unit to avoid token overflow (list blocks are split when larger). */
+const MAX_UNIT_SEGMENTS = 12;
+
+/** Max chars per unit (rough input token guard); units are split when exceeded. */
+const MAX_UNIT_CHARS = 8000;
+
+/**
+ * Queued entry shape used when building translation units (same as pretranslate queuedForAI elements).
+ */
+type QueuedEntry = {
+  segment: { id: string; sourceText: string; segmentIndex: number };
+  previous?: { sourceText: string } | null;
+  next?: { sourceText: string } | null;
+};
+
+/** Colon at end of line (ASCII or fullwidth U+FF1A) for list lead-in. */
+const LIST_LEAD_IN_ENDING = /[:\uFF1A]\s*$/;
+/** Semicolon at end of line (ASCII, fullwidth U+FF1B, Greek ano teleia U+037E). */
+const LIST_ITEM_ENDING_SEMICOLON = /[;\uFF1B\u037E]\s*$/;
+/** Period at end (sentence end) for last list item. */
+const LIST_ITEM_ENDING_PERIOD = /[.\uFF0E]\s*$/;
+/** Sentence-ending punctuation: do not treat as list item when at end (avoid merging standalone sentences). */
+const SENTENCE_END = /[.!?\uFF0E\uFF1F\uFF01]\s*$/;
+
+/**
+ * Detect list-block lead-in: short line ending with colon (e.g. "Проект позволит:").
+ */
+function looksLikeListLeadIn(text: string): boolean {
+  const t = (text ?? '').trim();
+  return t.length > 0 && t.length <= 200 && LIST_LEAD_IN_ENDING.test(t);
+}
+
+/**
+ * Detect list item: ends with semicolon (or variants), starts with bullet/dash/number,
+ * or is a short line that does not end with sentence punctuation (e.g. first item with no trailing semicolon).
+ */
+function looksLikeListItem(text: string): boolean {
+  const t = (text ?? '').trim();
+  if (!t.length) return false;
+  if (LIST_ITEM_ENDING_SEMICOLON.test(t)) return true;
+  if (/^[\s]*[•\-—]\s/.test(t)) return true;
+  if (/^[\s]*\d+\.\s/.test(t)) return true;
+  if (t.length <= 220 && !SENTENCE_END.test(t)) return true;
+  return false;
+}
+
+/**
+ * Detect likely closing list item: short line ending with period (e.g. "подключить дополнительных потребителей.").
+ * Used to include the last list item when lists end with a period instead of semicolon.
+ */
+function looksLikeListClosingItem(text: string): boolean {
+  const t = (text ?? '').trim();
+  return t.length > 0 && t.length <= 250 && LIST_ITEM_ENDING_PERIOD.test(t);
+}
+
+/**
+ * Build translation units from queued segments: list blocks (lead-in + items) are grouped,
+ * other segments are single-segment units. Oversized blocks are split by max segments/chars.
+ */
+function buildTranslationUnits(
+  queued: QueuedEntry[],
+  options: { maxUnitSegments?: number; maxUnitChars?: number } = {},
+): QueuedEntry[][] {
+  const maxSegs = options.maxUnitSegments ?? MAX_UNIT_SEGMENTS;
+  const maxChars = options.maxUnitChars ?? MAX_UNIT_CHARS;
+  const units: QueuedEntry[][] = [];
+  let i = 0;
+  while (i < queued.length) {
+    const entry = queued[i];
+    const raw = entry.segment.sourceText ?? '';
+    const text = stripFormattingTags(raw).trim();
+    const isLeadIn = looksLikeListLeadIn(text);
+    const hasNext = i + 1 < queued.length;
+    const nextRaw = hasNext ? (queued[i + 1].segment.sourceText ?? '') : '';
+    const nextText = stripFormattingTags(nextRaw).trim();
+    const nextIsItem = looksLikeListItem(nextText);
+
+    if (isLeadIn && hasNext && nextIsItem) {
+      const block: QueuedEntry[] = [entry];
+      let chars = text.length;
+      i += 1;
+      while (i < queued.length) {
+        const segRaw = queued[i].segment.sourceText ?? '';
+        const segText = stripFormattingTags(segRaw).trim();
+        if (!looksLikeListItem(segText)) break;
+        if (block.length >= maxSegs || chars + segText.length > maxChars) break;
+        block.push(queued[i]);
+        chars += segText.length;
+        i += 1;
+      }
+      // Include one closing list item (short line ending with period) if present
+      if (i < queued.length && block.length > 1) {
+        const closingRaw = queued[i].segment.sourceText ?? '';
+        const closingText = stripFormattingTags(closingRaw).trim();
+        if (looksLikeListClosingItem(closingText) && block.length < maxSegs && chars + closingText.length <= maxChars) {
+          block.push(queued[i]);
+          i += 1;
+        }
+      }
+      units.push(block);
+      continue;
+    }
+    units.push([entry]);
+    i += 1;
+  }
+  return units;
+}
 
 /** Collect target-language abbreviations from Document DNA abbreviationLogic for Style Governor tracking. */
 function getKnownTargetAbbreviations(abbreviationLogic: Record<string, unknown> | null | undefined): string[] {
@@ -1646,6 +1798,20 @@ export const runSegmentMachineTranslation = async (segmentId: string, options?: 
       const segValidation = validateDocumentDnaPayload(documentDnaPayload);
       if (!segValidation.valid) {
         throw ApiError.badRequest(`Invalid Document DNA: ${segValidation.errors.join('; ')}`);
+      }
+      // Inject DNA terms that appear in the source into the glossary so the model uses them (e.g. "РГП «Госэкспертиза»" → "RSE \"Gosexpertiza\"").
+      const dnaGlossaryEntries = getGlossaryEntriesFromDnaInSource(
+        segment.sourceText,
+        documentDnaPayload.abbreviationLogic as Record<string, unknown> | null | undefined,
+      );
+      if (dnaGlossaryEntries.length > 0) {
+        const existingTerms = new Set(filteredGlossary.map((e) => e.term));
+        for (const e of dnaGlossaryEntries) {
+          if (!existingTerms.has(e.term)) {
+            filteredGlossary = [...filteredGlossary, e];
+            existingTerms.add(e.term);
+          }
+        }
       }
     }
 
@@ -2389,70 +2555,43 @@ export const runDocumentMachineTranslation = async (
         responseLog.push({ segmentId, targetMt: targetText });
       });
     } else {
-      // STANDARD MODE: Batch process segments together
-      // Scatter-Gather RAG: Split paragraphs into sentences, search each sentence + full paragraph
+      // STANDARD MODE: List-aware batching — group list blocks (lead-in + items), then process per unit
       const examplePromises = queuedForAI.map(async (entry) => {
         if (!tmAllowed) {
           return { segmentId: entry.segment.id, examples: [] };
         }
-        
-        // Use scatter-gather search: split paragraph, search sentences + full paragraph
         const exampleMatches = await scatterGatherTmSearch(
           entry.segment.sourceText,
           document.sourceLocale,
           document.targetLocale,
           document.projectId,
-          {
-            limit: 5, // Top 5 examples per segment
-            minScore: 50, // Lower threshold for examples
-            vectorSimilarity: 60, // Include semantic matches
-          }
+          { limit: 5, minScore: 50, vectorSimilarity: 60 },
         );
-
         const examples: TmExample[] = exampleMatches.map((match) => ({
           sourceText: match.sourceText,
           targetText: match.targetText,
           fuzzyScore: match.fuzzyScore,
           searchMethod: match.searchMethod || 'fuzzy',
         }));
-
         return { segmentId: entry.segment.id, examples };
       });
 
       const exampleResults = await Promise.all(examplePromises);
       const examplesMap = new Map(exampleResults.map((r) => [r.segmentId, r.examples]));
 
-      // Group segments by their examples (segments with same examples can share them)
-      // For simplicity, we'll use examples from the first segment in each batch
-      // In future, we could optimize this to group segments with similar examples
-      const orchestratorSegments = queuedForAI.map((entry) =>
-        buildOrchestratorSegment(entry.segment, entry.previous, entry.next, document.name ?? undefined),
+      const translationUnits = buildTranslationUnits(queuedForAI);
+      logger.debug(
+        { documentId, unitCount: translationUnits.length, segmentCount: queuedForAI.length },
+        'List-aware translation units built',
       );
-      
-      // Use examples from the first segment for the batch (can be optimized later)
-      // For now, we'll pass examples per segment if they're different
-      // Since batch translation processes segments together, we'll use the first segment's examples
-      const batchExamples = examplesMap.get(queuedForAI[0]?.segment.id) ?? [];
 
-      // Filter glossary by document context first
       const documentContext: DocumentContext = {
         projectDomain: context.projectMeta.domain,
         projectClient: context.projectMeta.client,
         documentName: document.name,
         documentType: undefined,
       };
-      // Get relevant glossary entries using vector search + strict filtering (Hybrid Approach)
-      // For batch processing, use combined source text for vector search
-      const combinedSourceText = orchestratorSegments.map(s => s.sourceText).join(' ');
-      const filteredGlossary = await getRelevantGlossaryEntries(
-        combinedSourceText,
-        document.sourceLocale,
-        document.targetLocale,
-        document.projectId,
-        documentContext,
-      );
 
-      // Fetch document with summary and Document DNA
       const documentWithSummary = await prisma.document.findUnique({
         where: { id: document.id },
         select: {
@@ -2479,12 +2618,10 @@ export const runDocumentMachineTranslation = async (
           }
         : undefined;
 
-      // Stage 2: Fetch document-specific context from Analyst Stage
       const documentStyleRules = await getDocumentStyleRules(document.id);
       const documentGlossaryMap = new Map<string, { sourceTerm: string; targetTerm: string; status: string; occurrenceCount: number }>();
-      
-      for (const segment of orchestratorSegments) {
-        const matchingTerms = await getDocumentGlossaryForSegment(document.id, segment.sourceText);
+      for (const entry of queuedForAI) {
+        const matchingTerms = await getDocumentGlossaryForSegment(document.id, entry.segment.sourceText);
         for (const term of matchingTerms) {
           const existing = documentGlossaryMap.get(term.sourceTerm);
           if (!existing || term.status === 'PREFERRED' || (term.status === 'CANDIDATE' && existing.status !== 'PREFERRED')) {
@@ -2492,7 +2629,6 @@ export const runDocumentMachineTranslation = async (
           }
         }
       }
-      
       const documentGlossary = Array.from(documentGlossaryMap.values())
         .sort((a, b) => {
           const statusPriority = { PREFERRED: 3, CANDIDATE: 2, DEPRECATED: 1 };
@@ -2504,70 +2640,89 @@ export const runDocumentMachineTranslation = async (
         .slice(0, 20)
         .filter(term => term.status !== 'DEPRECATED');
 
-      // Check for cancellation before calling AI
-      if (isBatchTranslationCancelled(documentId)) {
-        logger.info({ documentId }, 'Batch translation cancelled before AI batch call');
-        // Save any TM matches we already found
-        if (updates.length > 0) {
-          await prisma.$transaction(updates);
+      for (let u = 0; u < translationUnits.length; u += 1) {
+        if (isBatchTranslationCancelled(documentId)) {
+          logger.info({ documentId }, 'Batch translation cancelled before AI batch call');
+          if (updates.length > 0) await prisma.$transaction(updates);
+          clearBatchTranslationCancellation(documentId);
+          return { documentId, processed: responseLog.length, results: responseLog };
         }
-        clearBatchTranslationCancellation(documentId);
-        return {
-          documentId,
-          processed: responseLog.length,
-          results: responseLog,
-        };
-      }
 
-      const aiResults = await orchestrator.translateSegments({
-        provider: context.settings?.provider,
-        model: context.settings?.model,
-        apiKey: context.apiKey,
-        yandexFolderId: context.yandexFolderId,
-        segments: orchestratorSegments,
-        document: documentWithSummary ? {
-          name: documentWithSummary.name,
-          summary: documentWithSummary.summary ?? undefined,
-          clusterSummary: documentWithSummary.clusterSummary ?? undefined,
-        } : undefined,
-        documentDna: documentDnaPayloadBatch,
-        glossary: filteredGlossary,
-        guidelines: context.guidelines,
-        tmExamples: batchExamples, // Pass examples for RAG (using first segment's examples for batch)
-        project: context.projectMeta,
-        sourceLocale: document.sourceLocale, // Pass explicit source locale from document
-        targetLocale: document.targetLocale, // Pass explicit target locale from document
-        temperature: context.settings?.temperature ?? getDefaultTemperature(context.settings?.provider),
-        maxTokens: context.settings?.maxTokens ?? 1024,
-        glossaryMode, // Pass glossary mode to orchestrator
-        // Stage 2: Document-specific context
-        documentGlossary: documentGlossary.length > 0 ? documentGlossary : undefined,
-        documentStyleRules: documentStyleRules.length > 0 ? documentStyleRules : undefined,
-        documentId: document.id,
-      });
-
-      const resultMap = new Map(aiResults.map((result) => [result.segmentId, result]));
-
-      queuedForAI.forEach((entry) => {
-        const aiResult = resultMap.get(entry.segment.id);
-        const targetText = aiResult?.targetText ?? entry.segment.sourceText;
-        updates.push(
-          prisma.segment.update({
-            where: { id: entry.segment.id },
-            data: {
-              targetMt: targetText,
-              fuzzyScore: aiResult ? Math.round((aiResult.confidence ?? 0.85) * 100) : null,
-              bestTmEntryId: null,
-              status: 'MT',
-              ...(aiResult && {
-                mtFullPrompt: aiResult.fullPrompt ?? undefined,
-                mtAnalysis: aiResult.analysis ?? undefined,
-              }),
-            },
-          }),
+        const unit = translationUnits[u];
+        const orchestratorSegments = unit.map((entry) =>
+          buildOrchestratorSegment(entry.segment, entry.previous, entry.next, document.name ?? undefined),
         );
-        responseLog.push({ segmentId: entry.segment.id, targetMt: targetText });
-      });
+        const combinedSourceText = orchestratorSegments.map((s) => s.sourceText).join(' ');
+        let filteredGlossary = await getRelevantGlossaryEntries(
+          combinedSourceText,
+          document.sourceLocale,
+          document.targetLocale,
+          document.projectId,
+          documentContext,
+        );
+        const dnaGlossaryEntriesBatch = getGlossaryEntriesFromDnaInSource(
+          combinedSourceText,
+          documentDnaPayloadBatch?.abbreviationLogic as Record<string, unknown> | null | undefined,
+        );
+        if (dnaGlossaryEntriesBatch.length > 0) {
+          const existingTerms = new Set(filteredGlossary.map((e) => e.term));
+          for (const e of dnaGlossaryEntriesBatch) {
+            if (!existingTerms.has(e.term)) {
+              filteredGlossary = [...filteredGlossary, e];
+              existingTerms.add(e.term);
+            }
+          }
+        }
+        const batchExamples = examplesMap.get(unit[0].segment.id) ?? [];
+
+        const aiResults = await orchestrator.translateSegments({
+          provider: context.settings?.provider,
+          model: context.settings?.model,
+          apiKey: context.apiKey,
+          yandexFolderId: context.yandexFolderId,
+          segments: orchestratorSegments,
+          document: documentWithSummary ? {
+            name: documentWithSummary.name,
+            summary: documentWithSummary.summary ?? undefined,
+            clusterSummary: documentWithSummary.clusterSummary ?? undefined,
+          } : undefined,
+          documentDna: documentDnaPayloadBatch,
+          glossary: filteredGlossary,
+          guidelines: context.guidelines,
+          tmExamples: batchExamples,
+          project: context.projectMeta,
+          sourceLocale: document.sourceLocale,
+          targetLocale: document.targetLocale,
+          temperature: context.settings?.temperature ?? getDefaultTemperature(context.settings?.provider),
+          maxTokens: context.settings?.maxTokens ?? 1024,
+          glossaryMode,
+          documentGlossary: documentGlossary.length > 0 ? documentGlossary : undefined,
+          documentStyleRules: documentStyleRules.length > 0 ? documentStyleRules : undefined,
+          documentId: document.id,
+        });
+
+        const resultMap = new Map(aiResults.map((result) => [result.segmentId, result]));
+        unit.forEach((entry) => {
+          const aiResult = resultMap.get(entry.segment.id);
+          const targetText = aiResult?.targetText ?? entry.segment.sourceText;
+          updates.push(
+            prisma.segment.update({
+              where: { id: entry.segment.id },
+              data: {
+                targetMt: targetText,
+                fuzzyScore: aiResult ? Math.round((aiResult.confidence ?? 0.85) * 100) : null,
+                bestTmEntryId: null,
+                status: 'MT',
+                ...(aiResult && {
+                  mtFullPrompt: aiResult.fullPrompt ?? undefined,
+                  mtAnalysis: aiResult.analysis ?? undefined,
+                }),
+              },
+            }),
+          );
+          responseLog.push({ segmentId: entry.segment.id, targetMt: targetText });
+        });
+      }
     }
   }
 
@@ -3321,9 +3476,9 @@ export const pretranslateDocument = async (
           wasCancelled: cancelledAfterCritic,
         }, 'Completed concurrent critic AI translation');
       } else {
-        // Process AI translations in batches (faster, standard mode)
-        const batchSize = 10; // Process 10 segments at a time
-        addLogMessage(documentId, `📦 Processing ${queuedForAI.length} segments in batches of ${batchSize}...`);
+        // Process AI translations in list-aware units (list blocks grouped, others single-segment)
+        const translationUnits = buildTranslationUnits(queuedForAI);
+        addLogMessage(documentId, `📦 Processing ${queuedForAI.length} segments in ${translationUnits.length} unit(s) (list-aware)...`);
         /** Segment Context Filter: session expandedTerms is cleared so each run starts fresh; orchestrator updates it after each batch. */
         orchestrator.clearSessionState(document.id);
         let introducedAbbreviations: string[] = [];
@@ -3363,23 +3518,22 @@ export const pretranslateDocument = async (
           const abbrevCount = dnaForValidation?.abbreviationLogic && typeof dnaForValidation.abbreviationLogic === 'object'
             ? Object.keys(dnaForValidation.abbreviationLogic).length
             : 0;
-          logger.info({ documentId, abbreviationLogicKeys: abbrevCount }, 'Pretranslate: DNA valid, starting batch translation');
-        for (let i = 0; i < queuedForAI.length; i += batchSize) {
-          // Check for cancellation before each batch
+          logger.info({ documentId, abbreviationLogicKeys: abbrevCount, unitCount: translationUnits.length }, 'Pretranslate: DNA valid, starting list-aware unit translation');
+        for (let u = 0; u < translationUnits.length; u += 1) {
+          // Check for cancellation before each unit
           if (isCancelled(documentId)) {
-            // Save any pending updates before cancelling
             if (pendingUpdates.length > 0) {
               await prisma.$transaction(pendingUpdates);
               pendingUpdates = [];
             }
-            console.log('Pretranslation cancelled - stopping AI translation batch processing');
-            break; // Exit loop, updates already saved
+            console.log('Pretranslation cancelled - stopping AI translation unit processing');
+            break;
           }
 
-          const batch = queuedForAI.slice(i, i + batchSize);
-          const batchNumber = Math.floor(i / batchSize) + 1;
-          const totalBatches = Math.ceil(queuedForAI.length / batchSize);
-          addLogMessage(documentId, `📦 Processing batch ${batchNumber}/${totalBatches} (${batch.length} segments)...`);
+          const batch = translationUnits[u];
+          const batchNumber = u + 1;
+          const totalBatches = translationUnits.length;
+          addLogMessage(documentId, `📦 Processing unit ${batchNumber}/${totalBatches} (${batch.length} segment(s))...`);
           
           const orchestratorSegments = batch.map((entry) =>
             buildOrchestratorSegment(entry.segment, entry.previous, entry.next, document.name ?? undefined),
@@ -3397,8 +3551,7 @@ export const pretranslateDocument = async (
             });
           }
           
-          // Log that we're starting AI translation for this batch
-          addLogMessage(documentId, `🤖 Starting AI translation for batch ${batchNumber}/${totalBatches} (${batch.length} segments)...`);
+          addLogMessage(documentId, `🤖 Starting AI translation for unit ${batchNumber}/${totalBatches} (${batch.length} segment(s))...`);
 
           // Filter glossary by document context first
           const documentContext: DocumentContext = {
@@ -3410,7 +3563,7 @@ export const pretranslateDocument = async (
           // Get relevant glossary entries using vector search + strict filtering (Hybrid Approach)
           // For batch processing, use combined source text for vector search
           const combinedSourceText = orchestratorSegments.map(s => s.sourceText).join(' ');
-          const filteredGlossary = await getRelevantGlossaryEntries(
+          let filteredGlossary = await getRelevantGlossaryEntries(
             combinedSourceText,
             document.sourceLocale,
             document.targetLocale,
@@ -3472,12 +3625,26 @@ export const pretranslateDocument = async (
             .slice(0, 20)
             .filter(term => term.status !== 'DEPRECATED');
 
+          const dnaGlossaryEntriesProgress = getGlossaryEntriesFromDnaInSource(
+            combinedSourceText,
+            documentDnaPretranslate?.abbreviationLogic as Record<string, unknown> | null | undefined,
+          );
+          if (dnaGlossaryEntriesProgress.length > 0) {
+            const existingTerms = new Set(filteredGlossary.map((e) => e.term));
+            for (const e of dnaGlossaryEntriesProgress) {
+              if (!existingTerms.has(e.term)) {
+                filteredGlossary = [...filteredGlossary, e];
+                existingTerms.add(e.term);
+              }
+            }
+          }
+
           // Update progress to show we're calling AI (before the actual call)
           // This gives user feedback that AI is working, even if it takes time
           const currentAiCountBefore = responseLog.filter((r) => r.method === 'ai').length;
           updateProgress(documentId, {
-            currentSegmentText: `Calling AI for batch ${batchNumber}/${totalBatches} (${batch.length} segments)...`,
-            aiApplied: currentAiCountBefore, // Show current count before processing
+            currentSegmentText: `Calling AI for unit ${batchNumber}/${totalBatches} (${batch.length} segment(s))...`,
+            aiApplied: currentAiCountBefore,
           });
 
           // eslint-disable-next-line no-await-in-loop
@@ -3514,7 +3681,7 @@ export const pretranslateDocument = async (
           if (fallbackResults.length > 0 || missingResults.length > 0) {
             addLogMessage(
               documentId,
-              `⚠️ AI provider degraded for batch ${batchNumber}/${totalBatches}: ` +
+              `⚠️ AI provider degraded for unit ${batchNumber}/${totalBatches}: ` +
                 `${fallbackResults.length} fallback result(s) and ${missingResults.length} missing result(s). ` +
                 `Source text was used as a placeholder for affected segments.`,
             );
@@ -3548,8 +3715,8 @@ export const pretranslateDocument = async (
             introducedAbbreviations = [...new Set([...introducedAbbreviations, ...newFromBatch])];
           }
           logger.debug(
-            { documentId, batchIndex: Math.floor(i / batchSize) + 1, expandedTermsCount: introducedAbbreviations.length },
-            'Pretranslate: batch completed, expandedTerms updated',
+            { documentId, unitIndex: batchNumber, expandedTermsCount: introducedAbbreviations.length },
+            'Pretranslate: unit completed, expandedTerms updated',
           );
 
           // Update progress immediately after getting AI results (before saving to DB)
@@ -3595,12 +3762,12 @@ export const pretranslateDocument = async (
           const currentAiCount = responseLog.filter((r) => r.method === 'ai').length;
           const tmCount = responseLog.filter((r) => r.method === 'tm').length;
           updateProgress(documentId, { 
-            aiApplied: currentAiCount, // Update immediately to show progress
-            currentSegment: responseLog.length, // Total completed (TM + AI)
-            currentSegmentText: `Completed batch ${batchNumber}/${totalBatches}: ${currentAiCount} AI translations so far`,
+            aiApplied: currentAiCount,
+            currentSegment: responseLog.length,
+            currentSegmentText: `Completed unit ${batchNumber}/${totalBatches}: ${currentAiCount} AI translations so far`,
           });
           
-          addLogMessage(documentId, `✅ Batch ${batchNumber}/${totalBatches} complete: ${batch.length} segments translated (Total AI: ${currentAiCount})`);
+          addLogMessage(documentId, `✅ Unit ${batchNumber}/${totalBatches} complete: ${batch.length} segment(s) translated (Total AI: ${currentAiCount})`);
 
           // Save AI updates immediately after each batch to preserve on cancellation
           // This is critical - save before checking cancellation for next batch
