@@ -29,3 +29,10 @@ export const requireAuth = (req: AuthenticatedRequest, _res: Response, next: Nex
   }
 };
 
+export const requireAdmin = (req: AuthenticatedRequest, _res: Response, next: NextFunction) => {
+  if (req.user?.role !== 'ADMIN') {
+    return next(ApiError.forbidden('Admin access required'));
+  }
+  next();
+};
+

@@ -16,6 +16,7 @@ import ProfilesPage from './pages/ProfilesPage';
 import StageMonitoringDashboard from './components/StageMonitoringDashboard';
 import QualityControlPage from './pages/QualityControlPage';
 import AdminQualityControlPage from './pages/AdminQualityControlPage';
+import BillingSettingsPage from './pages/BillingSettingsPage';
 import JanitorReviewScreen from './components/JanitorReviewScreen';
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -104,6 +105,14 @@ function App() {
         element={
           <PrivateRoute>
             <AdminQualityControlPage />
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/admin/billing"
+        element={
+          <PrivateRoute>
+            <BillingSettingsPage />
           </PrivateRoute>
         }
       />

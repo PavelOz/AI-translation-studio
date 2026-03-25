@@ -4,6 +4,7 @@ import { env } from './utils/env';
 import { logger } from './utils/logger';
 import { DocxHandler } from './utils/file-handlers/docx.handler';
 import { cleanupStaleAnalyses } from './services/analysis.service';
+import { initBillingConfigFromDb } from './services/billing-config.service';
 
 const app = createApp();
 const server = http.createServer(app);
@@ -35,7 +36,11 @@ const checkLibreOffice = async () => {
 
 server.listen(env.port, async () => {
   logger.info(`AI Translation Studio backend listening on port ${env.port}`);
-  
+
+  await initBillingConfigFromDb().catch((error) => {
+    logger.error({ error }, 'Failed to initialize billing settings from database');
+  });
+
   // Cleanup stale analyses (RUNNING statuses from before server restart)
   cleanupStaleAnalyses().catch((error) => {
     logger.error({ error }, 'Failed to cleanup stale analyses');

@@ -5,17 +5,21 @@ import { useAuthStore } from '../stores/authStore';
 export default function BillingStatusBar() {
   const token = useAuthStore((s) => s.token);
   const [data, setData] = useState<Awaited<ReturnType<typeof billingApi.getToday>> | null>(null);
+  const [loadState, setLoadState] = useState<'idle' | 'ok' | 'error'>('idle');
 
   const refresh = useCallback(async () => {
     if (!token) {
       setData(null);
+      setLoadState('idle');
       return;
     }
     try {
       const r = await billingApi.getToday();
       setData(r);
+      setLoadState('ok');
     } catch {
       setData(null);
+      setLoadState('error');
     }
   }, [token]);
 
@@ -29,7 +33,31 @@ export default function BillingStatusBar() {
     return () => window.clearInterval(id);
   }, [token, data?.enabled, refresh]);
 
-  if (!token || !data?.enabled) return null;
+  if (!token) return null;
+
+  if (loadState === 'idle') return null;
+
+  if (loadState === 'error') {
+    return (
+      <div
+        className="text-xs px-2 py-1 rounded border border-amber-200 bg-amber-50 text-amber-900"
+        title="Check that you are logged in and the backend is running. The billing endpoint requires auth."
+      >
+        Usage: unavailable
+      </div>
+    );
+  }
+
+  if (!data?.enabled) {
+    return (
+      <div
+        className="text-xs px-2 py-1 rounded border border-dashed border-gray-300 text-gray-500 bg-gray-50"
+        title="Admins: enable under Billing in the nav (or set BILLING_ENABLED in backend .env before first DB row is created)."
+      >
+        Daily usage: off
+      </div>
+    );
+  }
 
   const pct = data.capUsd > 0 ? Math.min(100, (data.spentUsd / data.capUsd) * 100) : 0;
   const warn = pct >= 80;

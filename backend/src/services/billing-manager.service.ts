@@ -1,10 +1,10 @@
 import fs from 'fs';
 import path from 'path';
-import { env } from '../utils/env';
 import { ApiError } from '../utils/apiError';
 import { logger } from '../utils/logger';
 import { billingAsyncContext } from '../context/billingAsyncContext';
 import type { ProviderUsage } from '../ai/providers/types';
+import { getBillingConfig } from './billing-config.service';
 
 type PricingTier = 'standard' | 'expensive';
 
@@ -74,9 +74,13 @@ function effectiveUserId(): string {
   return billingAsyncContext.get()?.userId ?? '_anonymous';
 }
 
+function powerRolesList(): string[] {
+  return getBillingConfig().powerRoles;
+}
+
 function isPowerRole(role: string | undefined): boolean {
   if (!role) return false;
-  return env.billingPowerRoles.includes(role.toUpperCase());
+  return powerRolesList().includes(role.toUpperCase());
 }
 
 export function getBillingTodayForUser(userId: string, dateKey = utcDateKey()): {
@@ -86,8 +90,9 @@ export function getBillingTodayForUser(userId: string, dateKey = utcDateKey()): 
   dateKey: string;
   enabled: boolean;
 } {
-  const enabled = env.billingEnabled;
-  const capUsd = env.billingDailyCapUsd;
+  const cfg = getBillingConfig();
+  const enabled = cfg.enabled;
+  const capUsd = cfg.dailyCapUsd;
   const spentUsd = enabled ? spendByKey.get(spendKey(userId, dateKey)) ?? 0 : 0;
   return {
     spentUsd,
@@ -98,33 +103,23 @@ export function getBillingTodayForUser(userId: string, dateKey = utcDateKey()): 
   };
 }
 
-export function getBillingStatusPayload() {
-  const userId = effectiveUserId();
-  const today = getBillingTodayForUser(userId);
-  const role = billingAsyncContext.get()?.role;
-  return {
-    ...today,
-    userId,
-    role: role ?? null,
-  };
-}
-
 export function assertPreFlight(provider: string, model: string, request: { prompt: string; systemPrompt?: string }) {
-  if (!env.billingEnabled) return;
+  const cfg = getBillingConfig();
+  if (!cfg.enabled) return;
 
   const userId = effectiveUserId();
   const role = billingAsyncContext.get()?.role;
   const today = getBillingTodayForUser(userId);
 
   const combined = `${request.systemPrompt ?? ''}\n${request.prompt ?? ''}`;
-  if (combined.length > env.billingMaxPromptChars) {
+  if (combined.length > cfg.maxPromptChars) {
     throw ApiError.badRequest(
-      `Prompt too large for billing policy (${combined.length} chars, max ${env.billingMaxPromptChars}).`,
+      `Prompt too large for billing policy (${combined.length} chars, max ${cfg.maxPromptChars}).`,
     );
   }
 
   const estIn = estimateTokensFromText(combined);
-  if (estIn >= env.billingWarnInputTokens) {
+  if (estIn >= cfg.warnInputTokens) {
     logger.warn(
       { userId, provider, model, estInputTokens: estIn, chars: combined.length },
       'Large LLM request (estimated input tokens)',
@@ -133,15 +128,15 @@ export function assertPreFlight(provider: string, model: string, request: { prom
 
   if (today.spentUsd >= today.capUsd) {
     throw ApiError.paymentRequired(
-      `Daily AI usage cap reached ($${today.spentUsd.toFixed(4)} / $${today.capUsd.toFixed(2)}). Try again tomorrow or raise BILLING_DAILY_CAP_USD.`,
+      `Daily AI usage cap reached ($${today.spentUsd.toFixed(4)} / $${today.capUsd.toFixed(2)}). Raise the cap in Admin → Billing or wait until UTC tomorrow.`,
     );
   }
 
   const expensive = isExpensiveModel(provider, model);
-  const lowBalance = today.remainingUsd < env.billingProMinRemainingUsd;
+  const lowBalance = today.remainingUsd < cfg.proMinRemainingUsd;
   if (expensive && lowBalance && !isPowerRole(role)) {
     throw ApiError.forbidden(
-      `Expensive model blocked: remaining daily budget $${today.remainingUsd.toFixed(4)} is below $${env.billingProMinRemainingUsd} (use a cheaper model or wait until tomorrow).`,
+      `Expensive model blocked: remaining daily budget $${today.remainingUsd.toFixed(4)} is below $${cfg.proMinRemainingUsd} (use a cheaper model, increase the cap, or wait until tomorrow).`,
     );
   }
 }
@@ -151,7 +146,7 @@ export function recordUsageAfterCall(
   model: string,
   usage: ProviderUsage | undefined,
 ): { costUsd: number; dateKey: string } {
-  if (!env.billingEnabled) return { costUsd: 0, dateKey: utcDateKey() };
+  if (!getBillingConfig().enabled) return { costUsd: 0, dateKey: utcDateKey() };
 
   const cost = computeCostUsd(provider, model, usage);
   if (cost <= 0) return { costUsd: 0, dateKey: utcDateKey() };

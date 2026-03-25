@@ -16,6 +16,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     { path: '/translation-memory', label: 'Translation Memory' },
     { path: '/glossary', label: 'Glossary' },
     { path: '/reports', label: 'Reports' },
+    ...(user?.role === 'ADMIN' ? [{ path: '/admin/billing', label: 'Billing' } as const] : []),
   ];
 
   return (

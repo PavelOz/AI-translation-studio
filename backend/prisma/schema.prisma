@@ -354,6 +354,18 @@ model ProjectDna {
   @@index([projectId])
 }
 
+// Singleton row (id = "default"). Application loads this at startup; admins can edit via API/UI.
+model BillingSettings {
+  id                 String   @id @default("default")
+  enabled            Boolean  @default(false)
+  dailyCapUsd        Float    @default(1.5)
+  proMinRemainingUsd Float    @default(0.5)
+  warnInputTokens    Int      @default(50000)
+  maxPromptChars     Int      @default(2000000)
+  powerRoles         String   @default("ADMIN")
+  updatedAt          DateTime @updatedAt
+}
+
 enum UserRole {
   ADMIN
   PROJECT_MANAGER
