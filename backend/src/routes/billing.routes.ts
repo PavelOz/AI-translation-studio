@@ -4,6 +4,8 @@ import type { AuthenticatedRequest } from '../utils/authMiddleware';
 import { requireAdmin, requireAuth } from '../utils/authMiddleware';
 import { getBillingTodayForUser } from '../services/billing-manager.service';
 import { getBillingConfig, getBillingSettingsForAdmin, updateBillingSettings } from '../services/billing-config.service';
+import { readBundledPricingFile } from '../services/billing-pricing.fs';
+import { pricingFileSchema } from '../services/billing-pricing.schema';
 import { ApiError } from '../utils/apiError';
 
 export const billingRoutes = Router();
@@ -15,6 +17,16 @@ const settingsBodySchema = z.object({
   warnInputTokens: z.number().int().min(100).max(10_000_000),
   maxPromptChars: z.number().int().min(10_000).max(50_000_000),
   powerRoles: z.array(z.enum(['ADMIN', 'PROJECT_MANAGER', 'LINGUIST'])).min(1),
+  /** Omit to leave unchanged; null = use bundled billing-pricing.v1.json on disk */
+  pricingJson: z.union([pricingFileSchema, z.null()]).optional(),
+});
+
+billingRoutes.get('/pricing-template', requireAuth, requireAdmin, (_req, res, next) => {
+  try {
+    res.json(readBundledPricingFile());
+  } catch (error) {
+    next(error);
+  }
 });
 
 billingRoutes.get('/settings', requireAuth, requireAdmin, async (_req, res, next) => {

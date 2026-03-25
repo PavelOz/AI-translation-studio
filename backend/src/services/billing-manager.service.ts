@@ -1,40 +1,19 @@
-import fs from 'fs';
-import path from 'path';
 import { ApiError } from '../utils/apiError';
 import { logger } from '../utils/logger';
 import { billingAsyncContext } from '../context/billingAsyncContext';
 import type { ProviderUsage } from '../ai/providers/types';
 import { getBillingConfig } from './billing-config.service';
+import type { PricingFile, PricingLine } from './billing-pricing.schema';
+import { getActivePricing } from './billing-pricing.runtime';
 
-type PricingTier = 'standard' | 'expensive';
-
-type PricingLine = {
-  inputPer1M: number;
-  outputPer1M: number;
-  tier: PricingTier;
-};
-
-type PricingFile = {
-  version: number;
-  currency: string;
-  defaultPer1M: PricingLine;
-  models: Record<string, PricingLine>;
-};
+export type { PricingFile, PricingLine } from './billing-pricing.schema';
 
 function utcDateKey(d = new Date()): string {
   return d.toISOString().slice(0, 10);
 }
 
-function loadPricing(): PricingFile {
-  const file = path.join(__dirname, '../../config/billing-pricing.v1.json');
-  const raw = fs.readFileSync(file, 'utf-8');
-  return JSON.parse(raw) as PricingFile;
-}
-
-let cachedPricing: PricingFile | null = null;
 function pricing(): PricingFile {
-  if (!cachedPricing) cachedPricing = loadPricing();
-  return cachedPricing;
+  return getActivePricing();
 }
 
 /** Rough token estimate (~4 chars/token); replace with tiktoken/Gemini count where needed. */

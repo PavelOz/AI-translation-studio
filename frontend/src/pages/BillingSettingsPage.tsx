@@ -3,7 +3,7 @@ import { Navigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import Layout from '../components/Layout';
 import { useAuthStore } from '../stores/authStore';
-import { billingApi } from '../api/billing.api';
+import { billingApi, type BillingPricingFile } from '../api/billing.api';
 import type { UserRole } from '../api/auth.api';
 
 const ALL_ROLES: UserRole[] = ['ADMIN', 'PROJECT_MANAGER', 'LINGUIST'];
@@ -19,6 +19,10 @@ export default function BillingSettingsPage() {
   const [maxPromptChars, setMaxPromptChars] = useState(2_000_000);
   const [powerRoles, setPowerRoles] = useState<UserRole[]>(['ADMIN']);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
+  /** 'file' = store null in DB, use bundled JSON; 'database' = save textarea JSON */
+  const [pricingMode, setPricingMode] = useState<'file' | 'database'>('file');
+  const [pricingText, setPricingText] = useState('');
+  const [loadingTemplate, setLoadingTemplate] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -33,6 +37,13 @@ export default function BillingSettingsPage() {
         setMaxPromptChars(s.maxPromptChars);
         setPowerRoles(s.powerRoles.length ? s.powerRoles : ['ADMIN']);
         setUpdatedAt(s.updatedAt);
+        if (s.pricingSource === 'database' && s.pricingJson != null) {
+          setPricingMode('database');
+          setPricingText(JSON.stringify(s.pricingJson, null, 2));
+        } else {
+          setPricingMode('file');
+          setPricingText('');
+        }
       } catch (e: unknown) {
         if (!cancelled) {
           const msg =
@@ -72,11 +83,40 @@ export default function BillingSettingsPage() {
     });
   };
 
+  const loadTemplateFromServerFile = async () => {
+    setLoadingTemplate(true);
+    try {
+      const tpl = await billingApi.getPricingTemplate();
+      setPricingText(JSON.stringify(tpl, null, 2));
+      setPricingMode('database');
+      toast.success('Loaded pricing from bundled server file into the editor');
+    } catch (e: unknown) {
+      const msg =
+        (e as { response?: { data?: { error?: string; message?: string } } })?.response?.data?.message ||
+        'Failed to load pricing template';
+      toast.error(msg);
+    } finally {
+      setLoadingTemplate(false);
+    }
+  };
+
   const save = async () => {
     if (powerRoles.length === 0) {
       toast.error('Select at least one power role');
       return;
     }
+    let pricingJson: BillingPricingFile | null;
+    if (pricingMode === 'file') {
+      pricingJson = null;
+    } else {
+      try {
+        pricingJson = JSON.parse(pricingText) as BillingPricingFile;
+      } catch {
+        toast.error('Pricing JSON is invalid (check syntax)');
+        return;
+      }
+    }
+
     setSaving(true);
     try {
       const s = await billingApi.updateSettings({
@@ -86,8 +126,16 @@ export default function BillingSettingsPage() {
         warnInputTokens,
         maxPromptChars,
         powerRoles,
+        pricingJson,
       });
       setUpdatedAt(s.updatedAt);
+      if (s.pricingSource === 'database' && s.pricingJson != null) {
+        setPricingMode('database');
+        setPricingText(JSON.stringify(s.pricingJson, null, 2));
+      } else {
+        setPricingMode('file');
+        setPricingText('');
+      }
       toast.success('Billing settings saved');
     } catch (e: unknown) {
       const msg =
@@ -102,13 +150,12 @@ export default function BillingSettingsPage() {
 
   return (
     <Layout>
-      <div className="max-w-2xl">
+      <div className="max-w-3xl">
         <h1 className="text-2xl font-semibold text-gray-900 mb-1">Billing & usage caps</h1>
         <p className="text-sm text-gray-600 mb-6">
-          Controls daily AI spend limits, prompt guards, and which roles may still use expensive models when the
-          remaining budget is low. Per-model prices stay in{' '}
-          <code className="text-xs bg-gray-100 px-1 rounded">backend/config/billing-pricing.v1.json</code> on the
-          server.
+          Daily caps, prompt guards, power roles, and optionally a custom pricing table. When pricing is stored here, it
+          overrides the bundled <code className="text-xs bg-gray-100 px-1 rounded">backend/config/billing-pricing.v1.json</code>{' '}
+          file until you switch back to the server file.
         </p>
 
         {loading ? (
@@ -191,6 +238,54 @@ export default function BillingSettingsPage() {
                   </label>
                 ))}
               </div>
+            </div>
+
+            <div className="border-t border-gray-200 pt-6 space-y-3">
+              <h2 className="text-sm font-semibold text-gray-900">Model pricing (JSON)</h2>
+              <div className="flex flex-wrap gap-3 items-center">
+                <label className="inline-flex items-center gap-2 text-sm text-gray-800 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="pricingMode"
+                    checked={pricingMode === 'file'}
+                    onChange={() => setPricingMode('file')}
+                    className="border-gray-300"
+                  />
+                  Use bundled server file
+                </label>
+                <label className="inline-flex items-center gap-2 text-sm text-gray-800 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="pricingMode"
+                    checked={pricingMode === 'database'}
+                    onChange={() => setPricingMode('database')}
+                    className="border-gray-300"
+                  />
+                  Store custom pricing in database
+                </label>
+                <button
+                  type="button"
+                  onClick={loadTemplateFromServerFile}
+                  disabled={loadingTemplate}
+                  className="text-sm text-primary-600 hover:text-primary-800 disabled:opacity-50"
+                >
+                  {loadingTemplate ? 'Loading…' : 'Load bundled file into editor'}
+                </button>
+              </div>
+              {pricingMode === 'database' ? (
+                <textarea
+                  value={pricingText}
+                  onChange={(e) => setPricingText(e.target.value)}
+                  spellCheck={false}
+                  className="w-full min-h-[280px] font-mono text-xs border border-gray-300 rounded-md p-3"
+                  placeholder='{ "version": 1, "currency": "USD", "defaultPer1M": { ... }, "models": { ... } }'
+                />
+              ) : (
+                <p className="text-xs text-gray-500">
+                  Active pricing is read from the server JSON file. Choose &quot;Store custom pricing&quot; and optionally
+                  &quot;Load bundled file&quot; to edit and save a copy in the database.
+                </p>
+              )}
             </div>
 
             {updatedAt && (
