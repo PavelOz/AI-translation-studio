@@ -1,22 +1,17 @@
 import apiClient from './client';
 import type { UserRole } from './auth.api';
 
+export type BillingPricingLine = {
+  inputPer1M: number;
+  outputPer1M: number;
+  tier: 'standard' | 'expensive';
+};
+
 export type BillingPricingFile = {
   version: number;
   currency: string;
-  defaultPer1M: {
-    inputPer1M: number;
-    outputPer1M: number;
-    tier: 'standard' | 'expensive';
-  };
-  models: Record<
-    string,
-    {
-      inputPer1M: number;
-      outputPer1M: number;
-      tier: 'standard' | 'expensive';
-    }
-  >;
+  defaultPer1M: BillingPricingLine;
+  models: Record<string, BillingPricingLine>;
 };
 
 export type BillingTodayResponse = {
@@ -46,6 +41,12 @@ export type BillingSettingsUpdate = Omit<BillingSettingsDTO, 'updatedAt' | 'pric
   pricingJson?: BillingPricingFile | null;
 };
 
+export type PutBundledPricingResponse = {
+  pricing: BillingPricingFile;
+  activePricingSource: 'database' | 'file';
+  hint?: string;
+};
+
 export const billingApi = {
   getToday: async (): Promise<BillingTodayResponse> => {
     const { data } = await apiClient.get<BillingTodayResponse>('/billing/today');
@@ -57,8 +58,15 @@ export const billingApi = {
     return data;
   },
 
-  getPricingTemplate: async (): Promise<BillingPricingFile> => {
-    const { data } = await apiClient.get<BillingPricingFile>('/billing/pricing-template');
+  /** Raw contents of backend/config/billing-pricing.v1.json on the server */
+  getBundledPricing: async (): Promise<BillingPricingFile> => {
+    const { data } = await apiClient.get<BillingPricingFile>('/billing/bundled-pricing');
+    return data;
+  },
+
+  /** Writes validated JSON to backend/config/billing-pricing.v1.json */
+  putBundledPricing: async (body: BillingPricingFile): Promise<PutBundledPricingResponse> => {
+    const { data } = await apiClient.put<PutBundledPricingResponse>('/billing/bundled-pricing', body);
     return data;
   },
 

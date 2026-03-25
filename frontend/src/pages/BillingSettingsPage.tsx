@@ -19,10 +19,28 @@ export default function BillingSettingsPage() {
   const [maxPromptChars, setMaxPromptChars] = useState(2_000_000);
   const [powerRoles, setPowerRoles] = useState<UserRole[]>(['ADMIN']);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
-  /** 'file' = store null in DB, use bundled JSON; 'database' = save textarea JSON */
-  const [pricingMode, setPricingMode] = useState<'file' | 'database'>('file');
+  /**
+   * `disk` = edit & save backend/config/billing-pricing.v1.json on the server.
+   * `database` = copy in BillingSettings (overrides disk until cleared).
+   */
+  const [pricingMode, setPricingMode] = useState<'disk' | 'database'>('disk');
   const [pricingText, setPricingText] = useState('');
-  const [loadingTemplate, setLoadingTemplate] = useState(false);
+  const [reloadingDisk, setReloadingDisk] = useState(false);
+
+  const loadDiskIntoEditor = async () => {
+    setReloadingDisk(true);
+    try {
+      const disk = await billingApi.getBundledPricing();
+      setPricingText(JSON.stringify(disk, null, 2));
+    } catch (e: unknown) {
+      const msg =
+        (e as { response?: { data?: { error?: string; message?: string } } })?.response?.data?.message ||
+        'Failed to read pricing file from server';
+      toast.error(msg);
+    } finally {
+      setReloadingDisk(false);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -41,8 +59,8 @@ export default function BillingSettingsPage() {
           setPricingMode('database');
           setPricingText(JSON.stringify(s.pricingJson, null, 2));
         } else {
-          setPricingMode('file');
-          setPricingText('');
+          setPricingMode('disk');
+          await loadDiskIntoEditor();
         }
       } catch (e: unknown) {
         if (!cancelled) {
@@ -59,6 +77,7 @@ export default function BillingSettingsPage() {
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- initial load only
   }, []);
 
   if (!user) {
@@ -83,21 +102,8 @@ export default function BillingSettingsPage() {
     });
   };
 
-  const loadTemplateFromServerFile = async () => {
-    setLoadingTemplate(true);
-    try {
-      const tpl = await billingApi.getPricingTemplate();
-      setPricingText(JSON.stringify(tpl, null, 2));
-      setPricingMode('database');
-      toast.success('Loaded pricing from bundled server file into the editor');
-    } catch (e: unknown) {
-      const msg =
-        (e as { response?: { data?: { error?: string; message?: string } } })?.response?.data?.message ||
-        'Failed to load pricing template';
-      toast.error(msg);
-    } finally {
-      setLoadingTemplate(false);
-    }
+  const parsePricingText = (): BillingPricingFile => {
+    return JSON.parse(pricingText) as BillingPricingFile;
   };
 
   const save = async () => {
@@ -105,38 +111,49 @@ export default function BillingSettingsPage() {
       toast.error('Select at least one power role');
       return;
     }
-    let pricingJson: BillingPricingFile | null;
-    if (pricingMode === 'file') {
-      pricingJson = null;
-    } else {
-      try {
-        pricingJson = JSON.parse(pricingText) as BillingPricingFile;
-      } catch {
-        toast.error('Pricing JSON is invalid (check syntax)');
-        return;
-      }
+    let parsedPricing: BillingPricingFile;
+    try {
+      parsedPricing = parsePricingText();
+    } catch {
+      toast.error('Pricing JSON is invalid (check syntax)');
+      return;
     }
 
     setSaving(true);
     try {
-      const s = await billingApi.updateSettings({
-        enabled,
-        dailyCapUsd,
-        proMinRemainingUsd,
-        warnInputTokens,
-        maxPromptChars,
-        powerRoles,
-        pricingJson,
-      });
+      if (pricingMode === 'disk') {
+        const wr = await billingApi.putBundledPricing(parsedPricing);
+        if (wr.hint) toast(wr.hint, { icon: 'ℹ️', duration: 8000 });
+        await billingApi.updateSettings({
+          enabled,
+          dailyCapUsd,
+          proMinRemainingUsd,
+          warnInputTokens,
+          maxPromptChars,
+          powerRoles,
+          pricingJson: null,
+        });
+      } else {
+        await billingApi.updateSettings({
+          enabled,
+          dailyCapUsd,
+          proMinRemainingUsd,
+          warnInputTokens,
+          maxPromptChars,
+          powerRoles,
+          pricingJson: parsedPricing,
+        });
+      }
+      const s = await billingApi.getSettings();
       setUpdatedAt(s.updatedAt);
       if (s.pricingSource === 'database' && s.pricingJson != null) {
         setPricingMode('database');
         setPricingText(JSON.stringify(s.pricingJson, null, 2));
       } else {
-        setPricingMode('file');
-        setPricingText('');
+        setPricingMode('disk');
+        setPricingText(JSON.stringify(await billingApi.getBundledPricing(), null, 2));
       }
-      toast.success('Billing settings saved');
+      toast.success('Saved');
     } catch (e: unknown) {
       const msg =
         (e as { response?: { data?: { error?: string; message?: string } } })?.response?.data?.message ||
@@ -153,9 +170,9 @@ export default function BillingSettingsPage() {
       <div className="max-w-3xl">
         <h1 className="text-2xl font-semibold text-gray-900 mb-1">Billing & usage caps</h1>
         <p className="text-sm text-gray-600 mb-6">
-          Daily caps, prompt guards, power roles, and optionally a custom pricing table. When pricing is stored here, it
-          overrides the bundled <code className="text-xs bg-gray-100 px-1 rounded">backend/config/billing-pricing.v1.json</code>{' '}
-          file until you switch back to the server file.
+          Caps and guards below. Model prices are edited as JSON: either the real file on the server (
+          <code className="text-xs bg-gray-100 px-1 rounded">backend/config/billing-pricing.v1.json</code>
+          ) or an optional database copy that overrides the file.
         </p>
 
         {loading ? (
@@ -247,11 +264,14 @@ export default function BillingSettingsPage() {
                   <input
                     type="radio"
                     name="pricingMode"
-                    checked={pricingMode === 'file'}
-                    onChange={() => setPricingMode('file')}
+                    checked={pricingMode === 'disk'}
+                    onChange={() => {
+                      setPricingMode('disk');
+                      void loadDiskIntoEditor();
+                    }}
                     className="border-gray-300"
                   />
-                  Use bundled server file
+                  Server file on disk
                 </label>
                 <label className="inline-flex items-center gap-2 text-sm text-gray-800 cursor-pointer">
                   <input
@@ -261,35 +281,35 @@ export default function BillingSettingsPage() {
                     onChange={() => setPricingMode('database')}
                     className="border-gray-300"
                   />
-                  Store custom pricing in database
+                  Database copy (overrides file)
                 </label>
-                <button
-                  type="button"
-                  onClick={loadTemplateFromServerFile}
-                  disabled={loadingTemplate}
-                  className="text-sm text-primary-600 hover:text-primary-800 disabled:opacity-50"
-                >
-                  {loadingTemplate ? 'Loading…' : 'Load bundled file into editor'}
-                </button>
+                {pricingMode === 'disk' && (
+                  <button
+                    type="button"
+                    onClick={loadDiskIntoEditor}
+                    disabled={reloadingDisk}
+                    className="text-sm text-primary-600 hover:text-primary-800 disabled:opacity-50"
+                  >
+                    {reloadingDisk ? 'Reloading…' : 'Reload from disk'}
+                  </button>
+                )}
               </div>
-              {pricingMode === 'database' ? (
-                <textarea
-                  value={pricingText}
-                  onChange={(e) => setPricingText(e.target.value)}
-                  spellCheck={false}
-                  className="w-full min-h-[280px] font-mono text-xs border border-gray-300 rounded-md p-3"
-                  placeholder='{ "version": 1, "currency": "USD", "defaultPer1M": { ... }, "models": { ... } }'
-                />
-              ) : (
-                <p className="text-xs text-gray-500">
-                  Active pricing is read from the server JSON file. Choose &quot;Store custom pricing&quot; and optionally
-                  &quot;Load bundled file&quot; to edit and save a copy in the database.
-                </p>
-              )}
+              <textarea
+                value={pricingText}
+                onChange={(e) => setPricingText(e.target.value)}
+                spellCheck={false}
+                className="w-full min-h-[300px] font-mono text-xs border border-gray-300 rounded-md p-3"
+                placeholder='{ "version": 1, "currency": "USD", "defaultPer1M": { ... }, "models": { ... } }'
+              />
+              <p className="text-xs text-gray-500">
+                {pricingMode === 'disk'
+                  ? 'Save writes this JSON to the server file and clears any database override so the file is what runs.'
+                  : 'Save stores this JSON in the database; it overrides the on-disk file until you switch to “Server file” and save again.'}
+              </p>
             </div>
 
             {updatedAt && (
-              <p className="text-xs text-gray-400">Last updated: {new Date(updatedAt).toLocaleString()}</p>
+              <p className="text-xs text-gray-400">Settings row last updated: {new Date(updatedAt).toLocaleString()}</p>
             )}
 
             <button
@@ -298,7 +318,7 @@ export default function BillingSettingsPage() {
               disabled={saving}
               className="inline-flex items-center px-4 py-2 rounded-md bg-primary-600 text-white text-sm font-medium hover:bg-primary-700 disabled:opacity-50"
             >
-              {saving ? 'Saving…' : 'Save settings'}
+              {saving ? 'Saving…' : 'Save'}
             </button>
           </div>
         )}

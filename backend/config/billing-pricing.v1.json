@@ -2,8 +2,8 @@
   "version": 1,
   "currency": "USD",
   "defaultPer1M": {
-    "input": 1.0,
-    "output": 3.0,
+    "inputPer1M": 1.0,
+    "outputPer1M": 3.0,
     "tier": "standard"
   },
   "models": {

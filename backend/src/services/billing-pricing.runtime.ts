@@ -18,3 +18,8 @@ export function getActivePricing(): PricingFile {
   if (!fileCache) fileCache = readBundledPricingFile();
   return fileCache;
 }
+
+/** Call after updating billing-pricing.v1.json on disk so the next read picks up changes. */
+export function invalidateBundledFileCache(): void {
+  fileCache = null;
+}
