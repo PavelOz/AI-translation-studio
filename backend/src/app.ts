@@ -5,6 +5,7 @@ import compression from 'compression';
 import { apiV1 } from './api/v1';
 import { errorHandler } from './utils/errorHandler';
 import { logger } from './utils/logger';
+import { billingContextMiddleware } from './middleware/billingContext.middleware';
 
 export const createApp = () => {
   const app = express();
@@ -18,6 +19,7 @@ export const createApp = () => {
   );
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: true }));
+  app.use(billingContextMiddleware);
   app.use(compression());
   app.use((req, _res, next) => {
     logger.debug({ method: req.method, url: req.originalUrl }, 'Incoming request');

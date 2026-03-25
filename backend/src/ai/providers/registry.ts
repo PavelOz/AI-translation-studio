@@ -4,12 +4,15 @@ import { OpenAIProvider } from './openai.provider';
 import { YandexProvider } from './yandex.provider';
 import { DeepSeekProvider } from './deepseek.provider';
 import type { AIProvider } from './types';
+import { wrapProviderInstanceWithBilling } from './billingWrappedProvider';
+
+const wrap = <T extends AIProvider>(p: T) => wrapProviderInstanceWithBilling(p);
 
 const providers: Record<string, AIProvider> = {
-  gemini: new GeminiProvider(env.geminiApiKey, env.geminiModel),
-  openai: new OpenAIProvider(env.openAiApiKey, env.openAiModel),
-  yandex: new YandexProvider(env.yandexApiKey, env.yandexModel),
-  deepseek: new DeepSeekProvider(env.deepseekApiKey, env.deepseekModel),
+  gemini: wrap(new GeminiProvider(env.geminiApiKey, env.geminiModel)),
+  openai: wrap(new OpenAIProvider(env.openAiApiKey, env.openAiModel)),
+  yandex: wrap(new YandexProvider(env.yandexApiKey, env.yandexModel)),
+  deepseek: wrap(new DeepSeekProvider(env.deepseekApiKey, env.deepseekModel)),
 };
 
 export const getProvider = (name?: string, apiKey?: string, yandexFolderId?: string): AIProvider => {
@@ -25,13 +28,13 @@ export const getProvider = (name?: string, apiKey?: string, yandexFolderId?: str
     
     switch (normalized) {
       case 'gemini':
-        return new GeminiProvider(apiKey, env.geminiModel);
+        return wrap(new GeminiProvider(apiKey, env.geminiModel));
       case 'openai':
-        return new OpenAIProvider(apiKey, env.openAiModel);
+        return wrap(new OpenAIProvider(apiKey, env.openAiModel));
       case 'yandex':
-        return new YandexProvider(apiKey, env.yandexModel, yandexFolderId);
+        return wrap(new YandexProvider(apiKey, env.yandexModel, yandexFolderId));
       case 'deepseek':
-        return new DeepSeekProvider(apiKey, env.deepseekModel);
+        return wrap(new DeepSeekProvider(apiKey, env.deepseekModel));
       default:
         return defaultProvider;
     }

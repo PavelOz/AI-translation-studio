@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "currency": "USD",
+  "defaultPer1M": {
+    "input": 1.0,
+    "output": 3.0,
+    "tier": "standard"
+  },
+  "models": {
+    "openai:gpt-4o-mini": { "inputPer1M": 0.15, "outputPer1M": 0.6, "tier": "standard" },
+    "openai:gpt-4o": { "inputPer1M": 2.5, "outputPer1M": 10.0, "tier": "expensive" },
+    "openai:gpt-4-turbo": { "inputPer1M": 10.0, "outputPer1M": 30.0, "tier": "expensive" },
+    "openai:o1-preview": { "inputPer1M": 15.0, "outputPer1M": 60.0, "tier": "expensive" },
+    "gemini:gemini-pro": { "inputPer1M": 0.5, "outputPer1M": 1.5, "tier": "standard" },
+    "gemini:gemini-1.5-flash": { "inputPer1M": 0.075, "outputPer1M": 0.3, "tier": "standard" },
+    "gemini:gemini-1.5-pro": { "inputPer1M": 1.25, "outputPer1M": 5.0, "tier": "expensive" },
+    "gemini:gemini-2.0-flash-exp": { "inputPer1M": 0.1, "outputPer1M": 0.4, "tier": "standard" },
+    "gemini:gemini-2.5-flash": { "inputPer1M": 0.15, "outputPer1M": 0.6, "tier": "standard" },
+    "gemini:gemini-2.5-pro": { "inputPer1M": 1.25, "outputPer1M": 10.0, "tier": "expensive" },
+    "yandex:yandexgpt-lite": { "inputPer1M": 0.2, "outputPer1M": 0.2, "tier": "standard" },
+    "yandex:yandexgpt-pro": { "inputPer1M": 0.8, "outputPer1M": 0.8, "tier": "expensive" },
+    "deepseek:deepseek-chat": { "inputPer1M": 0.14, "outputPer1M": 0.28, "tier": "standard" },
+    "deepseek:deepseek-reasoner": { "inputPer1M": 0.55, "outputPer1M": 2.19, "tier": "expensive" }
+  }
+}

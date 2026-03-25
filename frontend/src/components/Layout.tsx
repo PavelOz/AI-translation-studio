@@ -2,6 +2,7 @@ import { Link, useLocation } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
 import { useAuth } from '../hooks/useAuth';
 import DatabaseStatusIndicator from './DatabaseStatusIndicator';
+import BillingStatusBar from './BillingStatusBar';
 
 export default function Layout({ children }: { children: React.ReactNode }) {
   const location = useLocation();
@@ -43,6 +44,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               </div>
             </div>
             <div className="flex items-center space-x-4">
+              <BillingStatusBar />
               <DatabaseStatusIndicator />
               <span className="text-sm text-gray-700">{user?.name}</span>
               <button

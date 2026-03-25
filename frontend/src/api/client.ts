@@ -25,10 +25,19 @@ apiClient.interceptors.request.use(
 // Response interceptor to handle errors
 apiClient.interceptors.response.use(
   (response) => response,
-  (error) => {
+  async (error) => {
     if (error.response?.status === 401) {
       useAuthStore.getState().logout();
       window.location.href = '/login';
+      return Promise.reject(error);
+    }
+    if (error.response?.status === 402) {
+      const { default: toast } = await import('react-hot-toast');
+      const msg =
+        error.response?.data?.message ||
+        error.response?.data?.error ||
+        'Daily AI usage cap reached.';
+      toast.error(msg);
     }
     return Promise.reject(error);
   },

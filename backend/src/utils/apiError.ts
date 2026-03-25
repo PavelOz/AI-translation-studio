@@ -26,6 +26,10 @@ export class ApiError extends Error {
     return new ApiError(409, message);
   }
 
+  static paymentRequired(message: string) {
+    return new ApiError(402, message);
+  }
+
   static internalServerError(message = 'Internal server error') {
     return new ApiError(500, message);
   }

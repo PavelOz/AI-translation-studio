@@ -27,3 +27,12 @@ export const verifyToken = (token: string) => {
   }
 };
 
+/** Same as verifyToken but returns null for invalid/expired tokens (for optional auth paths). */
+export const tryVerifyToken = (token: string): TokenPayload | null => {
+  try {
+    return jwt.verify(token, env.jwtSecret) as TokenPayload;
+  } catch {
+    return null;
+  }
+};
+

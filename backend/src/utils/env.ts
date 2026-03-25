@@ -8,6 +8,11 @@ const numberFromEnv = (value: string | undefined, fallback: number): number => {
   return Number.isNaN(parsed) ? fallback : parsed;
 };
 
+const boolFromEnv = (value: string | undefined, fallback: boolean): boolean => {
+  if (value === undefined || value === '') return fallback;
+  return value === 'true' || value === '1' || value.toLowerCase() === 'yes';
+};
+
 export const env = {
   nodeEnv: process.env.NODE_ENV ?? 'development',
   port: numberFromEnv(process.env.PORT, 4000),
@@ -32,6 +37,24 @@ export const env = {
   azureTranslationKey: process.env.AZURE_TRANSLATION_KEY ?? '',
   useLibreOffice: process.env.USE_LIBRE_OFFICE === 'true',
   libreOfficePath: process.env.LIBRE_OFFICE_PATH ?? 'libreoffice',
+
+  /** Billing / usage caps (optional; off by default). */
+  billingEnabled: boolFromEnv(process.env.BILLING_ENABLED, false),
+  billingDailyCapUsd: numberFromEnv(process.env.BILLING_DAILY_CAP_USD, 1.5),
+  /** Below this remaining balance (USD), expensive models are blocked for non–power users. */
+  billingProMinRemainingUsd: numberFromEnv(process.env.BILLING_PRO_MIN_REMAINING_USD, 0.5),
+  /** Warn in logs when estimated input tokens exceed this (soft guard). */
+  billingWarnInputTokens: numberFromEnv(process.env.BILLING_WARN_INPUT_TOKENS, 50_000),
+  /** Reject requests when combined prompt length exceeds this (chars). */
+  billingMaxPromptChars: numberFromEnv(process.env.BILLING_MAX_PROMPT_CHARS, 2_000_000),
+  /**
+   * Roles that may use expensive models when remaining balance is below billingProMinRemainingUsd.
+   * Comma-separated UserRole values, e.g. ADMIN,PROJECT_MANAGER
+   */
+  billingPowerRoles: (process.env.BILLING_POWER_ROLES ?? 'ADMIN')
+    .split(',')
+    .map((r) => r.trim().toUpperCase())
+    .filter(Boolean),
 };
 
 if (!env.databaseUrl) {
