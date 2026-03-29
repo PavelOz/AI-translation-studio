@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { documentsApi } from '../../api/documents.api';
+import { billingApi } from '../../api/billing.api';
 import { segmentsApi } from '../../api/segments.api';
 import apiClient from '../../api/client';
 import toast from 'react-hot-toast';
@@ -53,14 +54,21 @@ export default function EditorToolbar({
 
   const handleBatchTranslate = async () => {
     try {
-      const options: any = {
+      const options: {
+        mode: 'translate_all' | 'pre_translate';
+        applyTm: boolean;
+        minScore: number;
+        glossaryMode: GlossaryMode;
+        mtOnlyEmpty?: boolean;
+        mtOnlyNonEmpty?: boolean;
+        rewriteNonConfirmed?: boolean;
+      } = {
         mode: 'pre_translate',
         applyTm: true,
         minScore: 70,
         glossaryMode,
       };
 
-      // Apply filter based on selection
       if (batchFilterMode === 'empty') {
         options.mtOnlyEmpty = true;
       } else if (batchFilterMode === 'nonEmpty') {
@@ -69,6 +77,32 @@ export default function EditorToolbar({
         options.rewriteNonConfirmed = true;
       } else if (batchFilterMode === 'all') {
         options.mode = 'translate_all';
+      }
+
+      const estimate = await billingApi
+        .estimateTranslation({
+          workflow: 'batch',
+          documentId,
+          mode: options.mode,
+          options: {
+            applyTm: options.applyTm,
+            minScore: options.minScore,
+            mtOnlyEmpty: options.mtOnlyEmpty,
+            mtOnlyNonEmpty: options.mtOnlyNonEmpty,
+            rewriteNonConfirmed: options.rewriteNonConfirmed,
+            glossaryMode: options.glossaryMode,
+          },
+        })
+        .catch(() => null);
+
+      if (estimate?.billingEnabled && estimate.mayExceedCap) {
+        const ok = window.confirm(
+          `Estimated cost for batch MT: about $${estimate.estimatedCostUsd.toFixed(4)}.\n` +
+            `Daily cap: $${estimate.dailyCapUsd.toFixed(2)} · Spent today: $${estimate.spentTodayUsd.toFixed(4)}.\n` +
+            `Remaining after (estimate): $${estimate.remainingAfterEstimateUsd.toFixed(4)}.\n\n` +
+            `This may exceed your daily cap. Continue?`,
+        );
+        if (!ok) return;
       }
 
       const response = await documentsApi.batchTranslate(documentId, options);

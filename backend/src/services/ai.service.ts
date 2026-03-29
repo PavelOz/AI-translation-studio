@@ -798,7 +798,7 @@ const filterGlossaryBySourceText = (
   });
 };
 
-const buildAiContext = async (
+export const buildAiContext = async (
   projectId: string,
   documentSourceLocale?: string,
   documentTargetLocale?: string,
@@ -1126,7 +1126,7 @@ const MAX_UNIT_CHARS = 8000;
 /**
  * Queued entry shape used when building translation units (same as pretranslate queuedForAI elements).
  */
-type QueuedEntry = {
+export type QueuedEntry = {
   segment: { id: string; sourceText: string; segmentIndex: number };
   previous?: { sourceText: string } | null;
   next?: { sourceText: string } | null;
@@ -1176,7 +1176,7 @@ function looksLikeListClosingItem(text: string): boolean {
  * Build translation units from queued segments: list blocks (lead-in + items) are grouped,
  * other segments are single-segment units. Oversized blocks are split by max segments/chars.
  */
-function buildTranslationUnits(
+export function buildTranslationUnits(
   queued: QueuedEntry[],
   options: { maxUnitSegments?: number; maxUnitChars?: number } = {},
 ): QueuedEntry[][] {
@@ -5269,4 +5269,3 @@ export const getSegmentDebugInfo = async (segmentId: string) => {
     },
   };
 };
- 

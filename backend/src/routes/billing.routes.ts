@@ -4,12 +4,47 @@ import type { AuthenticatedRequest } from '../utils/authMiddleware';
 import { requireAdmin, requireAuth } from '../utils/authMiddleware';
 import { getBillingTodayForUser } from '../services/billing-manager.service';
 import { getBillingConfig, getBillingSettingsForAdmin, updateBillingSettings } from '../services/billing-config.service';
+import {
+  estimatePretranslateTranslationCost,
+  estimateBatchTranslationCost,
+} from '../services/translation-cost-estimate.service';
 import { readBundledPricingFile, writeBundledPricingFile } from '../services/billing-pricing.fs';
 import { pricingFileSchema } from '../services/billing-pricing.schema';
 import { invalidateBundledFileCache } from '../services/billing-pricing.runtime';
 import { ApiError } from '../utils/apiError';
 
 export const billingRoutes = Router();
+
+const estimateTranslationBodySchema = z.discriminatedUnion('workflow', [
+  z.object({
+    workflow: z.literal('pretranslate'),
+    documentId: z.string().uuid(),
+    applyAiToLowMatches: z.boolean().optional(),
+    applyAiToEmptyOnly: z.boolean().optional(),
+    rewriteConfirmed: z.boolean().optional(),
+    rewriteNonConfirmed: z.boolean().optional(),
+    useCritic: z.boolean().optional(),
+    provider: z.enum(['gemini', 'openai', 'yandex', 'deepseek']).optional(),
+    model: z.string().optional(),
+    skipTm: z.boolean().optional(),
+  }),
+  z.object({
+    workflow: z.literal('batch'),
+    documentId: z.string().uuid(),
+    mode: z.enum(['translate_all', 'pre_translate']),
+    options: z
+      .object({
+        applyTm: z.boolean().optional(),
+        minScore: z.number().min(0).max(100).optional(),
+        mtOnlyEmpty: z.boolean().optional(),
+        mtOnlyNonEmpty: z.boolean().optional(),
+        rewriteNonConfirmed: z.boolean().optional(),
+        useCritic: z.boolean().optional(),
+        glossaryMode: z.enum(['off', 'strict_source', 'strict_semantic']).optional(),
+      })
+      .optional(),
+  }),
+]);
 
 const settingsBodySchema = z.object({
   enabled: z.boolean(),
@@ -89,4 +124,36 @@ billingRoutes.get('/today', requireAuth, (req: AuthenticatedRequest, res) => {
     minRemainingForExpensiveUsd: cfg.proMinRemainingUsd,
     powerRoles: cfg.powerRoles,
   });
+});
+
+billingRoutes.post('/estimate-translation', requireAuth, async (req: AuthenticatedRequest, res, next) => {
+  try {
+    const parsed = estimateTranslationBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      return next(
+        ApiError.badRequest(
+          parsed.error.issues.map((i: z.ZodIssue) => i.message).join('; '),
+        ),
+      );
+    }
+    const userId = req.user!.userId;
+    const payload = parsed.data;
+    if (payload.workflow === 'pretranslate') {
+      const est = await estimatePretranslateTranslationCost(payload.documentId, userId, {
+        applyAiToLowMatches: payload.applyAiToLowMatches,
+        applyAiToEmptyOnly: payload.applyAiToEmptyOnly,
+        rewriteConfirmed: payload.rewriteConfirmed,
+        rewriteNonConfirmed: payload.rewriteNonConfirmed,
+        useCritic: payload.useCritic,
+        provider: payload.provider,
+        model: payload.model,
+        skipTm: payload.skipTm,
+      });
+      return res.json(est);
+    }
+    const est = await estimateBatchTranslationCost(payload.documentId, userId, payload.mode, payload.options);
+    res.json(est);
+  } catch (error) {
+    next(error);
+  }
 });

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useQuery } from 'react-query';
 import { documentsApi } from '../../api/documents.api';
 import { aiApi } from '../../api/ai.api';
+import { billingApi, type TranslationCostEstimateResult } from '../../api/billing.api';
 import toast from 'react-hot-toast';
 import type { GlossaryMode } from '../../types/glossary';
 
@@ -56,6 +57,9 @@ export default function PretranslateModal({
   const logContainerRef = useRef<HTMLDivElement>(null);
   const [showSuccessDialog, setShowSuccessDialog] = useState(false);
   const [successSummary, setSuccessSummary] = useState<{ tmApplied: number; aiApplied: number } | null>(null);
+  const [costEstimate, setCostEstimate] = useState<TranslationCostEstimateResult | null>(null);
+  const [costEstimateLoading, setCostEstimateLoading] = useState(false);
+  const [costEstimateError, setCostEstimateError] = useState<string | null>(null);
 
   // Reset progress when modal opens/closes
   useEffect(() => {
@@ -65,6 +69,9 @@ export default function PretranslateModal({
       setIsProcessing(false);
       setShowSuccessDialog(false);
       setSuccessSummary(null);
+      setCostEstimate(null);
+      setCostEstimateError(null);
+      setCostEstimateLoading(false);
       isCancelledRef.current = false;
       cancelledToastShownRef.current = false;
       if (progressIntervalRef.current) {
@@ -101,6 +108,49 @@ export default function PretranslateModal({
       setOverrideTemperature(aiSettings.temperature);
     }
   }, [aiSettings, overrideAiConfig]);
+
+  useEffect(() => {
+    if (!isOpen || !documentId || isProcessing) return;
+    setCostEstimateLoading(true);
+    setCostEstimateError(null);
+    const timer = window.setTimeout(() => {
+      billingApi
+        .estimateTranslation({
+          workflow: 'pretranslate',
+          documentId,
+          applyAiToLowMatches,
+          applyAiToEmptyOnly,
+          rewriteConfirmed,
+          rewriteNonConfirmed,
+          useCritic,
+          skipTm,
+          ...(overrideAiConfig && overrideProvider
+            ? { provider: overrideProvider as 'gemini' | 'openai' | 'yandex' | 'deepseek' }
+            : {}),
+          ...(overrideAiConfig && overrideModel ? { model: overrideModel } : {}),
+        })
+        .then(setCostEstimate)
+        .catch((err: { response?: { data?: { message?: string } } }) => {
+          setCostEstimate(null);
+          setCostEstimateError(err.response?.data?.message || 'Could not estimate cost.');
+        })
+        .finally(() => setCostEstimateLoading(false));
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [
+    isOpen,
+    documentId,
+    isProcessing,
+    applyAiToLowMatches,
+    applyAiToEmptyOnly,
+    rewriteConfirmed,
+    rewriteNonConfirmed,
+    useCritic,
+    skipTm,
+    overrideAiConfig,
+    overrideProvider,
+    overrideModel,
+  ]);
 
   // Auto-scroll log container to bottom when new logs arrive
   useEffect(() => {
@@ -269,15 +319,46 @@ export default function PretranslateModal({
   }, []);
 
   const handlePretranslate = async () => {
+    let latestEstimate: TranslationCostEstimateResult | null = null;
+    try {
+      latestEstimate = await billingApi.estimateTranslation({
+        workflow: 'pretranslate',
+        documentId,
+        applyAiToLowMatches,
+        applyAiToEmptyOnly,
+        rewriteConfirmed,
+        rewriteNonConfirmed,
+        useCritic,
+        skipTm,
+        ...(overrideAiConfig && overrideProvider
+          ? { provider: overrideProvider as 'gemini' | 'openai' | 'yandex' | 'deepseek' }
+          : {}),
+        ...(overrideAiConfig && overrideModel ? { model: overrideModel } : {}),
+      });
+      setCostEstimate(latestEstimate);
+    } catch {
+      /* allow run if estimate fails */
+    }
+
+    if (latestEstimate?.billingEnabled && latestEstimate.mayExceedCap) {
+      const ok = window.confirm(
+        `Estimated cost for this run: about $${latestEstimate.estimatedCostUsd.toFixed(4)}.\n` +
+          `Daily cap: $${latestEstimate.dailyCapUsd.toFixed(2)} · Spent today: $${latestEstimate.spentTodayUsd.toFixed(4)}.\n` +
+          `Remaining after (estimate): $${latestEstimate.remainingAfterEstimateUsd.toFixed(4)}.\n\n` +
+          `This may exceed your daily cap and block further AI until the cap resets. Continue?`,
+      );
+      if (!ok) return;
+    }
+
     // Reset all state BEFORE starting new pretranslation
     setProgress(null);
     setIsProcessing(false); // Set to false first to stop any existing polling
     isCancelledRef.current = false;
     cancelledToastShownRef.current = false;
-    
+
     // Small delay to ensure state is reset and any existing polling stops
     await new Promise(resolve => setTimeout(resolve, 100));
-    
+
     // Now start the new pretranslation
     setIsProcessing(true);
 
@@ -381,6 +462,46 @@ export default function PretranslateModal({
         <p className="text-xs text-amber-700 mb-4" title="DNA is validated when translation starts; invalid DNA will block AI translation.">
           Validate Document DNA before starting (Document → DNA tab). Invalid or empty DNA may cause translation errors or block AI translation.
         </p>
+
+        {!isProcessing && (
+          <div className="mb-4 p-3 rounded-lg border border-gray-200 bg-gray-50 text-sm text-gray-800">
+            <div className="font-semibold text-gray-900 mb-1">Estimated API cost (before run)</div>
+            {costEstimateLoading && <p className="text-xs text-gray-600">Calculating estimate…</p>}
+            {costEstimateError && !costEstimateLoading && (
+              <p className="text-xs text-amber-800">{costEstimateError}</p>
+            )}
+            {costEstimate && !costEstimateLoading && (
+              <>
+                {!costEstimate.billingEnabled ? (
+                  <p className="text-xs text-gray-600">Daily billing cap is disabled for this server.</p>
+                ) : (
+                  <div className="space-y-1 text-xs">
+                    <p>
+                      ~<span className="font-mono font-medium">${costEstimate.estimatedCostUsd.toFixed(4)}</span> estimated
+                      ({costEstimate.segmentsQueuedForAi} segment{costEstimate.segmentsQueuedForAi === 1 ? '' : 's'} queued for
+                      AI, {costEstimate.tmResolvedWithoutAi} TM-only)
+                    </p>
+                    <p className="text-gray-600">
+                      Today: ${costEstimate.spentTodayUsd.toFixed(4)} of ${costEstimate.dailyCapUsd.toFixed(2)} cap ·
+                      remaining after run ~&nbsp;
+                      <span
+                        className={costEstimate.mayExceedCap ? 'text-amber-800 font-medium' : 'text-gray-800'}
+                      >
+                        ${costEstimate.remainingAfterEstimateUsd.toFixed(4)}
+                      </span>
+                    </p>
+                    {costEstimate.mayExceedCap && (
+                      <p className="text-amber-900 font-medium">
+                        This run may exceed your daily cap. You will be asked to confirm when you start.
+                      </p>
+                    )}
+                  </div>
+                )}
+                <p className="text-[11px] text-gray-500 mt-2 leading-snug">{costEstimate.disclaimer}</p>
+              </>
+            )}
+          </div>
+        )}
 
         {/* AI Configuration */}
         {aiSettings && (
